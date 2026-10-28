@@ -1,0 +1,6 @@
+# Windows, second run (the window w1): it shows only the tab that's its; closing it hands the tab back.
+waitlabel tab travels
+waitidle
+dump layout
+capture out/w1.png
+exit

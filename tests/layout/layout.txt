@@ -1,0 +1,77 @@
+# Layout: a second tab, dragged to the pane's right edge (a split), the splitter dragged, a tab closed.
+waitfor λ
+type title one
+key Enter
+key Ctrl+Shift+T
+waitfor λ
+type title two
+key Enter
+waitlabel tab two
+sleep 500
+waitidle
+dump layout
+capture out/two_tabs.png
+
+# --- drag tab "two" out of the strip onto the pane's right button: a new pane on the right ---
+cursorui tab two
+wait 1
+lmb down
+cursorby 0 80
+wait 2
+waitlabel drop marker right
+cursorui drop marker right
+wait 30
+capture out/drag_preview.png
+lmb up
+waitidle
+dump layout
+capture out/dragged.png
+
+# --- the splitter between them, 200 px to the left ---
+cursorui splitter 1 left
+wait 1
+lmb down
+cursorby -200 0
+wait 1
+lmb up
+waitidle
+dump layout
+capture out/splitter.png
+
+# --- File Pilot's drop markers: a new tab in the left pane, dragged onto the right pane's "bottom" marker ---
+cursorpane 0
+wait 1
+lmb down
+lmb up
+key Ctrl+Shift+T
+waitfor λ
+type title three
+key Enter
+waitlabel tab three
+sleep 500
+waitidle
+cursorui tab three
+wait 1
+lmb down
+cursorby 0 80
+cursorpane 1
+wait 2
+waitlabel drop marker bottom
+cursorui drop marker bottom
+wait 30
+capture out/markers.png
+lmb up
+waitidle
+dump layout
+capture out/marker_drop.png
+
+# --- close "two" with its close button: back to one pane ---
+cursorui close tab two
+wait 1
+lmb down
+lmb up
+waitidle
+dump layout
+dump tabs
+capture out/closed.png
+exit

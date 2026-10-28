@@ -1,0 +1,12 @@
+waitfor λ
+type title survivor
+key Enter
+waitlabel tab survivor
+crashserver
+sleep 500
+capture gone.png
+sleep 4000
+waitfor λ
+dump tabs
+dump layout
+exit

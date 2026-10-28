@@ -1,0 +1,2 @@
+# moss settings: "key = value" lines (font = a font name, font_size, opacity, theme).
+opacity = 95

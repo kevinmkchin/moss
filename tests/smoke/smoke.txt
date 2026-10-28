@@ -1,0 +1,17 @@
+# Smoke: the window comes up with a shell, takes typing, splits, and captures.
+waitfor λ
+type echo %OS%-ok
+key Enter
+waitfor Windows_NT-ok
+sleep 500
+waitidle
+dump screen
+capture out/one.png
+key Alt+Shift+=
+waitfor λ pane=1
+dump layout
+waitidle
+capture out/split.png
+stats
+profile 60
+exit

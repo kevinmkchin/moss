@@ -1,0 +1,42 @@
+# Search: the bar on the focused terminal; matches in the screen and the scrollback marked, "n of m". Ctrl+/ as
+# vim's /: Enter keeps the newest, n steps to older ones (scrolling back), N newer. Ctrl+F: Enter steps older,
+# Shift+Enter newer, the bar keeps the keyboard. An uppercase letter matches case; Esc closes and the marks go.
+waitfor λ
+type for /l %i in (1,1,60) do @echo line %i Needle
+key Enter
+waitfor line 60 Needle
+type echo needle lower
+key Enter
+waitfor needle lower
+sleep 500
+key Ctrl+/
+waitlabel find bar
+type needle
+waitlabel find count
+sleep 500
+waitidle
+capture out/found.png
+key Enter
+key n
+key n
+sleep 1500
+waitidle
+capture out/older.png
+key Ctrl+F
+type Needle
+sleep 1500
+waitidle
+capture out/case.png
+key Enter
+key Enter
+key Enter
+key Shift+Enter
+sleep 1500
+waitidle
+capture out/stepped.png
+key Escape
+waitgone find bar
+sleep 300
+waitidle
+capture out/closed.png
+exit

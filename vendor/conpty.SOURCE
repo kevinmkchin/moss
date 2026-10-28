@@ -1,0 +1,9 @@
+ConPTY 1.25.260930003: conpty.dll and OpenConsole.exe (x64), unmodified, from the NuGet package
+Microsoft.Windows.Console.ConPTY 1.25.260930003 (https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY),
+built from https://github.com/microsoft/terminal.
+
+Licensed under MIT (vendor/conpty/LICENSE; keep the notice with any copy we ship).
+
+moss's server loads conpty.dll from next to moss.exe (code/term_pty.cpp, Conpty()); it runs OpenConsole.exe from
+the same folder as each tab's console host, several times faster than the system's conhost (tools/bench).
+To upgrade: take the new package's runtimes/win-x64/native/conpty.dll and build/native/runtimes/x64/OpenConsole.exe.

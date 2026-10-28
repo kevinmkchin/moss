@@ -1,0 +1,190 @@
+# The file browser: each tab flips between its shell and a browser of its folder (Ctrl+Shift+E). Browsing moves
+# the shell along when it's idle; while a program runs the browser is read-only and the shell stays put.
+waitfor λ
+type python make_tree.py
+key Enter
+waitfor tree-made
+type cd tree
+key Enter
+waitfor browser\tree
+
+# --- flip to the browser: the shell's folder, folders first ---
+key Ctrl+Shift+E
+waitlabel readme.md
+waitidle
+dump layout
+capture out/browser.png
+
+# --- into a folder by key, the filter by typing, out by Backspace ---
+key Enter
+waitlabel inner.txt
+waitidle
+dump layout
+type ix
+waitidle
+dump layout
+capture out/filter.png
+key Escape
+key Backspace
+waitlabel readme.md
+waitidle
+dump layout
+
+# --- several rows: Shift+arrows from the anchor, Ctrl+C copies them all, Escape lets go ---
+key Home
+key Shift+Down
+key Shift+Down
+waitidle
+dump layout
+capture out/multi.png
+key Ctrl+C
+key Escape
+waitidle
+dump layout
+
+# --- column heads sort (size: biggest first, again: smallest), Ctrl+H leaves hidden files out ---
+cursorui sort Size
+wait 1
+lmb down
+lmb up
+waitidle
+dump layout
+capture out/by_size.png
+cursorui sort Size
+wait 1
+lmb down
+lmb up
+waitidle
+dump layout
+key Ctrl+H
+waitgone .hidden
+waitidle
+dump layout
+key Ctrl+H
+cursorui sort Name
+wait 1
+lmb down
+lmb up
+waitlabel .hidden
+waitidle
+dump layout
+
+# --- a file dropped in from another program is copied into the folder ---
+cursorui readme.md
+drop outside/drop_me.txt
+waitlabel drop_me.txt
+waitidle
+dump layout
+
+# --- a drag out of the list (the log says what went: OLE's drag doesn't run headless) ---
+cursorui readme.md
+wait 1
+lmb down
+wait 1
+cursorby 0 30
+wait 2
+lmb up
+waitidle
+
+# --- a double click opens a folder; flipping back moves the idle shell there ---
+cursorui beta
+wait 1
+lmb down
+wait 1
+lmb up
+wait 2
+lmb down
+wait 1
+lmb up
+waitlabel data.bin
+sleep 1000
+waitidle
+capture out/beta.png
+key Escape
+waitfor tree\beta
+waitidle
+dump screen
+capture out/followed.png
+
+# --- changes while idle: rename (F2 selects the name up to its extension), a new folder, delete; the watcher
+#     brings each into the list ---
+key Ctrl+Shift+E
+waitlabel data.bin
+key F2
+sleep 1000
+waitidle
+capture out/rename.png
+type renamed
+key Enter
+waitlabel renamed.bin
+key Ctrl+Shift+N
+waitlabel New folder
+waitidle
+dump layout
+key Delete
+waitgone New folder
+waitidle
+dump layout
+capture out/changed.png
+key Escape
+waitidle
+type python ../../touch.py
+key Enter
+waitfor touched
+
+# --- busy: a program runs, the browser goes read-only; it browses on its own and refuses changes ---
+type cls
+key Enter
+waitfor λ
+type python ../../wait.py
+key Enter
+waitfor waiting-for-enter
+sleep 3500
+key Ctrl+Shift+E
+waitlabel browser read-only
+key Backspace
+waitlabel alpha
+key Delete
+waitlabel browser notice
+sleep 1500
+waitidle
+dump layout
+capture out/readonly.png
+cursorui gamma
+drop outside/drop_me.txt
+wait 10
+dump layout
+key Ctrl+Shift+E
+waitidle
+key Enter
+waitfor wait-done
+sleep 500
+waitidle
+dump screen
+capture out/stayed.png
+
+# --- the face button (right end of the tab strip) flips too ---
+sleep 4000
+cursorui face 0
+wait 1
+lmb down
+lmb up
+waitlabel crumb tree
+cursor 600 790
+sleep 1500
+waitidle
+capture out/face.png
+cursorui face 0
+wait 1
+lmb down
+lmb up
+waitidle
+dump layout
+# --- dropped on the shell, the paths are typed at the prompt ---
+cursorpane 0
+drop outside/drop_me.txt
+waitfor drop_me.txt
+sleep 1000
+waitidle
+capture out/dropped_path.png
+exit

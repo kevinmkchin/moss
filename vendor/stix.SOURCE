@@ -1,0 +1,3 @@
+STIX Two Text SemiBold (STIXTwoText-SemiBold.otf), from the CTAN package stix2-otf
+(https://ctan.org/pkg/stix2-otf; the STIX fonts: https://github.com/stipub/stixfonts). SIL Open Font License 1.1
+(OFL.txt). Used only when building: tools/make_icon.cpp draws the icon's lambda with it. Not shipped.

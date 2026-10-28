@@ -1,0 +1,17 @@
+# Windows, first run (the main window): a second tab moves to a new window (`tear_off`, headless names it w1 and
+# opens nothing); the main window keeps the first.
+waitfor λ
+type title stays
+key Enter
+key Ctrl+Shift+T
+waitfor λ
+type title travels
+key Enter
+waitlabel tab travels
+cmd tear_off
+waitgone tab travels
+waitidle
+dump layout
+dump tabs
+capture out/main_after_tear.png
+exit

@@ -1,0 +1,19 @@
+# A background image: across both panes (one image over the pane area, cropped to fill it), seen through the
+# terminals' default background at the default strength; text and the tab strips stay solid. Then the settings rows.
+waitfor λ
+type python make_bg.py
+key Enter
+waitfor bg-made
+background bg.png
+key Alt+Shift+=
+waitfor λ pane=1
+sleep 500
+waitidle
+capture out/background.png
+cmd settings
+type background
+sleep 300
+waitidle
+capture out/settings.png
+key Escape
+exit

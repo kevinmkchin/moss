@@ -1,0 +1,36 @@
+# Terminal features: a tab's right-click menu and its color, a paste of two lines (asked first), the scrollbar, clearing the scrollback.
+waitfor λ
+type for /l %i in (1,1,80) do @echo line %i
+key Enter
+waitfor line 80
+sleep 500
+cursor 600 400
+wheel 5
+sleep 500
+waitidle
+capture out/scrollbar.png
+key Ctrl+Shift+K
+key Shift+End
+sleep 500
+waitidle
+capture out/cleared.png
+clipboard echo pasted-one\necho pasted-two\n
+key Ctrl+Shift+V
+waitlabel paste anyway
+sleep 300
+waitidle
+capture out/paste_ask.png
+key Enter
+waitfor pasted-two
+cursor 420 17
+rmb down
+rmb up
+waitlabel menu Rename
+sleep 300
+cursorui tab color 2
+lmb down
+lmb up
+sleep 500
+waitidle
+capture out/tab_color.png
+exit

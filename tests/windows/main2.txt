@@ -1,0 +1,9 @@
+# Windows, third run (the main window again): the handed-back tab is in it.
+waitlabel tab travels
+waitlabel tab stays
+waitidle
+dump layout
+dump tabs
+capture out/main_back.png
+quitserver
+exit

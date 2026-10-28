@@ -1,0 +1,25 @@
+# Ctrl+click in a terminal: a path with :line:col opens the file (relative to the tab's folder), a script is only
+# shown in Explorer, an OSC 8 link asks the server for its target, a path that isn't there does nothing. Headless
+# runs log what they would open.
+waitfor λ
+type python links.py
+key Enter
+waitfor gone missing
+sleep 500
+mods ctrl
+cursortext todo.md:3:2
+lmb down
+lmb up
+cursortext go.bat
+lmb down
+lmb up
+cursortext the notes
+waitidle
+capture out/link_hover.png
+lmb down
+lmb up
+cursortext nothere.txt
+lmb down
+lmb up
+sleep 500
+exit

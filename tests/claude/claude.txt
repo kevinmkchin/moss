@@ -1,0 +1,20 @@
+# Real Claude Code in an agent tab: one prompt, its answer, then /exit (always).
+waitfor λ
+key Ctrl+Shift+A
+waitfor auto mode timeout=30000
+type Reply with just the word pong, nothing else.
+sleep 400
+key Enter
+sleep 1500
+dump tabs
+waitfor pong timeout=60000
+sleep 2000
+dump tabs
+waitidle
+capture out/claude_answer.png
+type /exit
+sleep 400
+key Enter
+waitfor λ timeout=20000
+dump tabs
+exit

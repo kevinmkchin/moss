@@ -1,0 +1,85 @@
+# Terminal: colors and attributes, wide characters and emoji, scrollback with the wheel, selection, the alt screen.
+waitfor λ
+type python colors.py
+key Enter
+waitfor colors-done
+waitidle
+dump screen
+capture out/colors.png
+
+# --- scrollback: 200 lines, the wheel goes back, typing comes back to live ---
+type cls
+key Enter
+waitfor λ
+type python scroll.py
+key Enter
+waitfor scroll-done
+waitfor λ
+sleep 300
+waitidle
+cursorpane 0
+wheel 10
+waitidle
+dump screen
+capture out/scrolled.png
+key Shift+End
+waitidle
+dump screen
+
+# --- Ctrl+Shift+Up: the command before at the top (the prompt marks itself), Ctrl+Shift+Down: live again ---
+key Ctrl+Shift+Up
+waitidle
+dump screen
+capture out/prev_command.png
+key Ctrl+Shift+Down
+sleep 300
+waitidle
+dump screen
+
+# --- selection: a drag over "scroll-done" copies it ---
+cursorpane 0 0 0
+wait 1
+lmb down
+cursorpane 0 30 0
+wait 1
+lmb up
+waitidle
+capture out/selection.png
+
+# --- Ctrl+click opens a link; Ctrl+= makes the text bigger (and Ctrl+0 back) ---
+type cls
+key Enter
+waitfor λ
+type echo https://example.com/docs
+key Enter
+waitfor example.com/docs
+waitidle
+cursortext https://example.com/docs
+cursorby 0 0
+mods ctrl
+wait 1
+lmb down
+lmb up
+mods none
+wait 2
+key Ctrl+=
+waitidle
+capture out/zoomed.png
+key Ctrl+0
+waitidle
+key Ctrl+Alt+Shift+F12
+wait 5
+capture out/overlay_varies.png
+key Ctrl+Alt+Shift+F12
+
+# --- the alternate screen ---
+type python altscreen.py
+key Enter
+waitfor alt-ready
+waitidle
+dump screen
+capture out/altscreen.png
+key Enter
+waitfor alt-done
+dump screen
+exit

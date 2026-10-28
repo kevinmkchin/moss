@@ -1,0 +1,58 @@
+# Opening files: a picture (Enter or a double click in the browser, `term view` in a shell) comes up in the tab's
+# picture view, the folder's other pictures a key away (Explorer's order: a1, a2, a10), Esc back; a text file opens in
+# the terminal editor in the tab (nvim on this machine).
+waitfor λ
+type python make_pics.py
+key Enter
+waitfor pics-made
+type cd pics
+key Enter
+waitfor view\pics
+key Ctrl+Shift+E
+waitlabel a1.png
+
+# --- Enter on a picture: the view; Right steps, wraps round; Esc back to the browser ---
+key Enter
+waitlabel view a1.png
+waitidle
+capture out/a1.png
+key Right
+waitlabel view a2.png
+key Right
+waitlabel view a10.png
+waitidle
+capture out/a10.png
+key Right
+waitlabel view a1.png
+key Left
+waitlabel view a10.png
+key Escape
+waitlabel a2.png
+waitgone view a10.png
+
+# --- `term view <file>` in the shell: the same view, Esc back to the shell ---
+key Ctrl+Shift+E
+waitfor λ
+type "%MOSS_DIR%moss.exe" view a2.png
+key Enter
+waitlabel view a2.png
+waitidle
+capture out/from_shell.png
+key Escape
+waitgone view a2.png
+
+# --- Enter on a text file: the editor in the tab (the shell is idle) ---
+key Ctrl+Shift+E
+waitlabel notes.txt
+cursorui notes.txt
+lmb down
+lmb up
+key Enter
+waitfor notes for the view test
+waitidle
+capture out/editor_varies.png
+key Escape
+type :q!
+key Enter
+waitfor λ
+exit

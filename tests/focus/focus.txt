@@ -1,0 +1,26 @@
+# Focus (Ctrl+Shift+F): the focused pane alone over the whole window at once (no strips, sidebar or caption buttons),
+# only its own keys (a new tab's key reaches the program instead), and back to every pane at once.
+waitfor λ
+key Alt+Shift+=
+waitfor λ pane=1
+type echo right-pane
+key Enter
+waitfor right-pane pane=1
+key Ctrl+Shift+F
+wait 2
+dump layout
+capture out/focus.png
+key Ctrl+Shift+T
+wait 10
+dump tabs
+key Ctrl+Shift+E
+wait 5
+capture out/focus_files.png
+key Ctrl+Shift+E
+wait 240
+capture out/focus_settled.png
+key Ctrl+Shift+F
+wait 2
+dump layout
+capture out/back.png
+exit

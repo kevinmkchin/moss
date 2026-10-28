@@ -1,0 +1,27 @@
+// moss.ico is generated into the build directory by tools/make_icon.cpp (see build.bat).
+// Resource id 1 is the exe icon (Explorer, taskbar, window) and the tray icon.
+1 ICON "moss.ico"
+
+#include "moss_version.h"
+1 VERSIONINFO
+FILEVERSION MOSS_VERSION_MAJOR, MOSS_VERSION_MINOR, MOSS_VERSION_PATCH, 0
+PRODUCTVERSION MOSS_VERSION_MAJOR, MOSS_VERSION_MINOR, MOSS_VERSION_PATCH, 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "noclip software"
+            VALUE "FileDescription", "moss"
+            VALUE "FileVersion", MOSS_VERSION
+            VALUE "InternalName", "moss"
+            VALUE "OriginalFilename", "moss.exe"
+            VALUE "ProductName", "moss"
+            VALUE "ProductVersion", MOSS_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

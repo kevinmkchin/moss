@@ -1,0 +1,44 @@
+# Agents and the palette: Ctrl+Shift+A starts the agent tab (MOSS_CLAUDE fakes claude here), the
+# palette lists commands and runs one by Enter, a theme change, closing a busy shell asks first.
+waitfor λ
+key Ctrl+Shift+P
+waitidle
+capture out/palette.png
+type split
+waitidle
+capture out/palette_filtered.png
+key Enter
+waitfor λ pane=1
+dump layout
+
+# --- an agent tab ---
+key Ctrl+Shift+A
+waitfor fake-claude pane=1
+waitidle
+dump tabs
+capture out/agent.png
+
+# --- a theme ---
+cmd theme Catppuccin Latte
+waitidle
+capture out/light.png
+
+# --- closing a tab that runs a program asks first ---
+cursorpane 0
+wait 1
+lmb down
+lmb up
+type python -c "input('waiting for Enter')"
+key Enter
+waitfor waiting for Enter
+sleep 3500
+key Ctrl+Shift+W
+waitidle
+capture out/confirm.png
+cursorui cancel
+wait 1
+lmb down
+lmb up
+waitidle
+dump layout
+exit

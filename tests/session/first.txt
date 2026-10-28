@@ -1,0 +1,18 @@
+# Session, first run: two panes, a second tab, then the window goes (the named server keeps the tabs).
+waitfor λ
+type title left
+key Enter
+key Alt+Shift+=
+waitfor λ pane=1
+type title right
+key Enter
+key Ctrl+Shift+T
+waitfor λ pane=1
+type title third
+key Enter
+waitlabel tab third
+sleep 1000
+waitidle
+dump layout
+capture out/before.png
+exit

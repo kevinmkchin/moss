@@ -1,0 +1,7 @@
+build/
+tests/*/out/
+tests/*/reference/
+tests/*/out/
+tools/bench/results.txt
+dist/
+docs/techniques.md

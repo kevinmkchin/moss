@@ -1,0 +1,37 @@
+# Renders term with each candidate theme: a shell with typical colored output beside the file browser.
+waitfor λ
+type mkdir src docs & echo x> build.bat & echo x> README.md & echo x> logo.png & echo x> notes.txt & cls
+key Enter
+waitfor λ
+type python sample.py
+key Enter
+waitfor unresolved
+key Alt+Shift+=
+waitfor λ pane=1
+key Ctrl+Shift+E
+waitlabel README.md
+key Down
+key Down
+waitidle
+cmd theme Graphite
+waitidle
+capture out/Graphite.png
+cmd theme Dusk
+waitidle
+capture out/Dusk.png
+cmd theme Moss
+waitidle
+capture out/Moss.png
+cmd theme Signal
+waitidle
+capture out/Signal.png
+cmd theme Paper
+waitidle
+capture out/Paper.png
+cmd theme Ember
+waitidle
+capture out/Ember.png
+cmd theme Tokyo Night
+waitidle
+capture out/TokyoNight.png
+exit

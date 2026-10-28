@@ -1,0 +1,16 @@
+# Cloud placeholders: a folder and a file marked offline show a cloud mark, and the offline folder gets no size
+# (it's never measured: that would download it); the local folder does.
+waitfor λ
+type python make_cloud.py
+key Enter
+waitfor cloud-made
+type cd cloud
+key Enter
+sleep 1500
+key Ctrl+Shift+E
+waitlabel online.txt
+sleep 1000
+waitidle
+dump layout
+capture out/cloud.png
+exit

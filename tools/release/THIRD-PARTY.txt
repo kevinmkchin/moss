@@ -1,0 +1,16 @@
+moss is free software under the GNU General Public License v3.0 (LICENSE.txt); its source:
+https://github.com/kevinmkchin/moss
+
+It ships these programs from other people, unmodified, next to moss.exe.
+
+clink (clink\)
+  Clink 1.9.34, by Christopher Antos. GNU General Public License v3.0 (clink\LICENSE).
+  A separate program that runs inside each tab's cmd. Its source: https://github.com/chrisant996/clink/tree/v1.9.34
+
+clink-completions (clink-completions\)
+  clink-completions 0.6.9: tab completion scripts for clink, by Vladimir Kotikov and contributors. MIT License (clink-completions\LICENSE).
+  https://github.com/vladimir-kotikov/clink-completions
+
+ConPTY (conpty.dll, OpenConsole.exe)
+  The console host from Windows Terminal (Microsoft.Windows.Console.ConPTY), by Microsoft. MIT License
+  (conpty-LICENSE.txt). https://github.com/microsoft/terminal

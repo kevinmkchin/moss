@@ -1,0 +1,8 @@
+# Session, second run: the same layout, the same tabs (found again by their lasting ids).
+waitlabel tab third
+waitidle
+dump layout
+dump tabs
+capture out/after.png
+quitserver
+exit

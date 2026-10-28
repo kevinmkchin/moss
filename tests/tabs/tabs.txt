@@ -1,0 +1,46 @@
+# Tabs and panes: zoom a pane over the whole area (Ctrl+Shift+Z) and back, rename a tab (palette or double-click;
+# empty goes back to the automatic name), and go to a tab from the palette by its name.
+waitfor λ
+type title left
+key Enter
+key Alt+Shift+=
+waitfor λ pane=1
+type title right
+key Enter
+waitlabel tab right
+key Ctrl+Shift+Z
+sleep 500
+waitidle
+dump layout
+capture out/zoomed.png
+key Ctrl+Shift+Z
+sleep 500
+waitidle
+dump layout
+key Ctrl+Shift+P
+type rename
+key Enter
+type builds
+key Enter
+waitlabel tab builds
+waitidle
+dump layout
+capture out/renamed.png
+cursorui tab left
+lmb down
+lmb up
+lmb down
+lmb up
+key Backspace
+type logs
+key Enter
+waitlabel tab logs
+key Ctrl+Shift+P
+type logs
+waitlabel palette tab logs
+waitidle
+capture out/palette_tabs.png
+key Enter
+waitidle
+dump layout
+exit

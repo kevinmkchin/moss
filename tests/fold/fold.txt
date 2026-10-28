@@ -1,0 +1,41 @@
+# Fold: side by side, the left pane split in two (three panes); the right pane's only tab dragged into the top left
+# pane. The right pane goes and the left stack takes the whole width (it used to keep its half: the right side drew
+# nothing).
+waitfor λ
+type title one
+key Enter
+key Alt+Shift+=
+waitfor λ pane=1
+type title two
+key Enter
+cursorpane 0
+wait 1
+lmb down
+lmb up
+key Alt+Shift+-
+waitfor λ pane=1
+type title three
+key Enter
+waitlabel tab three
+waitlabel tab two
+sleep 500
+waitidle
+dump layout
+capture out/three_panes.png
+
+# --- tab "two" (the right pane's only one) onto the top left pane's middle button ---
+cursorui tab two
+wait 1
+lmb down
+cursorby 0 80
+cursorpane 0
+wait 2
+waitlabel drop marker center
+cursorui drop marker center
+wait 10
+lmb up
+sleep 300
+waitidle
+dump layout
+capture out/folded.png
+exit

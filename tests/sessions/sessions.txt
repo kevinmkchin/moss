@@ -1,0 +1,25 @@
+# The sessions sidebar (Ctrl+Shift+S): Claude Code's sessions by day, type to filter, Enter resumes one in a new
+# tab (claude faked), a running one marked.
+waitfor λ
+type python make_sessions.py
+key Enter
+waitfor sessions-made
+key Ctrl+Shift+S
+waitlabel session Fix the tab drag drop zones
+sleep 500
+waitidle
+capture out/sidebar.png
+type cpu
+waitgone session Fix the tab drag drop zones
+waitidle
+capture out/filtered.png
+key Escape
+waitlabel session Fix the tab drag drop zones
+key Down
+key Enter
+waitfor fake-claude ready
+sleep 500
+waitidle
+dump layout
+capture out/resumed.png
+exit

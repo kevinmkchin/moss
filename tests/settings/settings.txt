@@ -1,0 +1,51 @@
+# The settings (Ctrl+,): the palette's settings mode. Arrows step a choice and apply it at once (theme, text size,
+# opacity), Enter edits a text (the agent command, which Ctrl+Shift+A then starts), a click toggles a check box,
+# typing filters. Headless runs never write settings.txt.
+waitfor λ
+sleep 1000
+key Ctrl+,
+waitlabel setting Theme
+sleep 500
+waitidle
+capture out/settings.png
+key Right
+key Down
+key Down
+key Right
+key Right
+key Down
+key Down
+key Left
+key Left
+type agent
+waitgone setting Theme
+key Enter
+type echo agent-says-hi
+waitidle
+capture out/editing.png
+key Enter
+key Backspace
+key Backspace
+key Backspace
+key Backspace
+key Backspace
+waitlabel setting Show hidden files
+wait 3
+cursorui setting Show hidden files
+lmb down
+lmb up
+sleep 500
+waitidle
+capture out/changed.png
+type folder
+waitgone setting Theme
+waitidle
+capture out/filtered.png
+key Escape
+waitgone setting Folder sizes
+key Ctrl+Shift+A
+waitfor agent-says-hi
+sleep 500
+waitidle
+capture out/agent.png
+exit

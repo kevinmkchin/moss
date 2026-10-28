@@ -1,0 +1,71 @@
+# The go-to box (a click on the browser's path, Ctrl+L, Ctrl+P): a typed path lists its folder, the text after its
+# last separator narrows it, Tab takes the selected folder into the text, Enter goes; empty, the groups (recents,
+# bookmarks, drives, places); %NAME% and ~ are filled in. Back / forward, the bookmark star.
+waitfor λ
+type python make_tree.py
+key Enter
+waitfor λ
+type cd tree
+key Enter
+waitfor goto\tree
+key Ctrl+Shift+E
+waitlabel readme.md
+
+# --- a click on the path: the box with the folder typed in, its folders and files listed ---
+cursorui path 0
+lmb down
+lmb up
+waitlabel goto edit
+waitlabel goto alpha
+waitidle
+capture out/typed.png
+
+# --- typing narrows, Tab expands into the text, Enter goes there ---
+type al
+waitidle
+capture out/narrowed.png
+key Tab
+waitlabel goto deep
+waitidle
+capture out/expanded.png
+key Enter
+waitgone goto edit
+waitlabel inner.txt
+waitidle
+capture out/went.png
+
+# --- back and forward ---
+cursorui back 0
+lmb down
+lmb up
+waitlabel readme.md
+cursorui forward 0
+lmb down
+lmb up
+waitlabel inner.txt
+side back
+waitlabel readme.md
+
+# --- bookmark this folder; the box with nothing typed: the groups ---
+key Ctrl+D
+waitidle
+capture out/starred.png
+key Ctrl+P
+waitlabel goto group Bookmarks
+waitidle
+capture out/groups_varies.png
+
+# --- search the groups; a folder of the environment ---
+type alpha
+waitidle
+capture out/search.png
+key Ctrl+A
+type %USERPROFILE%\
+waitlabel goto Desktop
+key Alt+Up
+waitidle
+dump screen
+capture out/env_varies.png
+key Escape
+waitgone goto edit
+exit
