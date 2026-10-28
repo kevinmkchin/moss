@@ -1,6 +1,6 @@
 ---
 name: profile-frames
-description: Profile term's frames (window, headless, or server loop) - where frame time goes, using TIMED_BLOCK timed blocks collated into "profile:" lines in the run log, GPU timestamp queries, key-to-screen latency hops, and Superluminal captures. Use when something is slow (typing lag, a hitch, heavy output, high CPU while idle), before and after an optimization, or when the user asks where time goes.
+description: Profile moss's frames (window, headless, or server loop) - where frame time goes, using TIMED_BLOCK timed blocks collated into "profile:" lines in the run log, GPU timestamp queries, key-to-screen latency hops, and Superluminal captures. Use when something is slow (typing lag, a hitch, heavy output, high CPU while idle), before and after an optimization, or when the user asks where time goes.
 ---
 
 # Profile frames
@@ -8,7 +8,7 @@ description: Profile term's frames (window, headless, or server loop) - where fr
 Timed blocks (code/term_debug.h) are summed into the current frame of a 240-frame ring per process.
 `Debug_LogProfile` writes them as `profile:` lines: work time per frame (waits excluded), the
 phases, then each block slowest first (avg/max ms per frame, hits per frame, cycles per hit, file(line)).
-Paths relative to `term/`.
+Paths relative to `moss/`.
 
 ## What triggers a profile
 - Automatically: a window frame whose work passes 8 ms (headless: 50 ms; the server loop: 8 ms) writes a
@@ -36,8 +36,8 @@ Paths relative to `term/`.
 5. Compare before/after with the same script and build flavor.
 
 ## Typing latency (the ~1 ms goal)
-`TERM_LATENCY=1` makes every process append `<hop> <microseconds>` lines to
-`%TEMP%\term-latency-<pid>.txt` (one clock for all): `key`, `client_send`, `server_in`, `server_write`,
+`MOSS_LATENCY=1` makes every process append `<hop> <microseconds>` lines to
+`%TEMP%\moss-latency-<pid>.txt` (one clock for all): `key`, `client_send`, `server_in`, `server_write`,
 `pty_read`, `server_frame`, `client_cells`, `client_present`. `python tools/latency.py` reports them.
 
 ## Superluminal

@@ -4,7 +4,7 @@
 #   analyze_dump.sh                       newest dump: crash context, stack, locals of the crashing frame
 #   analyze_dump.sh DUMP.dmp              that dump, same commands
 #   analyze_dump.sh DUMP.dmp "COMMANDS"   that dump, these cdb commands (';' separated)
-cd "$(dirname "$0")/../../../.." || exit 1 # term/
+cd "$(dirname "$0")/../../../.." || exit 1 # moss/
 
 Dump="$1"
 if [ -z "$Dump" ]; then
@@ -18,7 +18,7 @@ Commands="${2:-.ecxr; kn 30; .frame 0; dv /t /v}"
 
 Symbols="${Dump%.dmp}_symbols"
 if [ ! -d "$Symbols" ]; then
-    echo "analyze_dump: no $Symbols: term.exe frames will not resolve unless build/ still holds the same build"
+    echo "analyze_dump: no $Symbols: moss.exe frames will not resolve unless build/ still holds the same build"
     Symbols=build
 fi
 

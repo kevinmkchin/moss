@@ -1,14 +1,14 @@
 ---
 name: debug-crash
-description: Investigate a crash or failed assert of term.exe (window, headless run, or the server). Reads the crash section of the run log in build/logs, opens the minidump in cdb with the symbols the crash handler saved, and finds the cause in the code. Use when a run crashed, a headless script stopped early or exited with an exception code (bash "Segmentation fault", exit 139, 0xC0000005), a log has CRASH or ASSERT FAILED, a server log says "previous server run crashed", or the user says term crashed.
+description: Investigate a crash or failed assert of moss.exe (window, headless run, or the server). Reads the crash section of the run log in build/logs, opens the minidump in cdb with the symbols the crash handler saved, and finds the cause in the code. Use when a run crashed, a headless script stopped early or exited with an exception code (bash "Segmentation fault", exit 139, 0xC0000005), a log has CRASH or ASSERT FAILED, a server log says "previous server run crashed", or the user says moss crashed.
 ---
 
 # Debug a crash
 
 Crashes are recorded by `WriteCrash` (code/term_debug.c; see "Debugging" in CLAUDE.md). A failed
-`Assert`/`AssertAlways` and any fatal exception in term.exe's own code are recorded, also under a
+`Assert`/`AssertAlways` and any fatal exception in moss.exe's own code are recorded, also under a
 debugger; without a debugger, crashes inside other modules too. The window, headless runs and the
-server each do this for themselves. Each crash leaves in `build/logs/` (paths relative to `term/`):
+server each do this for themselves. Each crash leaves in `build/logs/` (paths relative to `moss/`):
 - `<run>.log`: the run log, ending with the crash section:
   - `ASSERT FAILED: file(line): expression` for an assert;
   - `CRASH: <exception> 0x... at <address> (exe+0x...), thread N`, and for an access violation
@@ -16,7 +16,7 @@ server each do this for themselves. Each crash leaves in `build/logs/` (paths re
   - `CRASH: stack:`, frames symbolized from the PDB (`#00` is the crash site);
   - `symbols:` lines (the copied exe and PDB) and the `minidump:` path.
 - `<run>.dmp`: the minidump (internal builds: our heaps and arenas too, ~100 MB; the newest 5 are kept).
-- `<run>_symbols/`: copies of term.exe and term.pdb from the moment of the crash. Always use these:
+- `<run>_symbols/`: copies of moss.exe and moss.pdb from the moment of the crash. Always use these:
   the next build replaces the ones in `build/`.
 
 Run names sort by time: `YYYY-MM-DD_HHMMSS_<window|headless|server|replay>_<pid>`.
@@ -39,7 +39,7 @@ Run names sort by time: `YYYY-MM-DD_HHMMSS_<window|headless|server|replay>_<pid>
      source lines, frame 0's locals). The first run fetches Windows symbols (slow once).
    - Useful: `.ecxr` first always; `kn 30`; `.frame N; dv /t /v`; `dx -r2 Expression` for structs;
      `~*kn 8` every thread; `!address ADDR` what memory an address is in; `lm` modules.
-   - Globals: `dx term!g_Debug`, server state lives on ServerMain's stack (`.frame` into it, `dv`).
+   - Globals: `dx moss!g_Debug`, server state lives on ServerMain's stack (`.frame` into it, `dv`).
    - Not in the dump: GPU memory, D3D/COM objects' internals, driver memory.
 
 4. **Find the cause**: compare the values with the invariants in the code and CLAUDE.md.
@@ -55,4 +55,4 @@ Run names sort by time: `YYYY-MM-DD_HHMMSS_<window|headless|server|replay>_<pid>
 - cdb: `cdbX64.exe` from WinDbg (`winget install Microsoft.WinDbg`); the script also tries the SDK's cdb.exe.
 - `Unable to verify checksum` warnings are harmless.
 - Raw addresses past frame 0: that module's image isn't in the symbols folder (see the `symbols:` lines).
-- The `crash` script command (`Debug_Crash`) is inlined: its frame shows as `term!Debug_Crash+0x.. [inlined in ...]`.
+- The `crash` script command (`Debug_Crash`) is inlined: its frame shows as `moss!Debug_Crash+0x.. [inlined in ...]`.

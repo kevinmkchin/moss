@@ -1,15 +1,15 @@
 ---
 name: read-logs
-description: Find and read term's run logs (build/logs/*.log) to see what a window, headless run or server did. Covers tab starts, resizes and exits, agent detection, window attach/detach, D3D11 and HRESULT errors, script lines with their output, profiles, and asserts. Use after a headless run, when checking what happened in the user's last session, when the user quotes an error or reports unexpected behavior, or before guessing at runtime state.
+description: Find and read moss's run logs (build/logs/*.log) to see what a window, headless run or server did. Covers tab starts, resizes and exits, agent detection, window attach/detach, D3D11 and HRESULT errors, script lines with their output, profiles, and asserts. Use after a headless run, when checking what happened in the user's last session, when the user quotes an error or reports unexpected behavior, or before guessing at runtime state.
 ---
 
 # Read the run logs
 
-Every process writes its own log (code/term_debug.c). Paths relative to `term/`.
+Every process writes its own log (code/term_debug.c). Paths relative to `moss/`.
 
 ## Where
 - `build/logs/YYYY-MM-DD_HHMMSS_<mode>_<pid>.log` for a dev build (exe in `build/`); a release build
-  writes `%LOCALAPPDATA%\term\logs`. Modes: `window`, `headless`, `server`, `replay`.
+  writes `%LOCALAPPDATA%\moss\logs`. Modes: `window`, `headless`, `server`, `replay`.
   - Newest of a mode: `ls build/logs/*_server_*.log | tail -1` (names sort by start time).
   - A window and its server run side by side: match them by start time. Headless and `--test` runs
     start their own private server (`instance "-headless-<pid>"` in its header).

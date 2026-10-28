@@ -1,17 +1,17 @@
 ---
 name: run-headless
-description: Run term with no window and drive it from a script - type into terminals, press keys, click and drag UI (tabs, splitters, buttons) by label, wait for terminal text, capture PNGs and compare them, dump the pane layout, screens and tabs. Use to check any GUI or terminal change without popping up a window, to write or run the regression sets in tests/, or to reproduce a bug.
+description: Run moss with no window and drive it from a script - type into terminals, press keys, click and drag UI (tabs, splitters, buttons) by label, wait for terminal text, capture PNGs and compare them, dump the pane layout, screens and tabs. Use to check any GUI or terminal change without popping up a window, to write or run the regression sets in tests/, or to reproduce a bug.
 ---
 
-# Run term headless
+# Run moss headless
 
 ```
-cd tests/<set> && ../../build/term.exe --headless --size 1280x800 --script <set>.txt | cat
+cd tests/<set> && ../../build/moss.exe --headless --size 1280x800 --script <set>.txt | cat
 ```
 Options: `--size WxH` (default 1280x800), `--dpi N` (96), `--session FILE` (read and write a layout file;
 none by default), `--instance NAME` (a named private server that outlives the run, no tray: session tests).
-Headless runs ignore the user's settings.txt. Each run starts its own private server (`TERM_INSTANCE=headless-<pid>`, ephemeral: no
-tray, no tabs.txt) running real cmd + clink tabs; it ends with the run. `TERM_CLAUDE="cmd.exe /k echo"`
+Headless runs ignore the user's settings.txt. Each run starts its own private server (`MOSS_INSTANCE=headless-<pid>`, ephemeral: no
+tray, no tabs.txt) running real cmd + clink tabs; it ends with the run. `MOSS_CLAUDE="cmd.exe /k echo"`
 fakes claude. Exit code 0 = no failures, 2 = something failed (timed-out waitfor, label not found, image
 different, unknown command). Everything goes to the run log too (`read-logs`).
 

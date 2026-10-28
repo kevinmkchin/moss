@@ -409,6 +409,8 @@ loaded only by make_icon, never shipped). Links with MSVC's link.exe by full pat
 
 ## Releasing (GitHub, winget)
 
+- The `release` skill (`.claude/skills/release`) walks through all of it, in order.
+
 - The version lives in `code/moss_version.h` (the exe's version resource reads it too).
 - `powershell -File tools/release/package.ps1 [-Owner kevinmkchin] [-Repo moss]`: a release build, then
   `dist\moss-<version>-win-x64.zip` (moss.exe; ConPTY, clink, clink-completions and the default shell straight from the
