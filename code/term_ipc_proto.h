@@ -34,6 +34,8 @@ enum msg_type
     MSG_HISTORY,   // server -> window: u32 TabId, u32 Count, then Count x (u8 FromUser, u32 TimeLen, u32 TextLen, time, text),
                    // oldest first (no session: Count 0)
     MSG_ACCOUNT_OK, // window -> server: u32 TabId: its claude may go on with the account it changed to (TAB_ACCOUNT_HELD ends)
+    MSG_NOTIFY,    // window -> server: a title, a 0 byte, a body (UTF-8): a tray notification (a web tab's page; settings
+                   // `notifications = off`: none)
 };
 
 enum
@@ -57,7 +59,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 14
+#define TERM_PROTOCOL_VERSION 15
 
 struct msg_attach
 {

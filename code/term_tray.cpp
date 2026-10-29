@@ -158,7 +158,8 @@ static LRESULT CALLBACK TrayWindowProc(HWND Window, UINT Msg, WPARAM WParam, LPA
             {
                 // Quitting keeps every tab (they reopen next launch, claude tabs resumed). What is lost
                 // is work in progress: a reply (claude's title spinner is running) or a program running
-                // in a shell tab (cmd at its prompt has no child processes). Ask only when there is some.
+                // in a shell tab (cmd at its prompt has no child processes), unless it comes back with nothing lost.
+                // Ask only when there is some.
                 std::vector<PROCESSENTRY32W> Procs = ListProcesses();
                 std::wstring Busy;
                 std::wstring Shells;
@@ -177,11 +178,62 @@ static LRESULT CALLBACK TrayWindowProc(HWND Window, UINT Msg, WPARAM WParam, LPA
                     {
                         DWORD Pid = GetProcessId(T->Pty->Process);
                         std::wstring Running;
+                        std::vector<DWORD> Tree;
+                        std::string Exe;
                         for(const PROCESSENTRY32W& P : Procs)
                         {
-                            if(P.th32ParentProcessID == Pid) { Running += (Running.empty() ? L"" : L", ") + std::wstring(P.szExeFile); }
+                            if(P.th32ParentProcessID != Pid) { continue; }
+                            Running += (Running.empty() ? L"" : L", ") + std::wstring(P.szExeFile);
+                            Tree.push_back(P.th32ProcessID);
+                            Exe = ToLower(WideToUtf8(P.szExeFile));
                         }
-                        if(!Running.empty()) { Shells += Line + L"  (" + Running + L")"; ShellCount += 1; }
+                        if(Running.empty()) { continue; }
+                        // --- no need to ask about a program the restart runs again (T->Program) with nothing to lose:
+                        // a viewer, or an nvim whose swap files (nvim-data\swap, one per buffer) say nothing is unsaved:
+                        // the writer's pid at byte 24, 0x55 at byte 1007 while modified. No swap file of its own: ask. ---
+                        bool32 Quiet = false;
+                        if(!T->Program.empty() && Tree.size() == 1)
+                        {
+                            Quiet = Exe == "less.exe" || Exe == "htop.exe" || Exe == "btop.exe";
+                            if(Exe == "nvim.exe")
+                            {
+                                // its TUI runs the editor as a child (nvim 0.10 on), and a shim may start both
+                                for(size_t K = 0; K < Tree.size() && Tree.size() < 64; ++K)
+                                {
+                                    for(const PROCESSENTRY32W& P : Procs)
+                                    {
+                                        if(P.th32ParentProcessID == Tree[K] && P.th32ProcessID != Tree[K]) { Tree.push_back(P.th32ProcessID); }
+                                    }
+                                }
+                                wchar_t Base[MAX_PATH] = {};
+                                GetEnvironmentVariableW(L"LOCALAPPDATA", Base, MAX_PATH);
+                                std::wstring Dir = std::wstring(Base) + L"\\nvim-data\\swap\\";
+                                bool32 Found = false;
+                                bool32 Dirty = false;
+                                WIN32_FIND_DATAW Data = {};
+                                HANDLE Find = FindFirstFileW((Dir + L"*").c_str(), &Data);
+                                while(Find != INVALID_HANDLE_VALUE)
+                                {
+                                    HANDLE File = (Data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? INVALID_HANDLE_VALUE :
+                                                  CreateFileW((Dir + Data.cFileName).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+                                    if(File != INVALID_HANDLE_VALUE)
+                                    {
+                                        std::string Head = ReadFileRange(File, 0, 1008);
+                                        CloseHandle(File);
+                                        DWORD Writer = 0;
+                                        if(Head.size() == 1008 && Head[0] == 'b' && Head[1] == '0') { memcpy(&Writer, Head.data() + 24, 4); }
+                                        if(Writer && std::find(Tree.begin(), Tree.end(), Writer) != Tree.end())
+                                        {
+                                            Found = true;
+                                            Dirty |= (u8)Head[1007] == 0x55;
+                                        }
+                                    }
+                                    if(!FindNextFileW(Find, &Data)) { FindClose(Find); break; }
+                                }
+                                Quiet = Found && !Dirty;
+                            }
+                        }
+                        if(!Quiet) { Shells += Line + L"  (" + Running + L")"; ShellCount += 1; }
                     }
                 }
                 bool32 Quit = true;
@@ -197,7 +249,8 @@ static LRESULT CALLBACK TrayWindowProc(HWND Window, UINT Msg, WPARAM WParam, LPA
                     {
                         Ask += (ShellCount == 1 ? L"This shell is" : std::to_wstring(ShellCount) + L" shells are") +
                                std::wstring(L" running a program:\n") + Shells +
-                               L"\n\nQuitting ends those programs. The shells reopen as fresh ones.\n\n";
+                               L"\n\nQuitting ends those programs, and loses anything unsaved in them. The shells reopen "
+                               L"in their folders (an editor or viewer named in restore_programs starts again).\n\n";
                     }
                     Ask += L"Every tab still reopens the next time you run moss.\n\nQuit anyway?";
                     Quit = MessageBoxW(Window, Ask.c_str(), L"moss", MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) == IDOK;

@@ -14,3 +14,8 @@ clink-completions (clink-completions\)
 ConPTY (conpty.dll, OpenConsole.exe)
   The console host from Windows Terminal (Microsoft.Windows.Console.ConPTY), by Microsoft. MIT License
   (conpty-LICENSE.txt). https://github.com/microsoft/terminal
+
+WebView2 loader (WebView2Loader.dll)
+  From the WebView2 SDK 1.0.4314.35 (Microsoft.Web.WebView2), by Microsoft. BSD 3-Clause License
+  (webview2-LICENSE.txt). It finds the WebView2 Runtime (Microsoft Edge's engine, part of Windows) for web tabs.
+  https://www.nuget.org/packages/Microsoft.Web.WebView2

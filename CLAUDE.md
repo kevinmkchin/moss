@@ -332,6 +332,15 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `dim_unfocused = off`. Ctrl+H in a browser writes `hidden_files` too.
 - "Dim the panes not in focus" (on by default): with more than one pane showing, the others get a dark wash (a held
   claude's card stays bright above it).
+- "Reset to moss's defaults" asks first (`App.reset_confirm`), then `AppOutput.reset_settings`: settings.txt becomes the
+  shipped `shell\settings.txt` (the old one kept as settings-old.txt; `Term_ResetSettings`), the platform reads it again
+  (`ReadSettings`, as at start) and hands it over once (`AppFrameInput.settings`, `ApplySettings`, as `App_Create`).
+  The summon key and the editor stay as they were until the next start; Explorer's menu and start with Windows aren't
+  settings.txt's and stay. accounts.txt isn't settings.txt's either: accounts, themes and folder rules stay.
+- "Be a good programmer" (clod's, carried over) puts `~\.moss\good-programmer.md` into the global
+  `<CLAUDE_CONFIG_DIR or ~\.claude>\CLAUDE.md` between moss's markers, for every Claude Code session on the machine;
+  off takes the block out, the rest of the file stays (`SetGoodProgrammer`, temp file swapped in). clod's block counts
+  as on, and is replaced or taken out the same way. Read at start (`AppInit.good_programmer`); headless runs only log.
 
 ## The file browser (each tab's other face)
 
@@ -426,6 +435,38 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   console; OpenConsole passes it through, the server forwards it with the tab id (`MSG_OUTPUT`), the client hands it to
   the app (`AppFrameInput.view_tab`). An existing `~\.moss\clink\moss.lua` keeps its old alias until reseeded.
 
+## Web tabs
+
+- Ctrl+Shift+B (`new_web_tab`) opens a web tab beside the focused one, its address being typed. A web tab is a page with
+  no server tab (`PaneTab::web`, `term_id` 0: the reconcile leaves it alone); WebView2 (Edge's engine, part of
+  Windows 11; `vendor/webview2`, BSD: only the header and WebView2Loader.dll next to moss.exe) starts with the first
+  page (`term_web.cpp`). Its address is kept in layout.txt (the tab line's last field; a blank one as about:blank), so
+  it comes back after a restart. Duplicate (Ctrl+Shift+D) opens the same address; the files face doesn't apply.
+- Each page draws into a DirectComposition visual under the swap chain's (`Gpu::Root`); the app draws nothing over the
+  page's rect and clears to see-through while one is shown, so moss's popups go over it. The app lists every web tab in
+  `AppOutput.webs` (rect, shown, mouse over it, navigate / back / forward / reload, the popup it's for) and `web_focus`;
+  the platform makes, places and closes pages (`Web_Update`) and hands their url, title, history, loading,
+  notifications and close requests back (`AppFrameInput.webs`). The tab's name is the page's title.
+- Mouse: the window passes its mouse messages to the page the app says is under the mouse (`Web_Mouse`,
+  SendMouseInput; the wheel and side buttons go only to the page), the page's cursor shows. A press goes to the page only
+  while the window is in front: a page that takes the keyboard brings its window forward (a test window's posted clicks
+  did). Keyboard: the page has it (MoveFocus, only while the window is in front); moss's keys come back from it
+  (AcceleratorKeyPressed: Ctrl+Shift+any, Alt+arrows, Ctrl+Tab, Ctrl+, Ctrl+L, F11), posted to the window as key
+  messages. Ctrl+L / F6 edit the address (Enter goes: https:// added, else a Google search), F5 reloads.
+- New windows (window.open, target=_blank: sign-in popups) are held (NewWindowRequested, deferred) until the app makes a
+  web tab beside the opener (`AppFrameInput.web_popups`, `AppWeb.popup`); that page becomes the opener's new window
+  (`put_NewWindow`), so `window.opener` works. A page that closes itself (window.close) closes its tab.
+- Notifications: allowed for every page (the permission), shown by moss, not WebView2: one while its tab isn't in front
+  (another tab, the window behind) goes to the tray (`AppOutput.notify_title/body` -> `MSG_NOTIFY` -> the server's
+  `TrayNotify`; settings `notifications = off`: none) and puts a dot on the tab until it's shown. Other permissions
+  (camera, microphone, ...) are WebView2's own prompt for now.
+- Data (logins, cookies) in `%LOCALAPPDATA%\moss\web`; test and instance runs in `%TEMP%\moss-web-<instance>`.
+- Headless runs have no pages (the page's rect stays black; `tests/session` keeps a web tab across a restart).
+  `moss --web-probe URL OUT.png` loads one in a window no one sees and logs what the engine can do there (Widevine,
+  PlayReady, MSE, notifications, service workers, its user agent) plus a picture. A test window runs
+  MOSS_TEST_COMMAND's commands (`;` between), one per posted `WM_APP + 3` (`tools/window_test.ps1 -Command`). Test
+  pages that open windows or notify should do it on load: a posted click is ignored while the window is behind.
+
 ## Focus (Ctrl+Shift+F)
 
 - The focused pane alone over the whole window: no tab strips (`caption_h` 0), no sidebar, no caption buttons
@@ -462,6 +503,11 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 
 - Quit (tray) stops the server but keeps `tabs.txt`; tabs come back on the next start (claude with --resume,
   shells in their folder with their last output). Never expose a way to end every tab and forget them.
+- A shell running a program named in settings `restore_programs` (default nvim vim hx micro nano emacs less lazygit
+  htop btop) runs it again after a restart: the scan keeps the cmd's child's command line (`tab::Program`, tabs.txt's
+  last field; never a line with `& | < > ^ %`), cleared when the prompt is back. Quit doesn't ask about such a tab when
+  nothing is lost: less, htop, btop, or an nvim whose swap files (`nvim-data\swap`: the writer's pid at byte 24, 0x55
+  at byte 1007 while modified) show nothing unsaved. Test by hand: a named `--instance` run, `quitserver`, a second run.
 - Never resume a claude session while an older claude of it is still alive (the server waits for them).
 - Strip a parent Claude Code session's env markers from tabs (`ClaudeMarkers`).
 - Real claude in tests: always end it with `/exit` (killing it during startup turns its fullscreen renderer off
@@ -512,7 +558,7 @@ loaded only by make_icon, never shipped). Links with MSVC's link.exe by full pat
 
 ## Licensing
 
-moss is GPL-3.0 (`LICENSE`); it ships clink (GPL-3.0), clink-completions (MIT) and ConPTY (MIT) next to moss.exe
+moss is GPL-3.0 (`LICENSE`); it ships clink (GPL-3.0), clink-completions (MIT), ConPTY (MIT) and WebView2's loader (BSD) next to moss.exe
 (`tools/release/THIRD-PARTY.txt`). Every line of moss is its own or the user's (clod's code is the user's). File
 Pilot is a reference for look and feel only (screenshots, the user's descriptions): none of its code, assets (icon
 font, scheme names) or internals come into the repository; its features come back one by one, written from

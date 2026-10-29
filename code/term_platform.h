@@ -35,6 +35,9 @@ int  Term_VtReplayMain(const wchar_t *file, int cols, int rows); // `term --vt-r
 void Term_PrepareUser(void);    // first run: ~\.moss from the defaults, the bundled font installed
 String Term_ReadSetting(Arena *arena, const char *key);          // settings.txt, empty when unset
 void Term_WriteSetting(const char *key, String value);
+void Term_ResetSettings(void);                  // settings.txt as moss ships it, the old one kept as settings-old.txt
+b32  Term_GoodProgrammer(void);                 // the global CLAUDE.md has the "Be a good programmer" block (moss's or clod's)
+b32  Term_SetGoodProgrammer(b32 on);            // puts it in (from ~\.moss\good-programmer.md) or takes it out; 0 = failed
 String Term_ReadFile(Arena *arena, const wchar_t *path);
 void Term_WriteFileAtomic(const wchar_t *path, String data);
 void Term_RaiseForTyping(void);
@@ -77,6 +80,18 @@ void  TermCells_Draw(void *user, const void *data, Rect clip, s32 target_w, s32 
 void  TermCells_Stats(TermCells *t, s32 *glyphs, s32 *atlas_percent, s32 *resolved_this_frame);
 s64   TermCells_MonoFonts(TermCells *t, Arena *arena, String **out);
 void  TermCells_Destroy(TermCells *t);
+
+// --- web pages in tabs (WebView2; term_web.cpp): in the window's composition tree, under its frame ---
+typedef struct Web Web;
+Web *Web_Create(void *hwnd, Gpu *g, u32 wake_message, const wchar_t *data_folder);   // NULL: no WebView2 loader
+void Web_Update(Web *w, const AppWeb *webs, s32 count, u64 focus);   // the app's pages: made, placed, navigated, closed
+s32  Web_Fill(Web *w, Arena *arena, AppWebState *out, s32 max);      // their state
+s32  Web_Popups(Web *w, Arena *arena, AppWebPopup *out, s32 max);    // new windows they asked for, waiting for tabs
+b32  Web_HasFocus(Web *w);                                           // a page has the keyboard
+void *Web_Cursor(Web *w);                                            // the page under the mouse's cursor (HCURSOR), or 0
+b32  Web_Mouse(Web *w, u32 msg, u64 wparam, s64 lparam);            // a mouse message, to a page if it's one's (1)
+void Web_Destroy(Web *w);
+int  Web_ProbeMain(const wchar_t *url, const wchar_t *png);           // `moss --web-probe URL OUT.png`
 
 // --- images (WIC) ---
 b32   Image_SavePng(const wchar_t *path, const u8 *rgba, s32 w, s32 h);

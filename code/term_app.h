@@ -16,6 +16,30 @@ typedef struct AppPlace { String name, path; } AppPlace;
 // A picture for the image viewer, decoded (scaled down to fit 4K) and on the GPU; failed: it couldn't be read.
 typedef struct AppImage { String path; u64 texture; s32 w, h, full_w, full_h; b32 failed; } AppImage;   // a known folder: Home, Desktop, Documents, ...
 
+// A web tab's page. The platform hosts it in `rect` (window pixels), made when first listed, closed when no longer.
+enum { App_MaxWebs = 32 };
+typedef struct AppWeb {
+    u64 id;                     // the PaneTab's
+    Rect rect;
+    b32 shown;                  // hidden: kept running, not drawn
+    b32 mouse;                  // the mouse is over it (nothing of moss's above)
+    String navigate;            // go there (frame arena), empty: stay
+    s32 step;                   // -1 back, 1 forward
+    b32 reload;
+    u32 popup;                  // made for this popup (AppWebPopup.id): the page that asked for it gets it as its new window
+} AppWeb;
+// A page's state. notices counts its notifications; the last one's title and body come with it.
+typedef struct AppWebState {
+    u64 id;
+    String url, title;
+    b32 can_back, can_forward, loading, failed;
+    b32 close_requested;        // the page closed itself (window.close())
+    u32 notices;
+    String notice_title, notice_body;
+} AppWebState;
+// A page asked for a new window (window.open, a link with target=_blank): it waits for a web tab made for it.
+typedef struct AppWebPopup { u32 id; u64 opener; String url; } AppWebPopup;
+
 typedef struct AppInit {
     String session_text;        // the saved layout, empty when none
     String settings_theme;      // settings.txt `theme`
@@ -41,6 +65,7 @@ typedef struct AppInit {
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
     b32 explorer_menu;          // Explorer has "Open in moss" (registered for this user)
     b32 start_with_windows;     // term's server starts at sign-in (the user's Run key)
+    b32 good_programmer;        // the global CLAUDE.md has the "Be a good programmer" block
     s32 background_strength;    // settings.txt `background_strength`: how much of the background image shows (percent; 0 = the default 30, -1 = off)
     String environment;         // the window's environment, NAME=value a line (%NAME% in typed paths)
     s32 place_count;            // the known folders, for the go-to box's Places
@@ -99,6 +124,11 @@ typedef struct AppFrameInput {
     b32 drag_over;              // another program drags files over the window (at the mouse)
     s64 drop_count;             // files it dropped this frame (at the mouse)
     const String *dropped;
+    const AppInit *settings;    // settings.txt read again after AppOutput.reset_settings (one frame); else NULL
+    s32 web_count;              // the web pages' state (AppOutput.webs)
+    const AppWebState *webs;
+    s32 web_popup_count;        // new windows pages asked for, oldest first, until a web tab is made for each
+    const AppWebPopup *web_popups;
     // --- what the debug overlay shows (Ctrl+Alt+Shift+F12) ---
     struct {
         f32 work_ms_avg, work_ms_max;      // the last 120 frames' work
@@ -186,11 +216,18 @@ typedef struct AppOutput {
     b32 open_taken;             // the outside request's tab was asked for
     u8 explorer_menu;           // 1: add "Open in moss" to Explorer, 2: take it away
     u8 start_with_windows;      // 1: start term's server at sign-in, 2: don't
+    u8 good_programmer;         // 1: the principles into the global CLAUDE.md, 2: out of it
+    b32 reset_settings;         // settings.txt back to moss's own (the old one kept), read again: AppFrameInput.settings
     u32 tear_off_tab;           // this tab goes to another window: the one under the mouse (tear_off_drop), else a new one
     b32 tear_off_drop;          // dragged out of the window: where the mouse is decides
     b32 tear_off_last;          // it's the window's only tab: only into another window
     s64 open_window_count; String *open_windows;   // windows the main one opens at start: their tabs wait for them
     s32 ime_caret[4];           // the focused terminal's cursor cell (window px x, y, w, h): IME composition goes there
+    s32 web_count;              // the web pages there are (closed when no longer listed)
+    AppWeb webs[App_MaxWebs];
+    u64 web_focus;              // the page with the keyboard (0: the window)
+    String notify_title;        // a tray notification (a web page's, the window off or its tab not shown); empty: none
+    String notify_body;
     // --- debug ---
     b32 log_profile;            // Ctrl+Alt+Shift+F10
 } AppOutput;

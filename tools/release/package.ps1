@@ -1,5 +1,5 @@
 # Builds a release of moss and everything a winget submission needs, in dist\ (never committed):
-#   dist\moss-<version>-win-x64.zip      moss.exe, the console host, clink, the default shell setup, the licenses
+#   dist\moss-<version>-win-x64.zip      moss.exe, the console host, WebView2's loader, clink, the default shell setup, the licenses
 #   dist\winget\manifests\n\NoclipSoftware\Moss\<version>\*.yaml   the three manifests, the zip's hash filled in
 # The version comes from code\moss_version.h; the zip's URL is where the GitHub release will put it.
 #   powershell -File tools/release/package.ps1 [-Owner kevinmkchin] [-Repo moss]
@@ -24,6 +24,8 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item (Join-Path $root "build\moss.exe") $stage
 foreach ($f in "conpty.dll", "OpenConsole.exe") { Copy-Item (Join-Path $root "vendor\conpty\$f") $stage }
 Copy-Item (Join-Path $root "vendor\conpty\LICENSE") (Join-Path $stage "conpty-LICENSE.txt")
+Copy-Item (Join-Path $root "vendor\webview2\WebView2Loader.dll") $stage
+Copy-Item (Join-Path $root "vendor\webview2\LICENSE") (Join-Path $stage "webview2-LICENSE.txt")
 Copy-Item -Recurse (Join-Path $root "vendor\clink") (Join-Path $stage "clink")
 Copy-Item -Recurse (Join-Path $root "vendor\clink-completions") (Join-Path $stage "clink-completions")
 Copy-Item -Recurse (Join-Path $root "clink-moss") (Join-Path $stage "clink-moss")

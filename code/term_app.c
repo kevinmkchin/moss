@@ -33,6 +33,7 @@ enum {
     Icon_Cloud = 0xE753, Icon_Back = 0xE72B, Icon_Forward = 0xE72A, Icon_Star = 0xE734, Icon_StarFilled = 0xE735,
     Icon_History = 0xE81C, Icon_Home = 0xE80F, Icon_Download = 0xE896, Icon_Document = 0xE8A5, Icon_Picture = 0xE8B9,
     Icon_Music = 0xEC4F, Icon_Video = 0xE714, Icon_Desktop = 0xE7F4, Icon_OpenFolder = 0xE838,
+    Icon_Refresh = 0xE72C, Icon_Globe = 0xE774,
 };
 
 // --- commands --------------------------------------------------------------------------------------------------
@@ -42,7 +43,7 @@ enum {
     Cmd_Fullscreen, Cmd_Copy, Cmd_Paste, Cmd_ScrollPageUp, Cmd_ScrollPageDown, Cmd_ScrollBottom, Cmd_NextTheme,
     Cmd_Palette, Cmd_Profile, Cmd_DebugOverlay, Cmd_CloseWindow, Cmd_ToggleBrowser, Cmd_PrevCommand, Cmd_NextCommand, Cmd_Sessions, Cmd_Settings, Cmd_TearOff,
     Cmd_Find, Cmd_Search, Cmd_RenameTab, Cmd_ZoomPane, Cmd_ClearScrollback, Cmd_CopyAll, Cmd_Broadcast, Cmd_Topmost, Cmd_Duplicate,
-    Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode,
+    Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode, Cmd_NewWebTab,
     Cmd_NewClaudeAs, Cmd_AddAccount,
     Cmd_Count
 };
@@ -101,6 +102,7 @@ static const CommandDef g_Commands[Cmd_Count] = {
     [Cmd_GoTo]          = { "go_to", "Go to a folder", Key_A + 'G' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_Bookmark]      = { "bookmark", "Bookmark this folder (again: not)", 0, 0 },
     [Cmd_FocusMode]     = { "focus_mode", "Focus: this pane alone, nothing else (again: back)", Key_A + 'F' - 'A', Mod_Ctrl | Mod_Shift },
+    [Cmd_NewWebTab]     = { "new_web_tab", "New web tab", Key_A + 'B' - 'A', Mod_Ctrl | Mod_Shift },
 };
 
 // --- settings: the palette's settings mode (Ctrl+,), a row each; a change applies at once and goes to settings.txt ---
@@ -108,7 +110,8 @@ enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
     Setting_DimUnfocused,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
-    Setting_Agent, Setting_Agents, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Count
+    Setting_Agent, Setting_Agents, Setting_GoodProgrammer, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
+    Setting_Count
 };
 enum { SettingKind_Choice, SettingKind_Bool, SettingKind_Text, SettingKind_Action };
 typedef struct SettingDef { const char *group, *label, *note; u8 kind; } SettingDef;
@@ -128,6 +131,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_CopyOnSelect]  = { "Terminal", "Copy on select", "a finished selection goes to the clipboard", SettingKind_Bool },
     [Setting_Agent]         = { "Agents", "Agent command", "what Ctrl+Shift+A starts", SettingKind_Text },
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
+    [Setting_GoodProgrammer] = { "Agents", "Be a good programmer", "your principles (good-programmer.md) in every Claude Code session", SettingKind_Bool },
     [Setting_HiddenFiles]   = { "Files", "Show hidden files", "Ctrl+H", SettingKind_Bool },
     [Setting_FolderSizes]   = { "Files", "Folder sizes", "local SSDs, measured in the background", SettingKind_Bool },
     [Setting_Notifications] = { "Shell", "Notifications", "when a tab off screen wants you", SettingKind_Bool },
@@ -135,6 +139,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_StartWithWindows] = { "More", "Start with Windows", "tabs come back at sign-in, in the tray", SettingKind_Bool },
     [Setting_ExplorerMenu]  = { "More", "\"Open in moss\" in Explorer", "on folders and their background", SettingKind_Bool },
     [Setting_OpenFolder]    = { "More", "Open the settings folder", "settings.txt and the shell setup", SettingKind_Action },
+    [Setting_Reset]         = { "More", "Reset to moss's defaults", "settings.txt as moss ships it; the old one kept as settings-old.txt", SettingKind_Action },
 };
 enum { PaletteMode_Commands, PaletteMode_Settings, PaletteMode_GoTo, PaletteMode_Account };
 
@@ -382,6 +387,7 @@ struct App {
     b32 broadcast;            // keys typed go to every terminal shown in the window
     b32 explorer_menu;        // Explorer has "Open in moss"
     b32 start_with_windows;   // the server starts at sign-in
+    b32 good_programmer;      // the global CLAUDE.md has the principles block
     u64 tab_menu;             // the PaneTab whose right-click menu is open (0 = none), at tab_menu_at
     s32 tab_menu_at[2];
     u8 bind_key[Cmd_Count];   // each command's key and modifiers: g_Commands' unless settings.txt `key.<command>` says
@@ -391,6 +397,9 @@ struct App {
     s32 sb_target;            // the scroll offset asked for so far (the grid catches up a frame later)
     u64 rename_tab;           // the PaneTab whose name is being edited in its strip (0 = none)
     TextEdit rename_edit;
+    u64 web_edit_tab;         // the PaneTab whose web address is being edited (0 = none)
+    TextEdit web_edit;
+    u32 web_popup_taken;      // the last page's new window (AppWebPopup.id) a web tab was made for
     u64 zoom_node;            // the pane shown over the whole area (0 = none)
     b32 focus_mode;           // focus: the focused pane alone over the whole window, no strips, sidebar or caption buttons;
                               // only its shell / browser keys work (zoom_node is its pane meanwhile)
@@ -460,6 +469,7 @@ struct App {
     u64 confirm_tab;          // PaneTab id waiting for "close anyway"
     u32 paste_wait;           // the terminal a paste goes to, once the clipboard's text is in (AppOutput.read_clipboard)
     u32 paste_confirm;        // the terminal a paste of several lines waits to be confirmed for (paste_arena holds it)
+    b32 reset_confirm;        // "Reset to moss's defaults" waits to be confirmed
     Arena paste_arena;
     String paste_text;
     b32 paste_warning_off;
@@ -545,6 +555,9 @@ static String TabLabel(const TermTab *t)
 
 static String PaneTabLabel(App *app, const PaneTab *t)
 {
+    if (!t->title_len && t->web) {
+        return t->web_title_len ? (String){ (u8 *)t->web_title, t->web_title_len } : t->web_url_len ? (String){ (u8 *)t->web_url, t->web_url_len } : S("New tab");
+    }
     return t->title_len ? (String){ (u8 *)t->title, t->title_len } : TabLabel(FindServerTab(app, t->term_id));
 }
 
@@ -799,21 +812,14 @@ static String CopyInto(u8 *buf, s64 cap, String s)
     return (String){ buf, n };
 }
 
-App *App_Create(const AppInit *init)
+// settings.txt's part of AppInit: at start, and again after "Reset to moss's defaults" (AppFrameInput.settings)
+static void ApplySettings(App *app, const AppInit *init)
 {
-    Arena boot = {0};
-    App *app = Arena_PushStruct(&boot, App);
-    app->arena = boot;
     app->term_font_pt = init->font_size_pt > 0 ? init->font_size_pt : 12;
-    app->headless = init->headless;
     app->opacity = init->opacity > 0 ? Clamp(init->opacity, 0.2f, 1.0f) : 1.0f;
     app->agent_command = CopyInto(app->agent_buf, sizeof(app->agent_buf), init->agent_command);
-    app->account_count = 1;   // the default account, until accounts.txt is read
-    app->accounts[0].name = S("default");
-    app->accounts[0].theme = -1;
     app->agents = CopyInto(app->agents_buf, sizeof(app->agents_buf), init->agents);
     app->term_font = CopyInto(app->term_font_buf, sizeof(app->term_font_buf), init->term_font);
-    app->window_name = CopyInto(app->window_name_buf, sizeof(app->window_name_buf), init->window_name);
     app->hide_hidden = init->hide_hidden;
     app->folder_sizes_off = init->folder_sizes_off;
     app->notifications_off = init->notifications_off;
@@ -827,33 +833,6 @@ App *App_Create(const AppInit *init)
     app->dim_unfocused_off = init->dim_unfocused_off;
     app->paste_warning_off = init->paste_warning_off;
     app->win32_input_off = init->win32_input_off;
-    app->explorer_menu = init->explorer_menu;
-    app->start_with_windows = init->start_with_windows;
-    app->hist_current = -1;
-    // --- the go-to box's: the environment, the known folders, recents and bookmarks (paths.txt) ---
-    app->environment = Str_PushCopy(&app->arena, init->environment);
-    app->place_count = Min(init->place_count, (s32)ArrayCount(app->places));
-    for (s32 i = 0; i < app->place_count; i++) {
-        app->places[i].name = Str_PushCopy(&app->arena, init->places[i].name);
-        app->places[i].path = Str_PushCopy(&app->arena, init->places[i].path);
-    }
-    for (s64 at = 0; at < init->paths_text.count;) {
-        s64 end = at;
-        while (end < init->paths_text.count && init->paths_text.data[end] != '\n') end++;
-        String line = { init->paths_text.data + at, end - at };
-        at = end + 1;
-        if (line.count && line.data[line.count - 1] == '\r') line.count--;
-        b32 recent = line.count > 7 && memcmp(line.data, "recent ", 7) == 0, mark = line.count > 9 && memcmp(line.data, "bookmark ", 9) == 0;
-        String path = recent ? (String){ line.data + 7, line.count - 7 } : (String){ line.data + 9, line.count - 9 };
-        if (recent && app->recent_count < 32 && path.count < 520) {
-            memcpy(app->recent[app->recent_count], path.data, (size_t)path.count);
-            app->recent_len[app->recent_count++] = (s32)path.count;
-        }
-        if (mark && app->bookmark_count < 32 && path.count < 520) {
-            memcpy(app->bookmark[app->bookmark_count], path.data, (size_t)path.count);
-            app->bookmark_len[app->bookmark_count++] = (s32)path.count;
-        }
-    }
     // --- key bindings: the defaults, then settings.txt's `key.<command> = <keys>` lines ("ctrl+shift+d", "none") ---
     for (u32 c = 0; c < Cmd_Count; c++) { app->bind_key[c] = g_Commands[c].key; app->bind_mods[c] = g_Commands[c].mods; }
     for (s64 at = 0; at < init->settings_text.count;) {
@@ -897,8 +876,50 @@ App *App_Create(const AppInit *init)
         app->bind_key[cmd] = key;
         app->bind_mods[cmd] = key ? mods : 0;
     }
+    app->term_theme = 0;   // Moss unless settings.txt names another
     for (s32 i = 0; i < TermTheme_Count; i++) {
         if (init->settings_theme.count && Str_EqualNoCase(init->settings_theme, Str_FromCStr(g_TermThemes[i].name))) app->term_theme = i;
+    }
+}
+
+App *App_Create(const AppInit *init)
+{
+    Arena boot = {0};
+    App *app = Arena_PushStruct(&boot, App);
+    app->arena = boot;
+    app->headless = init->headless;
+    app->window_name = CopyInto(app->window_name_buf, sizeof(app->window_name_buf), init->window_name);
+    app->explorer_menu = init->explorer_menu;
+    app->start_with_windows = init->start_with_windows;
+    app->good_programmer = init->good_programmer;
+    app->hist_current = -1;
+    ApplySettings(app, init);
+    app->account_count = 1;   // the default account, until accounts.txt is read
+    app->accounts[0].name = S("default");
+    app->accounts[0].theme = -1;
+    // --- the go-to box's: the environment, the known folders, recents and bookmarks (paths.txt) ---
+    app->environment = Str_PushCopy(&app->arena, init->environment);
+    app->place_count = Min(init->place_count, (s32)ArrayCount(app->places));
+    for (s32 i = 0; i < app->place_count; i++) {
+        app->places[i].name = Str_PushCopy(&app->arena, init->places[i].name);
+        app->places[i].path = Str_PushCopy(&app->arena, init->places[i].path);
+    }
+    for (s64 at = 0; at < init->paths_text.count;) {
+        s64 end = at;
+        while (end < init->paths_text.count && init->paths_text.data[end] != '\n') end++;
+        String line = { init->paths_text.data + at, end - at };
+        at = end + 1;
+        if (line.count && line.data[line.count - 1] == '\r') line.count--;
+        b32 recent = line.count > 7 && memcmp(line.data, "recent ", 7) == 0, mark = line.count > 9 && memcmp(line.data, "bookmark ", 9) == 0;
+        String path = recent ? (String){ line.data + 7, line.count - 7 } : (String){ line.data + 9, line.count - 9 };
+        if (recent && app->recent_count < 32 && path.count < 520) {
+            memcpy(app->recent[app->recent_count], path.data, (size_t)path.count);
+            app->recent_len[app->recent_count++] = (s32)path.count;
+        }
+        if (mark && app->bookmark_count < 32 && path.count < 520) {
+            memcpy(app->bookmark[app->bookmark_count], path.data, (size_t)path.count);
+            app->bookmark_len[app->bookmark_count++] = (s32)path.count;
+        }
     }
     app->theme_shown = app->term_theme;   // the first frame shows it at once
 
@@ -1689,6 +1710,61 @@ static String FocusedCwd(App *app)
     return st ? st->cwd : (String){0};
 }
 
+static const AppWebState *FindWebState(const AppFrameInput *in, u64 id)
+{
+    for (s32 i = 0; i < in->web_count; i++) if (in->webs[i].id == id) return &in->webs[i];
+    return NULL;
+}
+
+// The address row's text, as where the page goes: an address (https:// added when it has no scheme), else a search.
+static void WebGo(PaneTab *t, String text)
+{
+    while (text.count && text.data[0] == ' ') { text.data++; text.count--; }
+    while (text.count && text.data[text.count - 1] == ' ') text.count--;
+    if (!text.count) return;
+    b32 scheme = 0, space = 0, dot = 0;
+    for (s64 i = 0; i < text.count; i++) {
+        if (text.data[i] == ' ') space = 1;
+        if (text.data[i] == '.') dot = 1;
+        if (text.data[i] == ':' && i + 2 < text.count && text.data[i + 1] == '/' && text.data[i + 2] == '/') scheme = 1;
+    }
+    s64 n = 0;
+    const char *prefix = scheme ? "" : !space && (dot || (text.count >= 9 && memcmp(text.data, "localhost", 9) == 0)) ? "https://" : "https://www.google.com/search?q=";
+    for (const char *s = prefix; *s && n < (s64)sizeof(t->web_go); s++) t->web_go[n++] = (u8)*s;
+    for (s64 i = 0; i < text.count && n + 3 <= (s64)sizeof(t->web_go); i++) {
+        u8 ch = text.data[i];
+        if (!scheme && space && (ch == ' ' || ch == '&' || ch == '#' || ch == '+' || ch == '?')) {
+            n += snprintf((char *)t->web_go + n, 4, "%%%02X", ch);   // a search's words
+        } else {
+            t->web_go[n++] = ch;
+        }
+    }
+    t->web_go_len = (s32)n;
+    memcpy(t->web_url, t->web_go, (size_t)n);   // until the page says where it is
+    t->web_url_len = (s32)n;
+}
+
+static void StartWebEdit(App *app, const AppFrameInput *in, PaneTab *t)
+{
+    const AppWebState *ws = FindWebState(in, t->id);
+    String url = ws && ws->url.count ? ws->url : (String){ t->web_url, t->web_url_len };
+    TextEdit_Set(&app->web_edit, Str_Equal(url, S("about:blank")) ? (String){0} : url);
+    app->web_edit_tab = t->id;
+}
+
+// A web tab in `leaf` (after `after`, else at the end), shown and focused; its page goes to `url` (empty: none yet).
+static PaneTab *NewWebTab(App *app, PaneNode *leaf, PaneTab *after, String url, u32 popup)
+{
+    PaneTab *t = Panes_NewTab(&app->panes, leaf, after && after->node == leaf ? after->next : NULL);
+    t->web = 1;
+    t->web_popup = popup;
+    t->created_frame = app->ui.frame;
+    t->web_url_len = (s32)CopyInto(t->web_url, sizeof(t->web_url), url).count;
+    if (url.count && !popup) WebGo(t, url);
+    Panes_Select(&app->panes, t);
+    return t;
+}
+
 static PaneTab *FindPaneTab(Panes *panes, u64 id)
 {
     for (PaneNode *n = panes->root; n && id; n = Panes_NextNode(n)) {
@@ -1790,7 +1866,10 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         break;
     case Cmd_Broadcast: app->broadcast = !app->broadcast; break;
     case Cmd_Topmost: f->out->window_command = AppWindow_ToggleTopmost; break;
-    case Cmd_Duplicate: if (t) RequestTab(app, f, t->node, TermNew_Shell, FocusedCwd(app)); break;
+    case Cmd_Duplicate:
+        if (t && t->web) NewWebTab(app, t->node, t, (String){ t->web_url, t->web_url_len }, 0);
+        else if (t) RequestTab(app, f, t->node, TermNew_Shell, FocusedCwd(app));
+        break;
     case Cmd_CopyAll: if (t && t->term_id) TermScrollBy(f, t->term_id, TermScroll_CopyAll); break;
     case Cmd_ClearScrollback: if (t && t->term_id) TermScrollBy(f, t->term_id, TermScroll_Clear); break;
     case Cmd_ScrollBottom: if (t && t->term_id) TermScrollBy(f, t->term_id, TermScroll_ToBottom); break;
@@ -1895,8 +1974,14 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         break;
     case Cmd_ToggleBrowser:
         if (t && t->browsing) CloseBrowser(app, f, t);
-        else if (t) OpenBrowser(app, t);
+        else if (t && !t->web) OpenBrowser(app, t);
         break;
+    case Cmd_NewWebTab: {
+        // a blank page, the address being typed
+        PaneTab *w = NewWebTab(app, t ? t->node : app->panes.root, t, (String){0}, 0);
+        StartWebEdit(app, f->in, w);
+        break;
+    }
     }
 }
 
@@ -1983,8 +2068,14 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     f.out = out;
     f.fa = fa;
     f.nav_open = -1;
+    b32 reset_asked = 0;   // the reset's confirm box opens next frame: the Enter that asked mustn't answer it
     app->maximized = in->maximized;
     memcpy(app->window_rect, in->window_rect, sizeof(app->window_rect));
+    // settings.txt read again after a reset: applied as at start (the theme fades to its new one)
+    if (in->settings) {
+        ApplySettings(app, in->settings);
+        out->term_font = app->term_font;
+    }
 
     // --- metrics, colors, fonts ---
     u32 dpi = in->dpi ? in->dpi : 96;
@@ -2052,7 +2143,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     app->tabs_seen = in->tabs_received;
     for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
         for (PaneTab *t = n->first_tab; t; t = t->next) {
-            if (t->term_id) continue;
+            if (t->term_id || t->web) continue;
             for (s64 i = 0; i < in->tab_count && !t->term_id; i++) {
                 const TermTab *st = &in->tabs[i];
                 b32 taken = Panes_FindTerm(panes, st->id) != NULL || !Str_Equal(st->owner, app->window_name);
@@ -2074,7 +2165,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         for (PaneTab *t = n->first_tab; t;) {
             PaneTab *next = t->next;
             const TermTab *st = FindServerTab(app, t->term_id);
-            b32 gone = in->connected && app->tabs_seen && ((t->term_id && !st) || (!t->term_id && !t->request) || (st && !Str_Equal(st->owner, app->window_name)));
+            b32 gone = !t->web && in->connected && app->tabs_seen && ((t->term_id && !st) || (!t->term_id && !t->request) || (st && !Str_Equal(st->owner, app->window_name)));
             if (gone) {
                 Logf("app", "pane tab %llu gone (server tab %u)", (unsigned long long)t->id, t->term_id);
                 if (app->sel.term_id == t->term_id) app->sel.term_id = 0;
@@ -2399,10 +2490,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     }
     for (s32 i = 0; i < app->queued_count; i++) RunCommand(app, &f, app->queued[i]);
     app->queued_count = 0;
-    if (app->palette_open || app->confirm_tab || app->paste_confirm || app->tab_menu) {
+    if (app->palette_open || app->confirm_tab || app->paste_confirm || app->reset_confirm || app->tab_menu) {
         for (s64 i = 0; i < event_count; i++) consumed[i] = 1;   // the popup takes the keyboard
     }
-    b32 modal = app->palette_open || app->confirm_tab || app->paste_confirm || app->tab_menu;
+    b32 modal = app->palette_open || app->confirm_tab || app->paste_confirm || app->reset_confirm || app->tab_menu;
 
     // --- a tab being renamed has the keyboard: Enter keeps the name (empty: the server's again), Esc drops it ---
     b32 rename_done = 0;
@@ -2424,6 +2515,20 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         while (name.count && name.data[name.count - 1] == ' ') name.count--;
         renaming->title_len = (s32)CopyInto(renaming->title, sizeof(renaming->title), name).count;
         app->rename_tab = 0;
+    }
+
+    // --- a web page's address being edited: Enter goes there, Esc drops it, a click elsewhere too ---
+    PaneTab *web_editing = FindPaneTab(panes, app->web_edit_tab);
+    if (!web_editing || !web_editing->web) app->web_edit_tab = 0;
+    if (app->web_edit_tab) {
+        for (s64 i = 0; i < event_count; i++) {
+            if (consumed[i]) continue;
+            consumed[i] = 1;
+            if (!events[i].down) continue;
+            if (events[i].key == Key_Enter || events[i].key == Key_KeypadEnter) { WebGo(web_editing, TextEdit_String(&app->web_edit)); app->web_edit_tab = 0; }
+            if (events[i].key == Key_Escape) app->web_edit_tab = 0;
+        }
+        if (in->input.button[Mouse_Left].pressed && ui->hot != Ui_Id("WebAddress")) app->web_edit_tab = 0;
     }
 
     // --- the find bar: a click in the pane gives the keyboard back to the terminal, one on the bar takes it; while it
@@ -2532,7 +2637,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     // --- keys for the focused pane ---
     PaneTab *focus = panes->selected;
     const TermGrid *focus_grid = focus ? FindGrid(in, focus->term_id) : NULL;
-    if (focus && focus->viewing && focus->viewer) {
+    if (focus && focus->web) {
+        // --- a web page: the page has the keyboard (the platform's); what reaches the window here is Ctrl+L / F6 (the
+        //     address), F5 (reload), Alt+Left / Right stay pane focus. Nothing goes to the shell under it ---
+        for (s64 i = 0; i < event_count; i++) {
+            const UiKeyEvent *e = &events[i];
+            if (consumed[i] || !e->down) continue;
+            consumed[i] = ui->consumed[i] = 1;
+            if ((e->key == Key_A + 'L' - 'A' && (e->modifiers & Mod_Ctrl)) || e->key == Key_F1 + 5) StartWebEdit(app, in, focus);
+            if (e->key == Key_F1 + 4) focus->web_reload = 1;
+        }
+    } else if (focus && focus->viewing && focus->viewer) {
         // --- the picture view: arrows, Space / Backspace, PgUp / PgDn, Home / End step through the folder's pictures
         //     (round); Esc, Enter or q go back; every other key stays here ---
         Viewer *v = focus->viewer;
@@ -3196,6 +3311,48 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     PaneTab *close_later = NULL;   // a tab closed from its strip: after the panes are drawn (it may take its pane along)
     // the find bar's matches: the theme's yellow a third of the way in from the background; the current one bright
     const TermPalette term_palette = TermPaletteFor(tt, app->ligatures);
+    // --- web tabs: new windows pages asked for become tabs beside their opener ---
+    for (s32 i = 0; i < in->web_popup_count; i++) {
+        const AppWebPopup *pop = &in->web_popups[i];
+        if (pop->id <= app->web_popup_taken) continue;
+        PaneTab *opener = FindPaneTab(panes, pop->opener);
+        if (!opener) continue;
+        app->web_popup_taken = pop->id;
+        NewWebTab(app, opener->node, opener, pop->url, pop->id);
+    }
+    // --- every web tab is listed (the platform closes pages no longer listed; the shown ones get their rect below).
+    //     Their address and title follow the page; one that closed itself goes; a notification while it isn't in front
+    //     goes to the tray and puts a dot on its tab until it's shown ---
+    b32 web_shown = 0;
+    PaneTab *web_closed = NULL;
+    for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
+        for (PaneTab *o = n->first_tab; o; o = o->next) {
+            if (!o->web || out->web_count >= App_MaxWebs) continue;
+            AppWeb *aw = &out->webs[out->web_count++];
+            aw->id = o->id;
+            aw->popup = o->web_popup;
+            b32 in_front = o == panes->selected && !o->hidden && in->foreground;
+            if (in_front) o->web_needs = 0;
+            const AppWebState *ws = FindWebState(in, o->id);
+            if (!ws) continue;
+            o->web_title_len = (s32)CopyInto(o->web_title, sizeof(o->web_title), ws->title).count;
+            if (ws->url.count) o->web_url_len = (s32)CopyInto(o->web_url, sizeof(o->web_url), ws->url).count;
+            if (ws->close_requested) web_closed = o;
+            if (ws->notices != o->web_notices_seen) {
+                if (ws->notices > o->web_notices_seen && !in_front) {
+                    o->web_needs = 1;
+                    out->notify_title = ws->notice_title.count ? ws->notice_title : PaneTabLabel(app, o);
+                    out->notify_body = ws->notice_body;
+                }
+                o->web_notices_seen = ws->notices;
+            }
+        }
+    }
+    if (web_closed) {
+        // gone from the list this frame too: its page closes
+        for (s32 i = 0; i < out->web_count; i++) if (out->webs[i].id == web_closed->id) out->webs[i] = out->webs[--out->web_count];
+        CloseTab(app, &f, web_closed, 1);
+    }
     for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
         if (n->first_child) continue;
         c = &app->c;   // the window's chrome (an account's theme may have taken the pane before)
@@ -3328,7 +3485,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 // --- icon: an agent's robot or the shell's prompt; busy spins, needs-input shows a dot ---
                 b32 agent = st && (st->flags & TermTab_Agent);
                 b32 busy = st && (st->flags & TermTab_Busy);
-                b32 needs = st && (st->flags & TermTab_NeedsInput);
+                b32 needs = (st && (st->flags & TermTab_NeedsInput)) || (o->web && o->web_needs);
                 u32 text_color = tab_focused || hovered ? c->text : c->dim;
                 Rect inner = tr;
                 CutLeft(&inner, R(0.7));
@@ -3340,7 +3497,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     blink_wanted = 1;
                 } else {
                     b32 held = st && (st->flags & TermTab_AccountHeld);
-                    Draw_Icon(dl, icons_small, icon, held ? c->danger : text_color, o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
+                    Draw_Icon(dl, icons_small, icon, held ? c->danger : text_color, o->web ? Icon_Globe : o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
                 }
                 if (needs) Draw_Rect(dl, R4(icon.x1 - R(0.3), icon.y0 + RectH(icon) / 2 - R(0.8), icon.x1 + R(0.3), icon.y0 + RectH(icon) / 2 - R(0.2)), c->accent, (f32)R(0.3));
                 CutLeft(&inner, R(0.4));
@@ -3428,11 +3585,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             w->tab_id = o->term_id;
             w->cols = cols;
             w->rows = ost && ost->account.count ? account_rows : rows;
-            w->shown = !o->hidden && !o->browsing && !o->viewing;
+            w->shown = !o->hidden && !o->browsing && !o->viewing && !o->web;
         }
 
         Rect content = R4(px0, py0 + caption_h, px0 + pw, py0 + ph);
-        const TermTab *account_tab = t && !t->browsing && !t->viewing ? FindServerTab(app, t->term_id) : NULL;
+        const TermTab *account_tab = t && !t->browsing && !t->viewing && !t->web ? FindServerTab(app, t->term_id) : NULL;
         if (account_tab && account_tab->account.count) {
             // --- a claude's account line: who's billed and whose email it reports with (the server reads its login,
             //     organization, email and model as its /status would), the terminal above it ---
@@ -3466,7 +3623,57 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             Named(app, Str_PushFormat(fa, "account %.*s", STR_ARG(parts[2].count ? parts[2] : parts[0])), bar);
         }
-        if (t && t->viewing && t->viewer) {
+        if (t && t->web) {
+            // --- a web page: the address row (back, forward, reload, the address: a click edits it), then the page,
+            //     which the platform draws under this frame: nothing is drawn there, the frame is see-through ---
+            const AppWebState *ws = FindWebState(in, t->id);
+            Rect body = content;
+            Rect bar = CutTop(&body, browse_header_h);
+            Draw_Rect(dl, bar, c->bg, 0);
+            CutLeft(&bar, R(0.5));
+            CutRight(&bar, R(0.6));
+            Rect back = RectCenter(CutLeft(&bar, R(2.0)), R(2.0), R(2.0));
+            Rect fwd = RectCenter(CutLeft(&bar, R(2.0)), R(2.0), R(2.0));
+            Rect reload = RectCenter(CutLeft(&bar, R(2.0)), R(2.0), R(2.0));
+            CutLeft(&bar, R(0.4));
+            b32 can_back = ws && ws->can_back, can_forward = ws && ws->can_forward;
+            UiSignal bs = IconButton(app, Ui_IdN(Ui_Id("WebBack"), n->id), back, Icon_Back, icons_small, can_back ? c->dim : c->faint, c->hover, radius_small, Str_PushFormat(fa, "web back %d", pane_index));
+            UiSignal fs = IconButton(app, Ui_IdN(Ui_Id("WebForward"), n->id), fwd, Icon_Forward, icons_small, can_forward ? c->dim : c->faint, c->hover, radius_small, Str_PushFormat(fa, "web forward %d", pane_index));
+            UiSignal rs = IconButton(app, Ui_IdN(Ui_Id("WebReload"), n->id), reload, ws && ws->loading ? Icon_Cancel : Icon_Refresh, icons_small, c->dim, c->hover, radius_small, Str_PushFormat(fa, "web reload %d", pane_index));
+            if (bs.clicked && can_back) t->web_step = -1;
+            if (fs.clicked && can_forward) t->web_step = 1;
+            if (rs.clicked) t->web_reload = 1;
+            Rect ar = RectCenter(bar, RectW(bar), R(2.0));
+            b32 editing = app->web_edit_tab == t->id;
+            Draw_RectEx(dl, ar, ColorMix(c->bg, c->text, 0.06f), editing ? c->accent : c->line, 1, radius_small, NULL, 0, 0, 0);
+            if (editing) {
+                Ui_TextEdit(ui, Ui_Id("WebAddress"), &app->web_edit, RectShrink(ar, R(0.4)), font, 1, S("Address or search"), c->text, c->dim, c->selection);
+            } else {
+                UiSignal as = Ui_Hit(ui, Ui_IdN(Ui_Id("WebBar"), n->id), ar);
+                if (as.hovered) ui->cursor = Cursor_IBeam;
+                if (as.clicked) { Panes_Select(panes, t); StartWebEdit(app, in, t); }
+                String url = { t->web_url, t->web_url_len };
+                if (Str_Equal(url, S("about:blank"))) url = (String){0};
+                Rect tr = ar;
+                CutLeft(&tr, R(0.6));
+                Draw_TextIn(dl, font, tr, url.count ? c->text : c->dim, url.count ? url : S("Address or search (Ctrl+L)"), 0);
+            }
+            Named(app, Str_PushFormat(fa, "web address %d", pane_index), ar);
+            if (ws && ws->failed) {
+                Draw_Rect(dl, body, c->bg, 0);
+                Draw_TextIn(dl, font, R4(body.x0, body.y0 + R(2), body.x1, body.y0 + R(4)), c->dim, S("Web pages need WebView2 (Microsoft Edge's runtime)"), 0.5f);
+            }
+            UiSignal ps = Ui_Hit(ui, Ui_IdN(Ui_Id("Web"), n->id), body);
+            if (ps.pressed && t != panes->selected) Panes_Select(panes, t);
+            for (s32 i = 0; i < out->web_count; i++) {
+                if (out->webs[i].id != t->id) continue;
+                out->webs[i].rect = body;
+                out->webs[i].shown = 1;
+                out->webs[i].mouse = ps.hovered;
+            }
+            web_shown = 1;
+            Named(app, Str_PushFormat(fa, "web page %d", pane_index), body);
+        } else if (t && t->viewing && t->viewer) {
             // --- the picture view: the picture fitted (never above its own size at this DPI) on a dark ground, a caption
             //     row: its name, which of the folder's, its size, the keys. The wheel steps too ---
             Viewer *v = t->viewer;
@@ -4160,6 +4367,22 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     c = &app->c;
     if (close_later) CloseTab(app, &f, close_later, 0);
 
+    // --- web pages: where they go this frame (asked in the address row or by its keys), the see-through frame over
+    //     them, and the keyboard for the focused one while nothing of moss's wants it ---
+    for (s32 i = 0; i < out->web_count; i++) {
+        PaneTab *o = FindPaneTab(panes, out->webs[i].id);
+        if (!o) continue;
+        if (o->web_go_len) out->webs[i].navigate = Str_PushCopy(fa, (String){ o->web_go, o->web_go_len });
+        out->webs[i].step = o->web_step;
+        out->webs[i].reload = o->web_reload;
+        o->web_go_len = 0;
+        o->web_step = 0;
+        o->web_reload = 0;
+    }
+    if (web_shown) out->clear_color = 0;
+    PaneTab *web_focus = panes->selected;
+    if (web_focus && web_focus->web && !web_focus->hidden && !modal && !app->web_edit_tab && !app->rename_tab && !app->side_focus && !app->find_open) out->web_focus = web_focus->id;
+
     // --- the splitters again, on top: their lines, and their hit areas over the panes' ---
     for (s32 i = 0; i < splitter_count; i++) {
         Splitter *sp = &splitters[i];
@@ -4825,7 +5048,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             b32 on = k == Setting_HiddenFiles ? !app->hide_hidden : k == Setting_FolderSizes ? !app->folder_sizes_off : k == Setting_CursorBlink ? app->cursor_blink : k == Setting_Ligatures ? app->ligatures :
                      k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ExplorerMenu ? app->explorer_menu :
                      k == Setting_StartWithWindows ? app->start_with_windows : k == Setting_Notifications ? !app->notifications_off :
-                     k == Setting_VsEnv ? !app->vs_env_off : 0;
+                     k == Setting_VsEnv ? !app->vs_env_off : k == Setting_GoodProgrammer ? app->good_programmer : 0;
             b32 clicked_value = 0;
             if (sd->kind == SettingKind_Choice) {
                 s32 wide = k == Setting_Theme || k == Setting_Font || k == Setting_Backdrop ? R(11) : R(5);
@@ -4853,7 +5076,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 CutRight(&in_row, R(0.3));
                 Draw_TextIn(dl, font, CutRight(&in_row, Min(Font_Measure(font, value), R(18))), c->dim, value, 1);
             } else {
-                Draw_Icon(dl, icons_small, CutRight(&in_row, R(2)), c->dim, Icon_OpenInWindow);
+                Draw_Icon(dl, icons_small, CutRight(&in_row, R(2)), c->dim, k == Setting_Reset ? Icon_ChevronRight : Icon_OpenInWindow);
                 if (k == Setting_Background) {
                     // the image's file name (its folder dropped)
                     String file = in->background_path;
@@ -4947,6 +5170,13 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             } else if (act == Setting_ExplorerMenu) {
                 app->explorer_menu = !app->explorer_menu;
                 out->explorer_menu = app->explorer_menu ? 1 : 2;
+            } else if (act == Setting_GoodProgrammer) {
+                app->good_programmer = !app->good_programmer;
+                out->good_programmer = app->good_programmer ? 1 : 2;
+            } else if (act == Setting_Reset && step == 0) {
+                app->reset_confirm = 1;
+                app->palette_open = 0;
+                reset_asked = 1;
             } else if (act == Setting_Cursor) {
                 app->cursor = (u8)((app->cursor + (step < 0 ? 2 : 1)) % 3);
                 key = S("cursor"); val = app->cursor == 1 ? S("bar") : app->cursor == 2 ? S("underline") : S("block");
@@ -5017,6 +5247,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         s32 answer = ConfirmBox(app, Str_PushFormat(fa, "Paste %d lines?", lines), text, S("Paste"), S("paste anyway"), 0);
         if (answer > 0) TermSend(&f, app->paste_confirm, PasteBytes(fa, app->paste_text, 0));
         if (answer) app->paste_confirm = 0;
+    }
+    if (app->reset_confirm && !reset_asked && !app->paste_confirm && !app->confirm_tab) {
+        s32 answer = ConfirmBox(app, S("Reset every setting?"), S("The old ones are kept in settings-old.txt."), S("Reset"), S("reset settings"), 1);
+        if (answer > 0) out->reset_settings = 1;
+        if (answer) app->reset_confirm = 0;
     }
     if (app->confirm_tab) {
         PaneTab *ct = FindPaneTab(panes, app->confirm_tab);

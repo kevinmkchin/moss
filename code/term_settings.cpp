@@ -329,4 +329,70 @@ static void SeedUserSetup()
     }
 }
 
+// "Reset to moss's defaults": settings.txt becomes the default one moss ships (none: no settings.txt), the old one
+// kept as settings-old.txt.
+static void ResetSettings()
+{
+    std::wstring Path = SettingsPath();
+    std::wstring Old = Path.substr(0, Path.size() - 4) + L"-old.txt";
+    MoveFileExW(Path.c_str(), Old.c_str(), MOVEFILE_REPLACE_EXISTING);
+    CopyFileW((ExeDir() + L"shell\\settings.txt").c_str(), Path.c_str(), FALSE);
+}
+
+// "Be a good programmer" lives in the global CLAUDE.md, which every Claude Code session on the machine reads (in
+// moss or not): on = the user's principles (~\.moss\good-programmer.md) sit there between these markers, off = they
+// don't. The rest of the file is the user's and is kept as it is. clod's block (the same thing, its own markers)
+// counts as on, and off takes it out too.
+static const char* GoodMarks[2][2] = {
+    {"<!-- moss: Be a good programmer (start). moss's settings add and remove this block. -->", "<!-- moss: Be a good programmer (end) -->"},
+    {"<!-- clod: Be a good programmer (start).", "<!-- clod: Be a good programmer (end) -->"},
+};
+
+static bool32 GoodProgrammerOn()
+{
+    std::string Md = ReadWholeFile(ClaudeConfigDir() + L"\\CLAUDE.md");
+    return Md.find(GoodMarks[0][0]) != std::string::npos || Md.find(GoodMarks[1][0]) != std::string::npos;
+}
+
+// Puts the principles block into the global CLAUDE.md (On) or takes it out. False when the file couldn't be written
+// or there are no principles to add.
+static bool32 SetGoodProgrammer(bool32 On)
+{
+    std::wstring Path = ClaudeConfigDir() + L"\\CLAUDE.md";
+    std::string Md = ReadWholeFile(Path);
+
+    // --- drop the blocks (and the blank lines before them), wherever they are ---
+    for(const char* const* Mark : GoodMarks)
+    {
+        size_t Start = Md.find(Mark[0]);
+        size_t End = Start == std::string::npos ? std::string::npos : Md.find(Mark[1], Start);
+        if(End == std::string::npos) { continue; }
+        End += strlen(Mark[1]);
+        while(End < Md.size() && (Md[End] == '\r' || Md[End] == '\n')) { ++End; }
+        while(Start > 0 && (Md[Start - 1] == '\r' || Md[Start - 1] == '\n')) { --Start; }
+        Md.erase(Start, End - Start);
+        if(!Md.empty()) { Md += "\r\n"; }
+    }
+
+    // --- add it at the end, from the user's copy (else moss's default) ---
+    if(On)
+    {
+        std::string Principles = ReadWholeFile(UserTermDir() + L"good-programmer.md");
+        if(Principles.empty()) { Principles = ReadWholeFile(ExeDir() + L"shell\\good-programmer.md"); }
+        if(Principles.empty()) { return false; }
+        while(!Principles.empty() && strchr("\r\n", Principles.back())) { Principles.pop_back(); }
+        Md += (Md.empty() ? "" : "\r\n") + std::string(GoodMarks[0][0]) + "\r\n" + Principles + "\r\n" + GoodMarks[0][1] + "\r\n";
+    }
+
+    // --- written beside it, then swapped in, so a session reading it never sees half a file ---
+    CreateDirectoryW(ClaudeConfigDir().c_str(), 0);
+    std::wstring Temp = Path + L".moss-tmp";
+    FILE* File = 0;
+    _wfopen_s(&File, Temp.c_str(), L"wb");
+    if(!File) { return false; }
+    bool32 Ok = fwrite(Md.data(), 1, Md.size(), File) == Md.size();
+    fclose(File);
+    return Ok && MoveFileExW(Temp.c_str(), Path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
 

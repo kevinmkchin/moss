@@ -454,6 +454,13 @@ extern "C" void TermClient_Apply(TermClient* C, const AppOutput* Out)
     {
         ClientSend(C, MSG_ACCOUNT_OK, std::string((const char*)&Out->account_ok, 4));
     }
+    if(Out->notify_title.count)
+    {
+        std::string P((const char*)Out->notify_title.data, (size_t)Out->notify_title.count);
+        P.push_back(0);
+        P.append((const char*)Out->notify_body.data, (size_t)Out->notify_body.count);
+        ClientSend(C, MSG_NOTIFY, P);
+    }
     if(Out->history_get)
     {
         ClientSend(C, MSG_HISTORY_GET, std::string((const char*)&Out->history_get, 4));
