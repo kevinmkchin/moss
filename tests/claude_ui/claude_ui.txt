@@ -46,7 +46,12 @@ waitlabel copy code 1
 sleep 500
 waitidle
 capture out/reader.png
-# a tool claude used opens: its command and its output; the edit as a diff
+# the tools it used in a row, folded into one row; open, each opens: its command and its output; the edit as a diff
+cursorui tools Ran 1 command, edited 1 file, ran 1 search (1 failed)
+lmb down
+lmb up
+sleep 300
+waitidle
 cursorui tool Bash git status
 lmb down
 lmb up
@@ -85,6 +90,13 @@ waitidle
 capture out/asking.png
 type 1
 key Enter
+waitlabel chat prompt
+# --- a usage warning under claude's box doesn't take the conversation away ---
+type notice
+key Enter
+waitfor weekly limit
+sleep 500
+waitidle
 waitlabel chat prompt
 # --- Ctrl+Shift+R: its terminal, and back ---
 key Ctrl+Shift+R

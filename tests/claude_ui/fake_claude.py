@@ -13,7 +13,7 @@ if sid and cfg:
         json.dump({'pid': os.getpid(), 'sessionId': sid, 'cwd': os.getcwd()}, f, separators=(',', ':'))
 lock = threading.RLock()
 said = ['fake-claude ready']
-state = {'mode': False, 'status': '', 'asking': False, 'turn': 0}
+state = {'mode': False, 'status': '', 'asking': False, 'turn': 0, 'notice': False}
 
 def draw():
     with lock:
@@ -38,6 +38,9 @@ def draw():
             out.append('\x1b[%d;1H%s\x1b[%d;1H❯ \x1b[%d;1H%s' % (y, rule, y + 1, y + 2, rule))
             if state['mode']:
                 out.append('\x1b[%d;1H  ⏵⏵ auto mode on (shift+tab to cycle)%s' % (y + 3, ' · esc to interrupt' if state['status'] else ''))
+            if state['notice']:
+                # a usage warning under the mode line, as claude shows one
+                out.append('\x1b[%d;1H  You\'ve used 85%% of your weekly limit · resets Mon 9am\x1b[%d;1H  /upgrade to keep using Claude Code' % (y + 4, y + 5))
             out.append('\x1b[%d;3H' % (y + 1))
         out.append('\x1b[?2026l')
         sys.stdout.write(''.join(out))
@@ -117,6 +120,10 @@ for raw in sys.stdin:
             continue
         if line == 'ask':
             state['asking'] = True
+            draw()
+            continue
+        if line == 'notice':
+            state['notice'] = True
             draw()
             continue
         draw()

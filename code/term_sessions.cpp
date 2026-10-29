@@ -295,7 +295,8 @@ static std::wstring SessionFilePath(const std::wstring& ConfigDir, const std::st
 // A claude's transcript as read so far (MSG_HISTORY_GET): what the user typed, what claude wrote and each tool it used
 // (with its result), oldest first; 64 KB a message at most. Each read takes only what was written since (a turn under
 // way is read again and again), the first one the last 16 MB.
-struct history_entry { u32 Kind; std::string Time, Text; };   // Kind: 0 claude, 1 the user, 2 a tool used
+struct history_entry { u32 Kind; std::string Time, Text; };   // Kind: 0 claude, 1 the user, 2 a tool used (4: it failed),
+                                                              // 3 a note (a /command's output, an interruption, ...)
 struct history_cache
 {
     std::string SessionId;
@@ -361,16 +362,76 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
             if(Line.find("\"isSidechain\":true") != std::string::npos || Line.find("\"isMeta\":true") != std::string::npos) { continue; }
             if(!Line.compare(0, 20, "{\"type\":\"api-request")) { continue; }   // what was sent to the API: the conversation again
             history_entry E = {};
-            if(Line.find("\"role\":\"user\",\"content\":\"") != std::string::npos)
+            std::string Note;   // a /command, its output, an interruption, a notice: a note of its own
+            if(Line.find("\"subtype\":\"local_command\"") != std::string::npos || Line.find("\"subtype\":\"informational\"") != std::string::npos)
+            {
+                JsonFindString(Line, "content", false, Note);
+                if(Note.empty()) { continue; }
+            }
+            else if(Line.find("\"subtype\":\"compact_boundary\"") != std::string::npos)
+            {
+                Note = "Conversation compacted";
+            }
+            else if(Line.find("\"role\":\"user\",\"content\":\"") != std::string::npos)
             {
                 // a prompt as typed (tool results are arrays of blocks, not a string)
                 E.Kind = 1;
                 size_t At = Line.find("\"role\":\"user\",\"content\":\"");
                 JsonDecodeString(Line, At + 25, E.Text);
-                if(!E.Text.empty() && E.Text[0] == '<') { continue; } // a command's or hook's wrapper, not words
+                if(!E.Text.compare(0, 12, "<bash-input>"))
+                {
+                    // a shell command typed after "!": a tool's row, its output the next line's
+                    std::string Cmd = E.Text.substr(12, E.Text.find("</bash-input>") - std::min(E.Text.size(), (size_t)12));
+                    history_entry T = {};
+                    T.Kind = 2;
+                    T.Text = "!\x1f" + Cmd.substr(0, Cmd.find('\n')) + "\x1f" + Cmd + "\x1f";
+                    JsonFindString(Line, "timestamp", true, T.Time);
+                    C.Pending["bash"] = C.Entries.size();
+                    C.Entries.push_back(T);
+                    Changed = true;
+                    continue;
+                }
+                bool32 BashOut = !E.Text.compare(0, 13, "<bash-stdout>") || !E.Text.compare(0, 13, "<bash-stderr>");
+                if(!BashOut) { C.Pending.erase("bash"); }   // a `!` whose output never came (interrupted) waits no more
+                if(BashOut)
+                {
+                    auto P = C.Pending.find("bash");
+                    if(P == C.Pending.end() || P->second >= C.Entries.size()) { continue; }
+                    std::string Out;
+                    for(const char* Tag : {"bash-stdout", "bash-stderr"})
+                    {
+                        size_t A = E.Text.find(std::string("<") + Tag + ">"), B = E.Text.find(std::string("</") + Tag + ">");
+                        if(A != std::string::npos && B != std::string::npos && B > A) { Out += E.Text.substr(A + strlen(Tag) + 2, B - A - strlen(Tag) - 2); }
+                    }
+                    C.Entries[P->second].Text += Out.size() > 16 * 1024 ? Out.substr(0, 16 * 1024) : Out;
+                    C.Pending.erase(P);
+                    Changed = true;
+                    continue;
+                }
+                if(!E.Text.compare(0, 14, "<command-name>") || !E.Text.compare(0, 22, "<local-command-stdout>")) { Note = E.Text; }
+                else if(!E.Text.empty() && E.Text[0] == '<') { continue; } // a hook's or reminder's wrapper, not words
+            }
+            else if(Line.find("\"role\":\"user\",\"content\":[") != std::string::npos && Line.find("\"type\":\"tool_result\"") == std::string::npos)
+            {
+                // a prompt as blocks: its text (a picture pasted with it as [Image]); "[Request interrupted by user]" a note
+                E.Kind = 1;
+                size_t Blocks = Line.find("\"role\":\"user\",\"content\":[");
+                for(size_t At = Line.find("\"type\":\"", Blocks); At != std::string::npos; At = Line.find("\"type\":\"", At + 1))
+                {
+                    if(!Line.compare(At, 14, "\"type\":\"image\"")) { E.Text += E.Text.empty() ? "[Image]" : "\n[Image]"; continue; }
+                    if(Line.compare(At, 13, "\"type\":\"text\"")) { continue; }
+                    size_t T = Line.find("\"text\":\"", At + 13);
+                    std::string Part;
+                    if(T == std::string::npos || !JsonDecodeString(Line, T + 8, Part)) { continue; }
+                    if(!E.Text.empty()) { E.Text += "\n"; }
+                    E.Text += Part;
+                }
+                if(!E.Text.compare(0, 20, "[Request interrupted")) { Note = "Interrupted"; }
+                else if(!E.Text.empty() && E.Text[0] == '<') { continue; }
             }
             else if(Line.find("\"role\":\"assistant\"") != std::string::npos)
             {
+                C.Pending.erase("bash");
                 // claude's text blocks, in order; then each tool it used, an entry of its own (its result comes later)
                 const char* Pattern = "\"type\":\"text\",\"text\":\"";
                 for(size_t At = Line.find(Pattern); At != std::string::npos; At = Line.find(Pattern, At + 1))
@@ -443,22 +504,69 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
             }
             else if(Line.find("\"type\":\"tool_result\"") != std::string::npos)
             {
-                // --- results: each goes on the end of its tool's entry (its text, or its first text block) ---
-                for(size_t At = Line.find("\"tool_use_id\":\""); At != std::string::npos; At = Line.find("\"tool_use_id\":\"", At + 1))
+                // --- results: each goes on the end of its tool's entry (its text, or its first text block); a failed one
+                //     marks it. A block's keys come in any order: it runs from the '{' before its type to the next one's ---
+                for(size_t At = Line.find("\"type\":\"tool_result\""); At != std::string::npos;)
                 {
+                    size_t Next = Line.find("\"type\":\"tool_result\"", At + 1);
+                    size_t From = Line.rfind('{', At), To = Next == std::string::npos ? Line.size() : Line.rfind('{', Next);
+                    std::string Block = Line.substr(From, To - From);
+                    At = Next;
                     std::string Id, Out;
-                    JsonDecodeString(Line, At + 15, Id);
+                    size_t IdAt = Block.find("\"tool_use_id\":\"");
+                    if(IdAt == std::string::npos) { continue; }
+                    JsonDecodeString(Block, IdAt + 15, Id);
                     auto P = C.Pending.find(Id);
                     if(P == C.Pending.end() || P->second >= C.Entries.size()) { continue; }
-                    size_t Content = Line.find("\"content\":", At);
-                    if(Content == std::string::npos) { continue; }
-                    if(Content + 10 < Line.size() && Line[Content + 10] == '"') { JsonDecodeString(Line, Content + 11, Out); }
-                    else { size_t T = Line.find("\"text\":\"", Content); if(T != std::string::npos) { JsonDecodeString(Line, T + 8, Out); } }
+                    size_t Content = Block.find("\"content\":");
+                    if(Content != std::string::npos && Content + 10 < Block.size() && Block[Content + 10] == '"') { JsonDecodeString(Block, Content + 11, Out); }
+                    else if(Content != std::string::npos) { size_t T = Block.find("\"text\":\"", Content); if(T != std::string::npos) { JsonDecodeString(Block, T + 8, Out); } }
                     if(Out.size() > 16 * 1024) { Out.resize(16 * 1024); }
+                    if(Block.find("\"is_error\":true") != std::string::npos) { C.Entries[P->second].Kind = 4; }
                     C.Entries[P->second].Text += Out;
                     Changed = true;
                     C.Pending.erase(P);
                 }
+                continue;
+            }
+            if(!Note.empty())
+            {
+                // a note's text: the tags and terminal colors out; a /command's output goes on its command's note
+                std::string Clean;
+                bool32 Output = Note.find("<local-command-std") != std::string::npos;
+                for(size_t I = 0; I < Note.size(); ++I)
+                {
+                    if(Note[I] == '\x1b') { I++; while(I < Note.size() && !(Note[I] >= '@' && Note[I] <= '~' && Note[I] != '[')) { I++; } continue; }
+                    if(Note[I] == '<')
+                    {
+                        size_t Close = Note.find('>', I);
+                        std::string Tag = Close == std::string::npos ? std::string() : Note.substr(I, Close - I + 1);
+                        if(Tag == "<command-message>") { size_t End = Note.find("</command-message>", I); I = End == std::string::npos ? Note.size() : End + 17; continue; }
+                        if(!Tag.empty() && Tag.find(' ') == std::string::npos && Tag.size() < 32) { I = Close; if(Tag == "<command-args>") { Clean += ' '; } continue; }
+                    }
+                    Clean += Note[I];
+                }
+                while(!Clean.empty() && (Clean.back() == ' ' || Clean.back() == '\n')) { Clean.pop_back(); }
+                size_t Lead = Clean.find_first_not_of(" \n");
+                Clean = Lead == std::string::npos ? std::string() : Clean.substr(Lead);
+                if(!Output && !Clean.empty() && Clean[0] == '/')
+                {
+                    std::string One;   // a /command and its args: one line (claude writes them on lines of their own)
+                    for(char Ch : Clean) { if(Ch == '\n' || Ch == ' ') { if(!One.empty() && One.back() != ' ') { One += ' '; } } else { One += Ch; } }
+                    while(!One.empty() && One.back() == ' ') { One.pop_back(); }
+                    Clean = One;
+                }
+                if(Clean.empty()) { continue; }
+                if(Output && !C.Entries.empty() && C.Entries.back().Kind == 3 && C.Entries.back().Text[0] == '/') { C.Entries.back().Text += "\n" + Clean; }
+                else
+                {
+                    history_entry N = {};
+                    N.Kind = 3;
+                    N.Text = Clean.size() > 16 * 1024 ? Clean.substr(0, 16 * 1024) : Clean;
+                    JsonFindString(Line, "timestamp", true, N.Time);
+                    C.Entries.push_back(N);
+                }
+                Changed = true;
                 continue;
             }
             if(E.Text.empty()) { continue; }

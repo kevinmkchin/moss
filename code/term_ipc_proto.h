@@ -67,7 +67,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 18
+#define TERM_PROTOCOL_VERSION 19
 
 struct msg_attach
 {

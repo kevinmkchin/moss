@@ -38,21 +38,34 @@ for sid, project, prompt, text, age in sessions:
         f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:00.000Z',
                             'message': {'role': 'user', 'content': prompt}}, separators=(',', ':')) + '\n')
         if project == 'markdown':
-            # tools it used first: a command and an edit, and their results
+            # tools it used first, in a row: a command, an edit and a search that failed, and their results (a result's
+            # keys in Claude Code's order: its content before its tool's id)
             f.write(json.dumps({'type': 'assistant', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:02.000Z',
                                 'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [
                                     {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {'command': 'git status', 'description': 'Status'}},
-                                    {'type': 'tool_use', 'id': 'toolu_2', 'name': 'Edit', 'input': {'file_path': 'C:\\src\\parse.c', 'old_string': 'int add(int a)', 'new_string': 'int add(int a, int b)'}}]}},
+                                    {'type': 'tool_use', 'id': 'toolu_2', 'name': 'Edit', 'input': {'file_path': 'C:\\src\\parse.c', 'old_string': 'int add(int a)', 'new_string': 'int add(int a, int b)'}},
+                                    {'type': 'tool_use', 'id': 'toolu_3', 'name': 'Grep', 'input': {'pattern': 'add\\(', 'path': 'C:\\src\\nowhere'}}]}},
                                separators=(',', ':')) + '\n')
             f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:03.000Z',
                                 'message': {'role': 'user', 'content': [
                                     {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'On branch main\nnothing to commit, working tree clean'},
-                                    {'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': [{'type': 'text', 'text': 'The file was updated.'}]}]}},
+                                    {'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': [{'type': 'text', 'text': 'The file was updated.'}]},
+                                    {'type': 'tool_result', 'content': 'Path does not exist: C:\\src\\nowhere', 'is_error': True, 'tool_use_id': 'toolu_3'}]}},
                                separators=(',', ':')) + '\n')
         f.write(json.dumps({'type': 'assistant', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:05.000Z',
                             'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [{'type': 'text', 'text': text}],
                                         'usage': {'input_tokens': 1200, 'cache_creation_input_tokens': 800, 'cache_read_input_tokens': 40000, 'output_tokens': 300}}},
                            separators=(',', ':')) + '\n')
+        if project == 'markdown':
+            # then a /command with its output, and a prompt the user interrupted
+            for content in ['<command-name>/cost</command-name>\n            <command-message>cost</command-message>\n            <command-args></command-args>',
+                            '<local-command-stdout>Total cost: $0.42\nTotal duration: 3m 12s</local-command-stdout>']:
+                f.write(json.dumps({'parentUuid': 'x', 'isSidechain': False, 'type': 'system', 'subtype': 'local_command', 'content': content,
+                                    'level': 'info', 'timestamp': '2026-06-15T10:00:06.000Z', 'isMeta': False, 'cwd': cwd, 'sessionId': sid},
+                                   separators=(',', ':')) + '\n')
+            f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:07.000Z',
+                                'message': {'role': 'user', 'content': [{'type': 'text', 'text': '[Request interrupted by user]'}]}},
+                               separators=(',', ':')) + '\n')
     os.utime(path, (now - age, now - age))
 with open(os.path.join(cfg, '.claude.json'), 'w') as f:
     json.dump({'oauthAccount': {'emailAddress': 'tester@example.com', 'organizationName': 'Example Org'}}, f, indent=2)

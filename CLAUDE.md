@@ -262,19 +262,24 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - A claude tab shows its conversation (`Chat`, one per claude tab shown lately, `App.chats[8]`): the transcript as an
   article above a prompt box, not claude's TUI. Settings "Claude tabs as a conversation" (`claude_chat = off`) turns
   that the other way; Ctrl+Shift+R (`reader`) flips one tab (`PaneTab.chat_flip`). Only while claude sits at its own
-  prompt box (`ClaudePromptBox`: a rule, the `❯` line (a no-break space after it), a rule, within the bottom 4 rows
-  written): a question, a permission, a menu (/model) or the start shows the terminal, and the conversation comes back
+  prompt box (`ClaudePromptBox`: a rule, the `❯` line (a no-break space after it), a rule, the lowest rule within the
+  bottom 12 rows written, nothing under it but the mode line and notices such as a usage warning: no other rule, no
+  `❯ 1.` choice): a question, a permission, a menu (/model) or the start shows the terminal, and the conversation comes back
   once it's answered there.
 - Its box (`Chat.draft`, a `Ui_TextArea` in `Font_ReadSans`, Segoe UI 11 pt): Enter sends (`ChatSend`: as typed, or a
-  bracketed paste when it has lines, then `\r`), Shift+Enter is a new line, Esc stops a turn (win32-input-mode's Esc key
+  bracketed paste when it has lines; Enter goes 120 ms later on its own, as the key, so claude doesn't take it as part
+  of a paste: `SendLine`, `App.enters`, also the model picker's `/model` and the composer; an Enter still on its way to
+  the tab goes before the next line), Shift+Enter is a new line, Esc stops a turn (win32-input-mode's Esc key
   when asked), Shift+Tab claude's mode, PgUp/PgDn and Ctrl+Home/End scroll, Ctrl+V a picture's path, files dropped and
   Ctrl+Shift+V pastes go in. The prompt shows at once (`Chat.pending`) until the transcript has it (20 s at most; never
-  for /commands). While a turn runs: claude's own status line (the row over its box) above the box, a stop button.
+  for /commands). While claude works (its title's spinner, or "esc to interrupt" on its mode line: `ClaudeWorking`): a
+  ◐◓◑◒ spinner and claude's own status line (the row over its box, its mark dropped; else "Working…") above the box, a
+  stop button. The wheel scrolls anywhere over the view (rows and code blocks take the hover).
 - Live: the window asks for the history (`AppOutput.history_asks`: tab, from, have) when it shows, every 400 ms while
   a turn runs or 4 s after a send or a change, and once when the turn ends. The server keeps each tab's transcript read
   so far (`history_cache` in term_sessions.cpp: `ReadHistoryMore` reads only what was written since, the first time
   the last 16 MB; another session or a shorter file starts over; versions count server-wide from the clock) and
-  answers `MSG_HISTORY` with the messages from `from` on, or nothing if unchanged (protocol 18). `Stable`: the messages
+  answers `MSG_HISTORY` with the messages from `from` on, or nothing if unchanged (protocol 18; 19: kinds 3 and 4). `Stable`: the messages
   before it won't change (the last may go on, a tool waits for its result). Its size comes from an open handle (the
   folder entry lags while claude keeps the file open). Lines starting `{"type":"api-request` (Claude Code 2.1's copies
   of what it sent) are skipped, a tool id written twice counts once.
@@ -299,6 +304,16 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   (`Font_ReadSans`) in a soft rounded bubble, Cascadia Mono 10 pt code; each line has its own height and place
   (`HistLine.y/h`: gaps before a message, a heading, a block); headers in local time ("Today 14:03"); code blocks in a
   container with a header (the fence's language, the copy button); tables padded, the header row on a shade.
+- Notes (`MSG_HISTORY` kind 3, `HistLine_Note`: small, dim, a hairline at the left): a /command and its output (system
+  `local_command` lines, or user lines wrapping `<command-name>` / `<local-command-stdout>`; colors and tags out),
+  notices (`informational`: usage limit reset, unknown command), "Conversation compacted", "Interrupted". A shell command
+  typed after `!` (`<bash-input>`, `<bash-stdout>`) is a tool row named `!`. A prompt sent as blocks keeps its text
+  (`[Image]` for a picture).
+- Tools used in a row (no text between) fold into one row, as Claude Desktop's ("Ran 3 commands, read 2 files (1
+  failed)": `HistLine_Group`, by kind in order of first use); open, each tool's row under it, indented. Unlike Desktop's
+  (anthropics/claude-code#90425) text between tools is never folded. A rebuild inside a run starts at the run.
+  A failed tool (`is_error`: kind 4) has its name in red. A result's keys come in any order (Claude Code writes
+  `content` before `tool_use_id`): each `tool_result` block is read from its `{` to the next one's.
 - The tools claude used are in it too: the history read keeps each `tool_use` (its name, a summary: the command, the
   file, the pattern, ...; its detail: the whole command, an edit as '-' / '+' lines, a file written) with its
   `tool_result` (`MSG_HISTORY` entry kind 2, fields split by \x1f). Each is a row (a chevron, its name, the summary in
