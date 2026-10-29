@@ -1042,6 +1042,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
             u64 t4 = Time_NowMicros();
             phase[3] = t4 - t3;
             Gpu_Present(p->gpu);
+            Web_Presented(p->web);
             Term_LatencyMark("client_present");
             phase[4] = Time_NowMicros() - t4;
             p->resized = 0;
@@ -1495,7 +1496,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     case WM_SETFOCUS:
     case WM_KILLFOCUS:
         p->focused = msg == WM_SETFOCUS;
-        if (!p->focused) ReleaseCapture();
+        if (!p->focused && !IsChild(hwnd, (HWND)wparam)) ReleaseCapture();   // the keyboard going to a page (a child) keeps a drag
         p->wake_frame = p->frame;
         break;
     case WM_ACTIVATE:
@@ -2660,7 +2661,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
                 UiButton *btn = &p->input.button[b];
                 btn->pressed = 0;
                 btn->released = 0;
-                if (btn->down && !p->focused) { btn->released = 1; btn->down = 0; }
+                if (btn->down && !p->focused && !Web_HasFocus(p->web)) { btn->released = 1; btn->down = 0; }   // a page's keyboard is still the window's
             }
             p->input.wheel[0] = 0;
             p->input.wheel[1] = 0;
