@@ -29,6 +29,8 @@ struct tab
     bool32 NeedsInput;      // claude asked for the user (bell, OSC 9) and nothing has been typed into it since
     bool32 Running;         // a shell running a program: its cmd has a child (not the prompt's own git status); busy from
                             // the Enter of a command line, idle the moment its prompt is back (OSC 9;9)
+    std::string Program;    // the command line of the program it runs, when a restart runs it again (settings
+                            // `restore_programs`); kept in tabs.txt
     bool32 PromptSeen;      // its prompt reports itself (OSC 9;9)
     bool32 AtPrompt;        // the prompt printed and no Enter went in since
     u64 EnterAtMs;          // the last Enter typed into it
@@ -211,13 +213,14 @@ static std::wstring ProcessCommandLine(DWORD Pid)
     return Out;
 }
 
-// The CLI agents the scan looks for (settings.txt `agents`, names separated by spaces or commas):
-// a process under a tab's cmd whose exe has the name, or a script host (node, bun, deno, python)
-// running a script whose path has a folder or file of that name (npm installs: gemini, codex, ...).
-static std::vector<std::string> AgentNames()
+// A settings.txt list of program names (separated by spaces or commas), lowercase; Default when unset.
+// `agents`: the CLI agents the scan looks for: a process under a tab's cmd whose exe has the name, or a
+// script host (node, bun, deno, python) running a script whose path has a folder or file of that name
+// (npm installs: gemini, codex, ...). `restore_programs`: what a shell tab runs again after a restart.
+static std::vector<std::string> SettingNames(const char* Key, const char* Default)
 {
-    std::string Setting = ReadSetting("agents");
-    if(Setting.empty()) { Setting = "codex gemini aider opencode copilot qwen cursor-agent amp goose crush"; }
+    std::string Setting = ReadSetting(Key);
+    if(Setting.empty()) { Setting = Default; }
     std::vector<std::string> Out;
     for(size_t At = 0; At < Setting.size();)
     {
@@ -240,6 +243,7 @@ struct claude_find
     std::string ShellCwd;
     std::string Agent;   // another CLI agent running under it (settings `agents`), when there's no claude
     bool32 HasChild; // the cmd runs a program
+    std::string Program; // its command line, when it's one to run again after a restart (settings `restore_programs`)
     u64 CpuUsed;     // CPU time the cmd and everything under it used since the last scan (100 ns units)
 };
 
@@ -308,6 +312,7 @@ struct claude_scan
 {
     std::vector<DWORD> CmdPids;
     std::vector<std::string> Agents; // in: the CLI agents to look for by name (settings `agents`)
+    std::vector<std::string> Programs; // in: the programs a restart runs again (settings `restore_programs`)
     std::vector<claude_find> Finds;
     std::map<std::pair<DWORD, u64>, u64> Cpu; // in: each tab process's CPU time at the last scan, by pid and start time; out: now
     u64 PrevAtFt;  // in: when the last scan read them (0 = none yet)
@@ -357,6 +362,14 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
             std::string Line = WideToUtf8(ProcessCommandLine(P.th32ProcessID));
             if(Line.find("GIT_OPTIONAL_LOCKS=0") != std::string::npos || Line.find("--no-optional-locks") != std::string::npos) { continue; }
             F.HasChild = true;
+            // one to run again after a restart; never a line cmd would read as more than one command (its
+            // escapes and variables are gone from what the child got)
+            std::string Exe = ToLower(WideToUtf8(P.szExeFile));
+            if(Exe.size() > 4 && Exe.compare(Exe.size() - 4, 4, ".exe") == 0) { Exe.resize(Exe.size() - 4); }
+            if(std::find(S->Programs.begin(), S->Programs.end(), Exe) != S->Programs.end() && Line.find_first_of("&|<>^%\r\n") == std::string::npos)
+            {
+                F.Program = Line;
+            }
         }
         // --- the CPU the tree used since the last scan: each process's time now less what it had then,
         // all of it for one started since (a process that ended in between takes its last slice along) ---
@@ -1028,14 +1041,14 @@ static std::wstring TabsFilePath()
     return Dir + L"\\tabs" + InstanceSuffix() + L".txt";
 }
 
-// One line per tab: "tab|shell <tab> lasting id <tab> cwd <tab> project <tab> title". The layout is the
-// window's (session.json): it finds the tabs again by their lasting ids.
+// One line per tab: "tab|shell <tab> lasting id <tab> cwd <tab> project <tab> title <tab> owner <tab> program".
+// The layout is the window's (session.json): it finds the tabs again by their lasting ids.
 static std::string TabsFileContents(const server_state& Server)
 {
     std::string Out;
     for(const tab* T : Server.Tabs)
     {
-        std::string Fields[5] = {T->SessionId.empty() ? T->HistoryId : T->SessionId, T->Cwd, T->Project, T->Title, T->Owner};
+        std::string Fields[6] = {T->SessionId.empty() ? T->HistoryId : T->SessionId, T->Cwd, T->Project, T->Title, T->Owner, T->Program};
         Out += T->SessionId.empty() ? "shell" : "tab";
         for(std::string& F : Fields)
         {
@@ -1240,7 +1253,8 @@ static int ServerMain()
             for(HANDLE Proc : Still) { CloseHandle(Proc); }
         }
         // A claude tab resumes its session. A shell can't be resumed; it comes back as a fresh one in
-        // the same folder, as does a claude that never got a prompt (no session file).
+        // the same folder (running its program again: nvim and the like), as does a claude that never
+        // got a prompt (no session file).
         for(size_t At = 0; At < Saved.size();)
         {
             size_t End = Saved.find('\n', At);
@@ -1250,9 +1264,11 @@ static int ServerMain()
             if(F.size() >= 5 && (F[0] == "tab" || F[0] == "shell"))
             {
                 bool32 Claude = (F[0] == "tab" && !SessionFilePath(F[1]).empty());
-                tab* T = OpenTab(Server, !Claude, F[1], Claude ? std::string() : F[1], F[2], Claude ? F[4] : std::string(), 120, 40, 0, std::string(),
+                std::string Program = !Claude && F.size() >= 7 ? F[6] : std::string();
+                tab* T = OpenTab(Server, !Claude, F[1], Claude ? std::string() : F[1], F[2], Claude ? F[4] : std::string(), 120, 40, 0, Program,
                                  Job, Wake, GetTickCount64());
                 if(F.size() >= 6) { T->Owner = F[5]; }
+                if(!Program.empty()) { Logf("server", "tab %u runs again: %s", T->Id, Program.c_str()); }
             }
         }
         Logf("server", "restored %d tab(s)", (int)Server.Tabs.size());
@@ -1811,7 +1827,7 @@ static int ServerMain()
                 if(!T->Term.Cwd.empty())
                 {
                     if(T->SessionId.empty() && T->Term.Cwd != T->Cwd) { T->Cwd = T->Term.Cwd; T->Project = ProjectName(T->Cwd); }
-                    if(T->SessionId.empty()) { T->Running = false; }
+                    if(T->SessionId.empty()) { T->Running = false; T->Program.clear(); }
                     T->PromptSeen = true;
                     T->AtPrompt = true;
                     T->Term.Cwd.clear();
@@ -1865,6 +1881,11 @@ static int ServerMain()
                 if(Elapsed) { T->Cpu = (float)(Find->CpuUsed * 100.0 / ((double)Elapsed * Cores)); }
                 // a program under the cmd; or just after Enter while the prompt isn't back (the scan may predate it)
                 T->Running = T->SessionId.empty() && (Find->HasChild || (T->PromptSeen && !T->AtPrompt && GetTickCount64() - T->EnterAtMs < 3000));
+                if(T->SessionId.empty() && Find->Program != T->Program)
+                {
+                    Logf("server", "tab %u: program %s", T->Id, Find->Program.empty() ? "gone" : Find->Program.c_str());
+                    T->Program = Find->Program;
+                }
                 if(Find->Agent != T->Agent && !Find->Pid)
                 {
                     Logf("server", "tab %u: agent %s", T->Id, Find->Agent.empty() ? "gone" : Find->Agent.c_str());
@@ -1913,7 +1934,8 @@ static int ServerMain()
             Scan->Wake = Wake;
             Scan->Cpu = CpuKnown;
             Scan->PrevAtFt = CpuAtFt;
-            Scan->Agents = AgentNames();
+            Scan->Agents = SettingNames("agents", "codex gemini aider opencode copilot qwen cursor-agent amp goose crush");
+            Scan->Programs = SettingNames("restore_programs", "nvim vim hx micro nano emacs less lazygit htop btop");
             for(tab* T : Server.Tabs) { if(T->Pty && !T->Exited) { Scan->CmdPids.push_back(GetProcessId(T->Pty->Process)); } }
             HANDLE Thread = CreateThread(0, 0, ClaudeScanThread, Scan, 0, 0);
             if(Thread) { CloseHandle(Thread); }

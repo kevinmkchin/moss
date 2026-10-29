@@ -379,6 +379,11 @@ the disk.
 
 - Quit (tray) stops the server but keeps `tabs.txt`; tabs come back on the next start (claude with --resume,
   shells in their folder with their last output). Never expose a way to end every tab and forget them.
+- A shell running a program named in settings `restore_programs` (default nvim vim hx micro nano emacs less lazygit
+  htop btop) runs it again after a restart: the scan keeps the cmd's child's command line (`tab::Program`, tabs.txt's
+  last field; never a line with `& | < > ^ %`), cleared when the prompt is back. Quit doesn't ask about such a tab when
+  nothing is lost: less, htop, btop, or an nvim whose swap files (`nvim-data\swap`: the writer's pid at byte 24, 0x55
+  at byte 1007 while modified) show nothing unsaved. Test by hand: a named `--instance` run, `quitserver`, a second run.
 - Never resume a claude session while an older claude of it is still alive (the server waits for them).
 - Strip a parent Claude Code session's env markers from tabs (`ClaudeMarkers`).
 - Real claude in tests: always end it with `/exit` (killing it during startup turns its fullscreen renderer off
