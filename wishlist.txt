@@ -9,3 +9,24 @@ Web browser
 - A browser in a pane. It need not have every feature of the newest browsers (Chrome and the like), only enough
   for the web apps that matter: Slack, Spotify, x.com, GitHub, reddit.com.
 - Stretch goal: youtube.com.
+
+Claude tabs as comfortable as Claude Desktop (keep Claude Code's own TUI; moss adds around it)
+Picked first, in this order:
+1. Prompt composer: a key opens a real text box (multi-line, mouse, undo) that goes into claude as a paste; an
+   image pasted or dropped is saved to a temp file and its path inserted (claude reads images by path); files dropped
+   insert their paths.
+2. Reader: the history view (transcript) as rendered markdown, a prose font, real tables, a copy button on each code
+   block; "clean copy" in the terminal drops claude's decorations (bullets, tree marks) and joins wrapped lines.
+3. The account line clickable: model, mode, context % open a picker that types /model etc. for you; context % and
+   tokens per turn from the transcript.
+4. Search every session's transcript (all accounts) from the sidebar; rename, pin, archive sessions.
+Later:
+- File names and paths in claude's replies (terminal or reader, with or without :line) are clickable: a small menu of
+  what to do with that file: view it (in the tab's picture view / a read-only text view, at that line), a quick diff
+  of it (its changes this session or against git), open it in the editor, show it in the files face, copy its path.
+- Jump between your own prompts in a claude tab (Ctrl+Shift+Up/Down, like shell commands), an outline of them.
+- Each turn's changed files as real diffs (from the transcript's edits or git diff), in the tab's files face.
+- Preview HTML claude writes in a web tab, refreshed as it changes.
+- Permission prompts answered from the tray notification (Allow / Deny send the key); the strip marks who waits.
+- Plan limits per account (5 h, weekly) in the manager and account line: needs the user's OK first, since moss would
+  call api.anthropic.com/api/oauth/usage with each account's login token (the only source; not on disk).
