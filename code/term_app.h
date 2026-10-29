@@ -40,6 +40,7 @@ typedef struct AppInit {
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
     b32 explorer_menu;          // Explorer has "Open in moss" (registered for this user)
     b32 start_with_windows;     // term's server starts at sign-in (the user's Run key)
+    b32 good_programmer;        // the global CLAUDE.md has the "Be a good programmer" block
     s32 background_strength;    // settings.txt `background_strength`: how much of the background image shows (percent; 0 = the default 30, -1 = off)
     String environment;         // the window's environment, NAME=value a line (%NAME% in typed paths)
     s32 place_count;            // the known folders, for the go-to box's Places
@@ -96,6 +97,7 @@ typedef struct AppFrameInput {
     b32 drag_over;              // another program drags files over the window (at the mouse)
     s64 drop_count;             // files it dropped this frame (at the mouse)
     const String *dropped;
+    const AppInit *settings;    // settings.txt read again after AppOutput.reset_settings (one frame); else NULL
     // --- what the debug overlay shows (Ctrl+Alt+Shift+F12) ---
     struct {
         f32 work_ms_avg, work_ms_max;      // the last 120 frames' work
@@ -179,6 +181,8 @@ typedef struct AppOutput {
     b32 open_taken;             // the outside request's tab was asked for
     u8 explorer_menu;           // 1: add "Open in moss" to Explorer, 2: take it away
     u8 start_with_windows;      // 1: start term's server at sign-in, 2: don't
+    u8 good_programmer;         // 1: the principles into the global CLAUDE.md, 2: out of it
+    b32 reset_settings;         // settings.txt back to moss's own (the old one kept), read again: AppFrameInput.settings
     u32 tear_off_tab;           // this tab goes to another window: the one under the mouse (tear_off_drop), else a new one
     b32 tear_off_drop;          // dragged out of the window: where the mouse is decides
     b32 tear_off_last;          // it's the window's only tab: only into another window

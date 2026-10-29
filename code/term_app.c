@@ -104,7 +104,8 @@ static const CommandDef g_Commands[Cmd_Count] = {
 enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
-    Setting_Agent, Setting_Agents, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Count
+    Setting_Agent, Setting_Agents, Setting_GoodProgrammer, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
+    Setting_Count
 };
 enum { SettingKind_Choice, SettingKind_Bool, SettingKind_Text, SettingKind_Action };
 typedef struct SettingDef { const char *group, *label, *note; u8 kind; } SettingDef;
@@ -123,6 +124,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_CopyOnSelect]  = { "Terminal", "Copy on select", "a finished selection goes to the clipboard", SettingKind_Bool },
     [Setting_Agent]         = { "Agents", "Agent command", "what Ctrl+Shift+A starts", SettingKind_Text },
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
+    [Setting_GoodProgrammer] = { "Agents", "Be a good programmer", "your principles (good-programmer.md) in every Claude Code session", SettingKind_Bool },
     [Setting_HiddenFiles]   = { "Files", "Show hidden files", "Ctrl+H", SettingKind_Bool },
     [Setting_FolderSizes]   = { "Files", "Folder sizes", "local SSDs, measured in the background", SettingKind_Bool },
     [Setting_Notifications] = { "Shell", "Notifications", "when a tab off screen wants you", SettingKind_Bool },
@@ -130,6 +132,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_StartWithWindows] = { "More", "Start with Windows", "tabs come back at sign-in, in the tray", SettingKind_Bool },
     [Setting_ExplorerMenu]  = { "More", "\"Open in moss\" in Explorer", "on folders and their background", SettingKind_Bool },
     [Setting_OpenFolder]    = { "More", "Open the settings folder", "settings.txt and the shell setup", SettingKind_Action },
+    [Setting_Reset]         = { "More", "Reset to moss's defaults", "settings.txt as moss ships it; the old one kept as settings-old.txt", SettingKind_Action },
 };
 enum { PaletteMode_Commands, PaletteMode_Settings, PaletteMode_GoTo };
 
@@ -360,6 +363,7 @@ struct App {
     b32 broadcast;            // keys typed go to every terminal shown in the window
     b32 explorer_menu;        // Explorer has "Open in moss"
     b32 start_with_windows;   // the server starts at sign-in
+    b32 good_programmer;      // the global CLAUDE.md has the principles block
     u64 tab_menu;             // the PaneTab whose right-click menu is open (0 = none), at tab_menu_at
     s32 tab_menu_at[2];
     u8 bind_key[Cmd_Count];   // each command's key and modifiers: g_Commands' unless settings.txt `key.<command>` says
@@ -427,6 +431,7 @@ struct App {
     u64 confirm_tab;          // PaneTab id waiting for "close anyway"
     u32 paste_wait;           // the terminal a paste goes to, once the clipboard's text is in (AppOutput.read_clipboard)
     u32 paste_confirm;        // the terminal a paste of several lines waits to be confirmed for (paste_arena holds it)
+    b32 reset_confirm;        // "Reset to moss's defaults" waits to be confirmed
     Arena paste_arena;
     String paste_text;
     b32 paste_warning_off;
@@ -752,18 +757,14 @@ static String CopyInto(u8 *buf, s64 cap, String s)
     return (String){ buf, n };
 }
 
-App *App_Create(const AppInit *init)
+// settings.txt's part of AppInit: at start, and again after "Reset to moss's defaults" (AppFrameInput.settings)
+static void ApplySettings(App *app, const AppInit *init)
 {
-    Arena boot = {0};
-    App *app = Arena_PushStruct(&boot, App);
-    app->arena = boot;
     app->term_font_pt = init->font_size_pt > 0 ? init->font_size_pt : 12;
-    app->headless = init->headless;
     app->opacity = init->opacity > 0 ? Clamp(init->opacity, 0.2f, 1.0f) : 1.0f;
     app->agent_command = CopyInto(app->agent_buf, sizeof(app->agent_buf), init->agent_command);
     app->agents = CopyInto(app->agents_buf, sizeof(app->agents_buf), init->agents);
     app->term_font = CopyInto(app->term_font_buf, sizeof(app->term_font_buf), init->term_font);
-    app->window_name = CopyInto(app->window_name_buf, sizeof(app->window_name_buf), init->window_name);
     app->hide_hidden = init->hide_hidden;
     app->folder_sizes_off = init->folder_sizes_off;
     app->notifications_off = init->notifications_off;
@@ -776,33 +777,6 @@ App *App_Create(const AppInit *init)
     app->copy_on_select_off = init->copy_on_select_off;
     app->paste_warning_off = init->paste_warning_off;
     app->win32_input_off = init->win32_input_off;
-    app->explorer_menu = init->explorer_menu;
-    app->start_with_windows = init->start_with_windows;
-    app->hist_current = -1;
-    // --- the go-to box's: the environment, the known folders, recents and bookmarks (paths.txt) ---
-    app->environment = Str_PushCopy(&app->arena, init->environment);
-    app->place_count = Min(init->place_count, (s32)ArrayCount(app->places));
-    for (s32 i = 0; i < app->place_count; i++) {
-        app->places[i].name = Str_PushCopy(&app->arena, init->places[i].name);
-        app->places[i].path = Str_PushCopy(&app->arena, init->places[i].path);
-    }
-    for (s64 at = 0; at < init->paths_text.count;) {
-        s64 end = at;
-        while (end < init->paths_text.count && init->paths_text.data[end] != '\n') end++;
-        String line = { init->paths_text.data + at, end - at };
-        at = end + 1;
-        if (line.count && line.data[line.count - 1] == '\r') line.count--;
-        b32 recent = line.count > 7 && memcmp(line.data, "recent ", 7) == 0, mark = line.count > 9 && memcmp(line.data, "bookmark ", 9) == 0;
-        String path = recent ? (String){ line.data + 7, line.count - 7 } : (String){ line.data + 9, line.count - 9 };
-        if (recent && app->recent_count < 32 && path.count < 520) {
-            memcpy(app->recent[app->recent_count], path.data, (size_t)path.count);
-            app->recent_len[app->recent_count++] = (s32)path.count;
-        }
-        if (mark && app->bookmark_count < 32 && path.count < 520) {
-            memcpy(app->bookmark[app->bookmark_count], path.data, (size_t)path.count);
-            app->bookmark_len[app->bookmark_count++] = (s32)path.count;
-        }
-    }
     // --- key bindings: the defaults, then settings.txt's `key.<command> = <keys>` lines ("ctrl+shift+d", "none") ---
     for (u32 c = 0; c < Cmd_Count; c++) { app->bind_key[c] = g_Commands[c].key; app->bind_mods[c] = g_Commands[c].mods; }
     for (s64 at = 0; at < init->settings_text.count;) {
@@ -846,8 +820,47 @@ App *App_Create(const AppInit *init)
         app->bind_key[cmd] = key;
         app->bind_mods[cmd] = key ? mods : 0;
     }
+    app->term_theme = 0;   // Moss unless settings.txt names another
     for (s32 i = 0; i < TermTheme_Count; i++) {
         if (init->settings_theme.count && Str_EqualNoCase(init->settings_theme, Str_FromCStr(g_TermThemes[i].name))) app->term_theme = i;
+    }
+}
+
+App *App_Create(const AppInit *init)
+{
+    Arena boot = {0};
+    App *app = Arena_PushStruct(&boot, App);
+    app->arena = boot;
+    app->headless = init->headless;
+    app->window_name = CopyInto(app->window_name_buf, sizeof(app->window_name_buf), init->window_name);
+    app->explorer_menu = init->explorer_menu;
+    app->start_with_windows = init->start_with_windows;
+    app->good_programmer = init->good_programmer;
+    app->hist_current = -1;
+    ApplySettings(app, init);
+    // --- the go-to box's: the environment, the known folders, recents and bookmarks (paths.txt) ---
+    app->environment = Str_PushCopy(&app->arena, init->environment);
+    app->place_count = Min(init->place_count, (s32)ArrayCount(app->places));
+    for (s32 i = 0; i < app->place_count; i++) {
+        app->places[i].name = Str_PushCopy(&app->arena, init->places[i].name);
+        app->places[i].path = Str_PushCopy(&app->arena, init->places[i].path);
+    }
+    for (s64 at = 0; at < init->paths_text.count;) {
+        s64 end = at;
+        while (end < init->paths_text.count && init->paths_text.data[end] != '\n') end++;
+        String line = { init->paths_text.data + at, end - at };
+        at = end + 1;
+        if (line.count && line.data[line.count - 1] == '\r') line.count--;
+        b32 recent = line.count > 7 && memcmp(line.data, "recent ", 7) == 0, mark = line.count > 9 && memcmp(line.data, "bookmark ", 9) == 0;
+        String path = recent ? (String){ line.data + 7, line.count - 7 } : (String){ line.data + 9, line.count - 9 };
+        if (recent && app->recent_count < 32 && path.count < 520) {
+            memcpy(app->recent[app->recent_count], path.data, (size_t)path.count);
+            app->recent_len[app->recent_count++] = (s32)path.count;
+        }
+        if (mark && app->bookmark_count < 32 && path.count < 520) {
+            memcpy(app->bookmark[app->bookmark_count], path.data, (size_t)path.count);
+            app->bookmark_len[app->bookmark_count++] = (s32)path.count;
+        }
     }
     app->theme_shown = app->term_theme;   // the first frame shows it at once
 
@@ -1892,8 +1905,14 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     f.out = out;
     f.fa = fa;
     f.nav_open = -1;
+    b32 reset_asked = 0;   // the reset's confirm box opens next frame: the Enter that asked mustn't answer it
     app->maximized = in->maximized;
     memcpy(app->window_rect, in->window_rect, sizeof(app->window_rect));
+    // settings.txt read again after a reset: applied as at start (the theme fades to its new one)
+    if (in->settings) {
+        ApplySettings(app, in->settings);
+        out->term_font = app->term_font;
+    }
 
     // --- metrics, colors, fonts ---
     u32 dpi = in->dpi ? in->dpi : 96;
@@ -2252,10 +2271,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     }
     for (s32 i = 0; i < app->queued_count; i++) RunCommand(app, &f, app->queued[i]);
     app->queued_count = 0;
-    if (app->palette_open || app->confirm_tab || app->paste_confirm || app->tab_menu) {
+    if (app->palette_open || app->confirm_tab || app->paste_confirm || app->reset_confirm || app->tab_menu) {
         for (s64 i = 0; i < event_count; i++) consumed[i] = 1;   // the popup takes the keyboard
     }
-    b32 modal = app->palette_open || app->confirm_tab || app->paste_confirm || app->tab_menu;
+    b32 modal = app->palette_open || app->confirm_tab || app->paste_confirm || app->reset_confirm || app->tab_menu;
 
     // --- a tab being renamed has the keyboard: Enter keeps the name (empty: the server's again), Esc drops it ---
     b32 rename_done = 0;
@@ -4506,7 +4525,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             b32 on = k == Setting_HiddenFiles ? !app->hide_hidden : k == Setting_FolderSizes ? !app->folder_sizes_off : k == Setting_CursorBlink ? app->cursor_blink : k == Setting_Ligatures ? app->ligatures :
                      k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_ExplorerMenu ? app->explorer_menu :
                      k == Setting_StartWithWindows ? app->start_with_windows : k == Setting_Notifications ? !app->notifications_off :
-                     k == Setting_VsEnv ? !app->vs_env_off : 0;
+                     k == Setting_VsEnv ? !app->vs_env_off : k == Setting_GoodProgrammer ? app->good_programmer : 0;
             b32 clicked_value = 0;
             if (sd->kind == SettingKind_Choice) {
                 s32 wide = k == Setting_Theme || k == Setting_Font || k == Setting_Backdrop ? R(11) : R(5);
@@ -4534,7 +4553,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 CutRight(&in_row, R(0.3));
                 Draw_TextIn(dl, font, CutRight(&in_row, Min(Font_Measure(font, value), R(18))), c->dim, value, 1);
             } else {
-                Draw_Icon(dl, icons_small, CutRight(&in_row, R(2)), c->dim, Icon_OpenInWindow);
+                Draw_Icon(dl, icons_small, CutRight(&in_row, R(2)), c->dim, k == Setting_Reset ? Icon_ChevronRight : Icon_OpenInWindow);
                 if (k == Setting_Background) {
                     // the image's file name (its folder dropped)
                     String file = in->background_path;
@@ -4611,6 +4630,13 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             } else if (act == Setting_ExplorerMenu) {
                 app->explorer_menu = !app->explorer_menu;
                 out->explorer_menu = app->explorer_menu ? 1 : 2;
+            } else if (act == Setting_GoodProgrammer) {
+                app->good_programmer = !app->good_programmer;
+                out->good_programmer = app->good_programmer ? 1 : 2;
+            } else if (act == Setting_Reset && step == 0) {
+                app->reset_confirm = 1;
+                app->palette_open = 0;
+                reset_asked = 1;
             } else if (act == Setting_Cursor) {
                 app->cursor = (u8)((app->cursor + (step < 0 ? 2 : 1)) % 3);
                 key = S("cursor"); val = app->cursor == 1 ? S("bar") : app->cursor == 2 ? S("underline") : S("block");
@@ -4678,6 +4704,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         s32 answer = ConfirmBox(app, Str_PushFormat(fa, "Paste %d lines?", lines), text, S("Paste"), S("paste anyway"), 0);
         if (answer > 0) TermSend(&f, app->paste_confirm, PasteBytes(fa, app->paste_text, 0));
         if (answer) app->paste_confirm = 0;
+    }
+    if (app->reset_confirm && !reset_asked && !app->paste_confirm && !app->confirm_tab) {
+        s32 answer = ConfirmBox(app, S("Reset every setting?"), S("The old ones are kept in settings-old.txt."), S("Reset"), S("reset settings"), 1);
+        if (answer > 0) out->reset_settings = 1;
+        if (answer) app->reset_confirm = 0;
     }
     if (app->confirm_tab) {
         PaneTab *ct = FindPaneTab(panes, app->confirm_tab);

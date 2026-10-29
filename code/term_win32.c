@@ -131,6 +131,8 @@ typedef struct Platform {
     s32 start_rect[4];
     ATOM id_atom;                 // the window's term.id property
     b32 explorer_menu;            // Explorer's "Open in moss" is registered (at start)
+    AppInit reset_settings;       // settings.txt read again after a reset, for the app's next frame (reset_ready)
+    b32 reset_ready;
     b32 open_request;             // a tab asked for from outside (`-d DIR`, `-- command`, WM_COPYDATA from another term)
     u8 open_buf[2048];            // cwd \0 command
     String open_cwd, open_command;
@@ -671,6 +673,43 @@ static void SpawnWindow(Platform *p, String name, const s32 *rect)
 
 // The background image behind the terminals: any image Windows reads, scaled down to fit 4K, on the GPU. An empty path
 // (or one that won't load) takes it away. 1 when it loaded.
+// settings.txt's part of AppInit (strings in p->arena): at start, and again after a reset (AppOutput.reset_settings).
+// Headless runs take the defaults, never the user's settings: the same script draws the same frames.
+static void ReadSettings(Platform *p, AppInit *init, b32 headless)
+{
+    init->opacity = 1.0f;
+    if (!headless) {
+        init->settings_theme = Term_ReadSetting(&p->arena, "theme");
+        init->agent_command = Term_ReadSetting(&p->arena, "agent");
+        String font_size = Term_ReadSetting(&p->arena, "font_size");
+        init->font_size_pt = font_size.count ? (f32)atof((const char *)font_size.data) : 0;
+        String opacity = Term_ReadSetting(&p->arena, "opacity");
+        if (opacity.count) init->opacity = (f32)atof((const char *)opacity.data) / 100.0f;
+        init->term_font = Term_ReadSetting(&p->arena, "font");
+        init->agents = Term_ReadSetting(&p->arena, "agents");
+        init->hide_hidden = Str_Equal(Term_ReadSetting(&p->arena, "hidden_files"), S("off"));
+        init->folder_sizes_off = Str_Equal(Term_ReadSetting(&p->arena, "folder_sizes"), S("off"));
+        String strength = Term_ReadSetting(&p->arena, "background_strength");
+        init->background_strength = !strength.count ? 0 : atoi((const char *)strength.data) > 0 ? atoi((const char *)strength.data) : -1;   // -1: off
+        init->notifications_off = Str_Equal(Term_ReadSetting(&p->arena, "notifications"), S("off"));
+        init->vs_env_off = Str_Equal(Term_ReadSetting(&p->arena, "vs_env"), S("off"));
+        WCHAR home[MAX_PATH] = {0}, settings_path[MAX_PATH] = {0};
+        GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+        swprintf_s(settings_path, MAX_PATH, L"%s\\.moss\\settings.txt", home);
+        init->settings_text = Term_ReadFile(&p->arena, settings_path);
+        String cursor = Term_ReadSetting(&p->arena, "cursor");
+        init->cursor = Str_EqualNoCase(cursor, S("bar")) ? 1 : Str_EqualNoCase(cursor, S("underline")) ? 2 : 0;
+        init->cursor_blink = Str_EqualNoCase(Term_ReadSetting(&p->arena, "cursor_blink"), S("on"));
+        init->ligatures = Str_EqualNoCase(Term_ReadSetting(&p->arena, "ligatures"), S("on"));
+        init->copy_on_select_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "copy_on_select"), S("off"));
+        init->paste_warning_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
+        init->win32_input_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "win32_input"), S("off"));
+        String backdrop = Term_ReadSetting(&p->arena, "backdrop");
+        init->backdrop = Str_EqualNoCase(backdrop, S("acrylic")) ? 1 : Str_EqualNoCase(backdrop, S("mica")) ? 2 : 0;
+    }
+    if (!init->term_font.count) init->term_font = S("Cascadia Mono");   // ships with Windows 11; Consolas when missing
+}
+
 static b32 LoadBackground(Platform *p, String path)
 {
     if (p->background) Gpu_FreeImage(p->gpu, p->background);
@@ -786,6 +825,8 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     fi->image_count = ready;
     fi->images = p->image_list;
     fi->editor = p->editor;
+    fi->settings = p->reset_ready ? &p->reset_settings : NULL;
+    p->reset_ready = 0;
     // --- the debug overlay's numbers ---
     Debug_RecentWork(120, &fi->debug.work_ms_avg, &fi->debug.work_ms_max);
     fi->debug.frames_drawn = p->frames_drawn;
@@ -1089,6 +1130,23 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
             RegCloseKey(key);
         }
         Logf("window", "Explorer menu %s", out.explorer_menu == 1 ? "added" : "removed");
+    }
+    if (out.good_programmer) {
+        // --- "Be a good programmer": the principles into the global CLAUDE.md, or out (headless runs never touch it) ---
+        const char *state = out.good_programmer == 1 ? "on" : "off";
+        if (p->headless) Logf("headless", "be a good programmer %s (CLAUDE.md not written)", state);
+        else if (Term_SetGoodProgrammer(out.good_programmer == 1)) Logf("window", "be a good programmer %s", state);
+        else Logf("window", "be a good programmer %s: couldn't update the global CLAUDE.md", state);
+    }
+    if (out.reset_settings) {
+        // --- settings.txt back to moss's own (headless runs never write it), read again for the app's next frame ---
+        if (p->headless) Logf("headless", "reset settings (settings.txt not written)");
+        else { Term_ResetSettings(); Logf("window", "settings reset to moss's defaults"); }
+        p->reset_settings = (AppInit){0};
+        ReadSettings(p, &p->reset_settings, p->headless);
+        p->reset_ready = 1;
+        LoadBackground(p, p->headless ? (String){0} : Term_ReadSetting(&p->arena, "background_image"));
+        p->wake_frame = p->frame;
     }
     if (out.choose_background) {
         // --- a file dialog for the background image (headless runs never show one) ---
@@ -2176,26 +2234,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     // --- settings and the session ---
     AppInit init = {0};
     init.headless = headless;
-    init.opacity = 1.0f;
-    if (!headless) {
-        // headless runs take the defaults, never the user's settings: the same script draws the same frames
-        init.settings_theme = Term_ReadSetting(&p->arena, "theme");
-        init.agent_command = Term_ReadSetting(&p->arena, "agent");
-        String font_size = Term_ReadSetting(&p->arena, "font_size");
-        init.font_size_pt = font_size.count ? (f32)atof((const char *)font_size.data) : 0;
-        String opacity = Term_ReadSetting(&p->arena, "opacity");
-        if (opacity.count) init.opacity = (f32)atof((const char *)opacity.data) / 100.0f;
-        p->term_font = Term_ReadSetting(&p->arena, "font");
-        init.agents = Term_ReadSetting(&p->arena, "agents");
-        init.hide_hidden = Str_Equal(Term_ReadSetting(&p->arena, "hidden_files"), S("off"));
-        init.folder_sizes_off = Str_Equal(Term_ReadSetting(&p->arena, "folder_sizes"), S("off"));
-        String strength = Term_ReadSetting(&p->arena, "background_strength");
-        init.background_strength = !strength.count ? 0 : atoi((const char *)strength.data) > 0 ? atoi((const char *)strength.data) : -1;   // -1: off
-        init.notifications_off = Str_Equal(Term_ReadSetting(&p->arena, "notifications"), S("off"));
-        init.vs_env_off = Str_Equal(Term_ReadSetting(&p->arena, "vs_env"), S("off"));
-    }
-    if (!p->term_font.count) p->term_font = S("Cascadia Mono");   // ships with Windows 11; Consolas when missing
-    init.term_font = p->term_font;
+    ReadSettings(p, &init, headless);
+    p->term_font = init.term_font;
+    init.good_programmer = !headless && Term_GoodProgrammer();
     init.window_name = p->window_name;
     init.explorer_menu = p->explorer_menu;
     {
@@ -2204,21 +2245,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
             init.start_with_windows = RegQueryValueExW(run, L"moss", NULL, NULL, NULL, NULL) == ERROR_SUCCESS;
             RegCloseKey(run);
         }
-    }
-    {
-        String backdrop = headless ? (String){0} : Term_ReadSetting(&p->arena, "backdrop");
-        WCHAR home[MAX_PATH] = {0}, settings_path[MAX_PATH] = {0};
-        GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
-        swprintf_s(settings_path, MAX_PATH, L"%s\\.moss\\settings.txt", home);
-        if (!headless) init.settings_text = Term_ReadFile(&p->arena, settings_path);
-        String cursor = headless ? (String){0} : Term_ReadSetting(&p->arena, "cursor");
-        init.cursor = Str_EqualNoCase(cursor, S("bar")) ? 1 : Str_EqualNoCase(cursor, S("underline")) ? 2 : 0;
-        init.cursor_blink = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "cursor_blink"), S("on"));
-        init.ligatures = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "ligatures"), S("on"));
-        init.copy_on_select_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "copy_on_select"), S("off"));
-        init.paste_warning_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
-        init.win32_input_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "win32_input"), S("off"));
-        init.backdrop = Str_EqualNoCase(backdrop, S("acrylic")) ? 1 : Str_EqualNoCase(backdrop, S("mica")) ? 2 : 0;
     }
     if (session) {
         p->session_path = (WString){ (u16 *)session, (s64)wcslen(session) };

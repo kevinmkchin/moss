@@ -249,6 +249,15 @@ the disk.
   `vs_env`) take effect at their next read: the next scan, notice, or new tab.
 - Keys a zeroed setting means "on" for: `hidden_files = off`, `folder_sizes = off`, `notifications = off`, `vs_env = off`. Ctrl+H in a
   browser writes `hidden_files` too.
+- "Reset to moss's defaults" asks first (`App.reset_confirm`), then `AppOutput.reset_settings`: settings.txt becomes the
+  shipped `shell\settings.txt` (the old one kept as settings-old.txt; `Term_ResetSettings`), the platform reads it again
+  (`ReadSettings`, as at start) and hands it over once (`AppFrameInput.settings`, `ApplySettings`, as `App_Create`).
+  The summon key and the editor stay as they were until the next start; Explorer's menu and start with Windows aren't
+  settings.txt's and stay.
+- "Be a good programmer" (clod's, carried over) puts `~\.moss\good-programmer.md` into the global
+  `<CLAUDE_CONFIG_DIR or ~\.claude>\CLAUDE.md` between moss's markers, for every Claude Code session on the machine;
+  off takes the block out, the rest of the file stays (`SetGoodProgrammer`, temp file swapped in). clod's block counts
+  as on, and is replaced or taken out the same way. Read at start (`AppInit.good_programmer`); headless runs only log.
 
 ## The file browser (each tab's other face)
 

@@ -72,6 +72,10 @@ extern "C" void Term_WriteSetting(const char* Key, String Value)
     WriteSetting(Key, std::string((const char*)Value.data, (size_t)Value.count));
 }
 
+extern "C" void Term_ResetSettings(void) { ResetSettings(); }
+extern "C" b32 Term_GoodProgrammer(void) { return GoodProgrammerOn(); }
+extern "C" b32 Term_SetGoodProgrammer(b32 On) { return SetGoodProgrammer(On); }
+
 extern "C" String Term_ReadFile(Arena* A, const wchar_t* Path)
 {
     std::string V = ReadWholeFile(Path);

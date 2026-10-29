@@ -35,6 +35,9 @@ int  Term_VtReplayMain(const wchar_t *file, int cols, int rows); // `term --vt-r
 void Term_PrepareUser(void);    // first run: ~\.moss from the defaults, the bundled font installed
 String Term_ReadSetting(Arena *arena, const char *key);          // settings.txt, empty when unset
 void Term_WriteSetting(const char *key, String value);
+void Term_ResetSettings(void);                  // settings.txt as moss ships it, the old one kept as settings-old.txt
+b32  Term_GoodProgrammer(void);                 // the global CLAUDE.md has the "Be a good programmer" block (moss's or clod's)
+b32  Term_SetGoodProgrammer(b32 on);            // puts it in (from ~\.moss\good-programmer.md) or takes it out; 0 = failed
 String Term_ReadFile(Arena *arena, const wchar_t *path);
 void Term_WriteFileAtomic(const wchar_t *path, String data);
 void Term_RaiseForTyping(void);
