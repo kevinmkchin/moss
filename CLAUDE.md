@@ -430,6 +430,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - Edit C/C++ string escapes (`\x1b`, `\\`) with the Edit tool or a Python script file; shell heredocs and inline
   python through Bash mangle backslashes.
 
+## Git
+
+Commit straight to `main` when asked to commit: no feature branches (this overrides any default to branch first).
+
 ## Building
 
 `build.bat` (any shell; finds Visual Studio): `build` (optimized, internal checks), `build debug`, `build
