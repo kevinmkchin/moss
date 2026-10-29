@@ -1,0 +1,106 @@
+# Accounts and folder rules (accounts.txt: work = cfg2, theme Dusk, dev\ is for work; claude faked):
+# - in dev\proj the shell's clink sets CLAUDE_CONFIG_DIR to work's folder; Ctrl+Shift+A starts claude as work (its
+#   theme, its name in the account line), not held; the work session in the sidebar resumes as work
+# - the work account outside dev\: held at once, typing dropped, until "Go on anyway"
+# - leaving dev\ unsets the variable again
+# - the work login copied into the default account's folder: still work, held outside dev\
+# then the server quits (tabs.txt kept) for the second run.
+waitfor λ
+type python make_accounts.py
+key Enter
+waitfor accounts-made
+sleep 1500
+type cd dev\proj
+key Enter
+waitfor dev\proj
+type echo [%CLAUDE_CONFIG_DIR%]
+key Enter
+waitfor cfg2]
+key Ctrl+Shift+A
+waitfor fake-claude ready
+waitlabel account second@example.com
+sleep 3500
+waitidle
+capture out/work_tab.png
+cursorui session Hello from the second account
+lmb down
+lmb up
+waitfor fake-claude ready
+waitlabel account second@example.com
+sleep 1500
+waitidle
+dump tabs
+key Ctrl+Shift+T
+waitfor λ
+type cd ..\..\home\proj
+key Enter
+waitfor home\proj
+type if defined CLAUDE_CONFIG_DIR (echo con^fig-%CLAUDE_CONFIG_DIR:~-4%) else (echo con^fig-unset)
+key Enter
+waitfor config-unset
+type set CLAUDE_CONFIG_DIR=%CD%\..\..\cfg2&& %MOSS_CLAUDE% --session-id 99999999-9999-4999-8999-999999999999
+key Enter
+waitfor fake-claude ready
+waitlabel wrong account
+type dropped-while-held
+key Enter
+sleep 1000
+waitidle
+capture out/held_outside.png
+cursorui account go on
+lmb down
+lmb up
+waitgone wrong account
+type after
+key Enter
+waitfor fake-claude heard: after
+key Ctrl+Shift+T
+waitfor λ
+type python ..\..\make_accounts.py leak
+key Enter
+waitfor leaked
+type %MOSS_CLAUDE% --session-id aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa
+key Enter
+waitfor fake-claude ready
+waitlabel wrong account
+sleep 500
+waitidle
+capture out/held_leak.png
+cursorui account go on
+lmb down
+lmb up
+waitgone wrong account
+# a new account from the palette: its config folder (the default account's settings copied, not its login), its line
+# in accounts.txt, and a claude tab under it to log in
+key Ctrl+Shift+P
+type add claude
+waitlabel palette Add a Claude account
+cursorui palette Add a Claude account
+lmb down
+lmb up
+type side
+waitlabel palette add account side
+key Enter
+waitfor fake-claude ready
+waitlabel account Not logged in
+sleep 500
+waitidle
+capture out/added.png
+dump tabs
+# the accounts overlay: each account with its login, its folders and its theme; an arrow steps side's theme
+key Ctrl+Shift+P
+type claude accounts
+waitlabel palette Claude accounts
+cursorui palette Claude accounts
+lmb down
+lmb up
+waitlabel account side theme more
+cursorui account side theme more
+lmb down
+lmb up
+sleep 300
+waitidle
+capture out/accounts_overlay.png
+key Escape
+quitserver
+exit

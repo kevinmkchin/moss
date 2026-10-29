@@ -9,7 +9,3 @@ Web browser
 - A browser in a pane. It need not have every feature of the newest browsers (Chrome and the like), only enough
   for the web apps that matter: Slack, Spotify, x.com, GitHub, reddit.com.
 - Stretch goal: youtube.com.
-
-Multiple Claude accounts
-- Support more than one Claude account (each its own login / config dir).
-- Each account forces its own theme, so it is obvious which one is logged in.

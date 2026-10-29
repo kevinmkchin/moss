@@ -36,6 +36,7 @@ typedef struct AppInit {
     b32 cursor_blink;           // settings.txt `cursor_blink = on`
     b32 ligatures;              // settings.txt `ligatures = on`
     b32 copy_on_select_off;     // settings.txt `copy_on_select = off`
+    b32 dim_unfocused_off;      // settings.txt `dim_unfocused = off`: the panes not in focus aren't darkened
     b32 paste_warning_off;      // settings.txt `paste_warning = off`
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
     b32 explorer_menu;          // Explorer has "Open in moss" (registered for this user)
@@ -92,6 +93,8 @@ typedef struct AppFrameInput {
     String view_path;
     s32 image_count;            // the viewer's pictures that are ready (asked with AppOutput.image_wants)
     const AppImage *images;
+    String accounts_text;       // accounts.txt whole (Claude accounts, their themes, the work folders' rules)
+    u32 accounts_version;       // changes whenever accounts_text does (read again on a change)
     String editor;              // the terminal text editor Enter on a text file runs (settings.txt `editor`, else the first found: nvim, vim, ...; empty: none)
     b32 drag_over;              // another program drags files over the window (at the mouse)
     s64 drop_count;             // files it dropped this frame (at the mouse)
@@ -135,7 +138,10 @@ typedef struct AppOutput {
     b32 term_watch_changed;     // send the watch list
     s64 term_watch_count; TermWatch *term_watches;
     u32 history_get;            // read this tab's claude history (AppFrameInput.history_*)
-    u32 account_ok;             // this tab's claude may go on with the account it changed to (TermTab_AccountHeld)
+    u32 account_ok;             // this tab's claude may go on with the account it uses (TermTab_AccountHeld)
+    String add_account;         // non-empty: make a Claude account of that name (its config folder, accounts.txt)
+    String account_theme_name;  // non-empty: this account's theme in accounts.txt becomes account_theme (empty: none)
+    String account_theme;
     s64 input_count;    TermInput *inputs;
     s64 new_tab_count;  TermNewTab *new_tabs;
     s64 close_count;    u32 *closes;

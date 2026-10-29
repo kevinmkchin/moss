@@ -42,4 +42,18 @@ key Enter
 waitfor fake-claude heard: after
 waitidle
 capture out/account_go_on.png
+# a second claude on the same account logs in to another: it goes on (its own /login), the first is held
+cursorui session Fix the tab drag drop zones
+lmb down
+lmb up
+waitfor fake-claude ready
+waitlabel account someone.else@example.com
+type /login
+key Enter
+waitfor fake-claude heard: /login
+waitlabel account third@example.com
+sleep 3500
+waitidle
+capture out/own_login.png
+dump tabs
 exit

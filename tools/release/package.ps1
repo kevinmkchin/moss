@@ -26,6 +26,7 @@ foreach ($f in "conpty.dll", "OpenConsole.exe") { Copy-Item (Join-Path $root "ve
 Copy-Item (Join-Path $root "vendor\conpty\LICENSE") (Join-Path $stage "conpty-LICENSE.txt")
 Copy-Item -Recurse (Join-Path $root "vendor\clink") (Join-Path $stage "clink")
 Copy-Item -Recurse (Join-Path $root "vendor\clink-completions") (Join-Path $stage "clink-completions")
+Copy-Item -Recurse (Join-Path $root "clink-moss") (Join-Path $stage "clink-moss")
 Copy-Item -Recurse (Join-Path $root "shell") (Join-Path $stage "shell")
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
 Copy-Item (Join-Path $PSScriptRoot "THIRD-PARTY.txt") $stage

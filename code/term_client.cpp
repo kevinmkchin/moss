@@ -158,7 +158,7 @@ extern "C" b32 TermClient_Poll(TermClient* C)
                 msg_tab M = {};
                 memcpy(&M, Payload.data() + At, sizeof(M));
                 At += sizeof(M);
-                u32 Lens[8] = {M.KeyLen, M.NameLen, M.CwdLen, M.NoticeLen, M.AgentLen, M.OwnerLen, M.AccountLen, M.AccountWasLen};
+                u32 Lens[10] = {M.KeyLen, M.NameLen, M.CwdLen, M.NoticeLen, M.AgentLen, M.OwnerLen, M.AccountLen, M.AccountWasLen, M.ConfigDirLen, M.HoldWhyLen};
                 for(u32 Len : Lens)
                 {
                     size_t From = At < Payload.size() ? At : Payload.size();
@@ -296,15 +296,16 @@ extern "C" b32 TermClient_Poll(TermClient* C)
                 msg_session M = {};
                 memcpy(&M, C->Sessions.data() + At, sizeof(M));
                 At += sizeof(M);
-                if(At + (size_t)M.IdLen + M.CwdLen + M.ProjectLen + M.TitleLen > C->Sessions.size()) { break; }
+                if(At + (size_t)M.IdLen + M.CwdLen + M.ProjectLen + M.TitleLen + M.ConfigDirLen > C->Sessions.size()) { break; }
                 u8* P = (u8*)C->Sessions.data() + At;
                 TermSession V = {};
                 V.id = String{P, (s64)M.IdLen}; P += M.IdLen;
                 V.cwd = String{P, (s64)M.CwdLen}; P += M.CwdLen;
                 V.project = String{P, (s64)M.ProjectLen}; P += M.ProjectLen;
-                V.title = String{P, (s64)M.TitleLen};
+                V.title = String{P, (s64)M.TitleLen}; P += M.TitleLen;
+                V.config_dir = String{P, (s64)M.ConfigDirLen};
                 V.modified = M.Modified;
-                At += (size_t)M.IdLen + M.CwdLen + M.ProjectLen + M.TitleLen;
+                At += (size_t)M.IdLen + M.CwdLen + M.ProjectLen + M.TitleLen + M.ConfigDirLen;
                 C->SessionViews.push_back(V);
             }
             Changed = true;
@@ -351,7 +352,7 @@ extern "C" void TermClient_Fill(TermClient* C, AppFrameInput* In)
                   (M.Flags & TAB_NEEDS_INPUT ? TermTab_NeedsInput : 0) | (M.Flags & TAB_EXITED ? TermTab_Exited : 0) |
                   (M.Flags & TAB_RUNNING ? TermTab_Running : 0) | (M.Flags & TAB_ACCOUNT_HELD ? TermTab_AccountHeld : 0);
         V.cpu = M.Cpu;
-        std::string* S = &C->Strings[I * 8];
+        std::string* S = &C->Strings[I * 10];
         V.key = String{(u8*)S[0].data(), (s64)S[0].size()};
         V.name = String{(u8*)S[1].data(), (s64)S[1].size()};
         V.cwd = String{(u8*)S[2].data(), (s64)S[2].size()};
@@ -360,6 +361,8 @@ extern "C" void TermClient_Fill(TermClient* C, AppFrameInput* In)
         V.owner = String{(u8*)S[5].data(), (s64)S[5].size()};
         V.account = String{(u8*)S[6].data(), (s64)S[6].size()};
         V.account_was = String{(u8*)S[7].data(), (s64)S[7].size()};
+        V.config_dir = String{(u8*)S[8].data(), (s64)S[8].size()};
+        V.hold_why = String{(u8*)S[9].data(), (s64)S[9].size()};
     }
     // --- grids ---
     C->GridViews.resize(C->Grids.size());
@@ -419,6 +422,8 @@ extern "C" void TermClient_Apply(TermClient* C, const AppOutput* Out)
         P.append((const char*)N.session.data, (size_t)N.session.count);
         P.push_back(0);
         P.append((const char*)N.command.data, (size_t)N.command.count);
+        P.push_back(0);
+        P.append((const char*)N.config_dir.data, (size_t)N.config_dir.count);
         ClientSend(C, MSG_NEW_TAB, P);
     }
     for(s64 I = 0; I < Out->input_count; ++I)

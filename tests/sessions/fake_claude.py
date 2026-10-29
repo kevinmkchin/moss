@@ -14,3 +14,6 @@ for line in sys.stdin:
     if line.strip() == 'switch-account':   # another login under it, as a /login elsewhere would leave it
         with open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], '.claude.json'), 'w') as f:
             json.dump({'oauthAccount': {'emailAddress': 'someone.else@example.com', 'organizationName': 'Other Org'}}, f, indent=2)
+    if line.strip() == '/login':           # this claude logs in to another account
+        with open(os.path.join(os.environ['CLAUDE_CONFIG_DIR'], '.claude.json'), 'w') as f:
+            json.dump({'oauthAccount': {'emailAddress': 'third@example.com', 'organizationName': 'Third Org'}}, f, indent=2)

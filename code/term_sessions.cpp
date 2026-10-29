@@ -10,6 +10,7 @@ struct session_info
     std::string Title;
     u64 ModifiedTime;    // FILETIME, 100ns ticks since 1601
     u64 Size;
+    std::string ConfigDir; // its account's config folder (accounts.txt); empty = the default account's
 };
 
 static std::wstring Utf8ToWide(const std::string& S)
@@ -219,16 +220,23 @@ static bool32 ReadSessionInfo(const std::wstring& Path, session_info& Out)
 
 // Every Claude Code session with a prompt, newest first. A transcript unchanged since Known read it
 // (same path, write time and size) is taken from Known instead of being read again.
-static std::vector<session_info> ScanSessions(const std::vector<session_info>& Known)
+// Every account's sessions (ConfigDirs: each account's config folder, "" = the default account's), newest first.
+static std::vector<session_info> ScanSessions(const std::vector<session_info>& Known, const std::vector<std::string>& ConfigDirs)
 {
     std::map<std::wstring, const session_info*> Cache;
     for(const session_info& S : Known) { Cache[S.Path] = &S; }
     std::vector<session_info> Result;
-    std::wstring Projects = ClaudeConfigDir() + L"\\projects";
+    std::vector<std::wstring> Seen;
+    for(const std::string& ConfigDir : ConfigDirs)
+    {
+    std::wstring Projects = (ConfigDir.empty() ? ClaudeConfigDir() : Utf8ToWide(ConfigDir)) + L"\\projects";
+    bool32 Again = false;
+    for(const std::wstring& P : Seen) { Again |= _wcsicmp(P.c_str(), Projects.c_str()) == 0; }
+    Seen.push_back(Projects);
 
     WIN32_FIND_DATAW Dir = {};
-    HANDLE DirFind = FindFirstFileW((Projects + L"\\*").c_str(), &Dir);
-    if(DirFind == INVALID_HANDLE_VALUE) { return Result; }
+    HANDLE DirFind = Again ? INVALID_HANDLE_VALUE : FindFirstFileW((Projects + L"\\*").c_str(), &Dir);
+    if(DirFind == INVALID_HANDLE_VALUE) { continue; }
     do
     {
         if(!(Dir.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || Dir.cFileName[0] == L'.') { continue; }
@@ -249,6 +257,7 @@ static std::vector<session_info> ScanSessions(const std::vector<session_info>& K
                 continue;
             }
             session_info Info = {};
+            Info.ConfigDir = ConfigDir;
             if(ReadSessionInfo(Path, Info))
             {
                 // No prompt means nothing to resume (a session opened and quit before typing anything).
@@ -258,15 +267,16 @@ static std::vector<session_info> ScanSessions(const std::vector<session_info>& K
         FindClose(FileFind);
     } while(FindNextFileW(DirFind, &Dir));
     FindClose(DirFind);
+    }
 
     std::sort(Result.begin(), Result.end(), [](const session_info& A, const session_info& B) { return A.ModifiedTime > B.ModifiedTime; });
     return Result;
 }
 
-// A session's transcript (projects/<any>/<id>.jsonl), empty when there's none.
-static std::wstring SessionFilePath(const std::string& Id)
+// A session's transcript (<ConfigDir>/projects/<any>/<id>.jsonl), empty when there's none.
+static std::wstring SessionFilePath(const std::wstring& ConfigDir, const std::string& Id)
 {
-    std::wstring Projects = ClaudeConfigDir() + L"\\projects";
+    std::wstring Projects = ConfigDir + L"\\projects";
     std::wstring Want = Utf8ToWide(Id) + L".jsonl";
     WIN32_FIND_DATAW Dir = {};
     HANDLE DirFind = FindFirstFileW((Projects + L"\\*").c_str(), &Dir);
@@ -284,11 +294,11 @@ static std::wstring SessionFilePath(const std::string& Id)
 
 // A claude session's history as MSG_HISTORY's payload: what the user typed and what claude wrote (its text, not
 // its tool calls), oldest first, from the transcript's last 16 MB; at most the last 2000 messages, 64 KB each.
-static std::string ReadHistory(u32 TabId, const std::string& SessionId)
+static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const std::string& SessionId)
 {
     struct entry { bool32 FromUser; std::string Time, Text; };
     std::vector<entry> Entries;
-    std::wstring Path = SessionFilePath(SessionId);
+    std::wstring Path = SessionFilePath(ConfigDir, SessionId);
     HANDLE File = Path.empty() ? INVALID_HANDLE_VALUE :
                   CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
     if(File != INVALID_HANDLE_VALUE)

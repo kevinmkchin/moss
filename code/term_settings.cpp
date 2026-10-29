@@ -68,6 +68,97 @@ static std::string ReadWholeFile(const std::wstring& Path)
     return Out;
 }
 
+// --- Claude accounts: ~\.moss\accounts.txt (MOSS_ACCOUNTS_FILE for tests), "<kind> <name> = <value>" lines:
+//     "account work = <config folder>", "theme work = Dusk", "folder C:\dev = work". The default account is Claude
+//     Code's own (~\.claude, CLAUDE_CONFIG_DIR unset), named "default" ---
+
+struct claude_account
+{
+    std::string Name;
+    std::string Dir;    // its config folder (CLAUDE_CONFIG_DIR); empty = the default account's
+    std::string Theme;  // a g_TermThemes name; empty = the window's
+};
+
+struct folder_rule
+{
+    std::string Folder; // claudes in it and below must use Account, and Account is used nowhere else
+    std::string Account;
+};
+
+struct accounts
+{
+    std::vector<claude_account> List; // the default one first
+    std::vector<folder_rule> Folders;
+};
+
+static std::wstring AccountsPath()
+{
+    wchar_t Path[MAX_PATH] = {};
+    if(GetEnvironmentVariableW(L"MOSS_ACCOUNTS_FILE", Path, MAX_PATH)) { return Path; }
+    GetEnvironmentVariableW(L"USERPROFILE", Path, MAX_PATH);
+    return std::wstring(Path) + L"\\.moss\\accounts.txt";
+}
+
+static accounts ParseAccounts(const std::string& Text)
+{
+    accounts Out;
+    Out.List.push_back(claude_account{"default", std::string(), std::string()});
+    for(s32 Pass = 0; Pass < 2; ++Pass) // the accounts first, then their themes and folders (in any order in the file)
+    for(size_t At = 0; At < Text.size();)
+    {
+        size_t End = Text.find('\n', At);
+        if(End == std::string::npos) { End = Text.size(); }
+        std::string Line = Text.substr(At, End - At);
+        At = End + 1;
+        auto Trim = [](std::string S) {
+            while(!S.empty() && strchr(" \t\r\n", S.back())) { S.pop_back(); }
+            while(!S.empty() && strchr(" \t", S[0])) { S.erase(0, 1); }
+            return S;
+        };
+        Line = Trim(Line);
+        size_t Space = Line.find_first_of(" \t");
+        size_t Eq = Line.find('=');
+        if(Line.empty() || Line[0] == '#' || Space == std::string::npos || Eq == std::string::npos || Eq < Space) { continue; }
+        std::string Kind = Line.substr(0, Space);
+        std::string Name = Trim(Line.substr(Space, Eq - Space));
+        std::string Value = Trim(Line.substr(Eq + 1));
+        if(Name.empty() || Value.empty()) { continue; }
+        claude_account* A = 0;
+        for(claude_account& Known : Out.List) { if(_stricmp(Known.Name.c_str(), Name.c_str()) == 0) { A = &Known; } }
+        if(Pass == 0 && Kind == "account" && _stricmp(Name.c_str(), "default") != 0)
+        {
+            while(Value.size() > 3 && (Value.back() == '\\' || Value.back() == '/')) { Value.pop_back(); }
+            if(A) { A->Dir = Value; }
+            else { Out.List.push_back(claude_account{Name, Value, std::string()}); }
+        }
+        else if(Pass == 1 && Kind == "theme" && A) { A->Theme = Value; }
+        else if(Pass == 1 && Kind == "folder")
+        {
+            while(Name.size() > 3 && (Name.back() == '\\' || Name.back() == '/')) { Name.pop_back(); }
+            Out.Folders.push_back(folder_rule{Name, Value});
+        }
+    }
+    return Out;
+}
+
+// The folder rule a folder falls under: the longest rule folder that is it or holds it (case-insensitive, '/' as '\').
+// Null when none.
+static const folder_rule* FolderRuleFor(const accounts& Accounts, const std::string& Folder)
+{
+    std::wstring F = Utf8ToWide(Folder);
+    for(wchar_t& C : F) { if(C == L'/') { C = L'\\'; } }
+    const folder_rule* Best = 0;
+    for(const folder_rule& R : Accounts.Folders)
+    {
+        std::wstring P = Utf8ToWide(R.Folder);
+        for(wchar_t& C : P) { if(C == L'/') { C = L'\\'; } }
+        bool32 Holds = F.size() >= P.size() && _wcsnicmp(F.c_str(), P.c_str(), P.size()) == 0 &&
+                       (F.size() == P.size() || F[P.size()] == L'\\' || P.back() == L'\\');
+        if(Holds && (!Best || P.size() > Best->Folder.size())) { Best = &R; }
+    }
+    return Best;
+}
+
 // The folder moss.exe really is in, with a trailing backslash: clink, OpenConsole and the default shell setup ship there.
 // Followed through links: winget starts a portable app through a symbolic link in its Links folder.
 static std::wstring ExeDir()

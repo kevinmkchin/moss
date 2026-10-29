@@ -47,6 +47,12 @@ typedef struct Platform {
     u8 view_path[1024];
     s32 view_path_len;
     String editor;                // the terminal text editor (settings.txt `editor`, else the first found)
+    WCHAR accounts_path[MAX_PATH]; // accounts.txt (MOSS_ACCOUNTS_FILE; "NUL": none)
+    u8 accounts_text[8192];       // as last read
+    s32 accounts_len;
+    u64 accounts_write;           // its write time when read (0: not there)
+    u64 accounts_checked_us;
+    u32 accounts_version;         // counts up with each read that changed it
     b32 headless;
     b32 quit;
     b32 shown;
@@ -331,6 +337,109 @@ static WCHAR *HeapPathList(Arena *a, String path)
     WCHAR *out = (WCHAR *)calloc((size_t)w.count + 2, sizeof(WCHAR));
     if (out) memcpy(out, w.data, (size_t)w.count * sizeof(WCHAR));
     return out;
+}
+
+// --- Claude accounts: accounts.txt (MOSS_ACCOUNTS_FILE; headless and test runs have none unless a test sets one) ---
+
+// accounts.txt again when its write time changed (looked at once a second), for the app.
+static void ReadAccounts(Platform *p)
+{
+    u64 now = Time_NowMicros();
+    if (p->accounts_version && now - p->accounts_checked_us < 1000000) return;
+    p->accounts_checked_us = now;
+    WIN32_FILE_ATTRIBUTE_DATA fad = {0};
+    u64 write = GetFileAttributesExW(p->accounts_path, GetFileExInfoStandard, &fad) ?
+                (((u64)fad.ftLastWriteTime.dwHighDateTime << 32) | fad.ftLastWriteTime.dwLowDateTime | 1) : 0;
+    if (p->accounts_version && write == p->accounts_write) return;
+    p->accounts_write = write;
+    String text = write ? Term_ReadFile(&p->scratch, p->accounts_path) : (String){0};
+    p->accounts_len = (s32)Min(text.count, (s64)sizeof(p->accounts_text));
+    memcpy(p->accounts_text, text.data, (size_t)p->accounts_len);
+    p->accounts_version++;
+    p->wake_frame = p->frame;
+}
+
+// A new Claude account (the palette's "Add"): its config folder next to accounts.txt (accounts\<name>), the main setup's
+// settings copied in (settings.json, CLAUDE.md, agents, commands, skills, output-styles; never its login, sessions or
+// history), and its line in accounts.txt. The main setup: CLAUDE_CONFIG_DIR, else ~\.claude. The app checked the name
+// (letters, digits, - and _).
+static void AddAccount(Platform *p, String name)
+{
+    if (!wcscmp(p->accounts_path, L"NUL")) { Logf("headless", "add account %.*s: no accounts file in this run", STR_ARG(name)); return; }
+    WCHAR base[MAX_PATH] = {0}, dir[MAX_PATH] = {0}, from[MAX_PATH] = {0};
+    wcscpy_s(base, MAX_PATH, p->accounts_path);
+    WCHAR *slash = wcsrchr(base, L'\\');
+    if (slash) *slash = 0;
+    swprintf_s(dir, MAX_PATH, L"%s\\accounts\\%s", base, (const WCHAR *)Utf8ToUtf16(&p->scratch, name).data);
+    if (!GetEnvironmentVariableW(L"CLAUDE_CONFIG_DIR", from, MAX_PATH)) {
+        GetEnvironmentVariableW(L"USERPROFILE", from, MAX_PATH);
+        wcscat_s(from, MAX_PATH, L"\\.claude");
+    }
+    SHCreateDirectoryExW(NULL, dir, NULL);
+    static const WCHAR *const files[] = { L"settings.json", L"CLAUDE.md" };
+    static const WCHAR *const folders[] = { L"agents", L"commands", L"skills", L"output-styles" };
+    for (s32 i = 0; i < (s32)ArrayCount(files); i++) {
+        WCHAR a[MAX_PATH], b[MAX_PATH];
+        swprintf_s(a, MAX_PATH, L"%s\\%s", from, files[i]);
+        swprintf_s(b, MAX_PATH, L"%s\\%s", dir, files[i]);
+        CopyFileW(a, b, TRUE);
+    }
+    for (s32 i = 0; i < (s32)ArrayCount(folders); i++) {
+        WCHAR a[MAX_PATH + 2] = {0}, b[MAX_PATH + 2] = {0};   // double-NUL-terminated lists
+        swprintf_s(a, MAX_PATH, L"%s\\%s", from, folders[i]);
+        if (GetFileAttributesW(a) == INVALID_FILE_ATTRIBUTES) continue;
+        wcscpy_s(b, MAX_PATH, dir);
+        SHFILEOPSTRUCTW op = {0};
+        op.wFunc = FO_COPY;
+        op.pFrom = a;
+        op.pTo = b;
+        op.fFlags = FOF_NO_UI;
+        if (SHFileOperationW(&op)) Logf("app", "add account: copying %S failed", folders[i]);
+    }
+    String old = Term_ReadFile(&p->scratch, p->accounts_path);
+    String head = old.count ? (String){0} : S("# moss: Claude Code accounts. The default one is Claude Code's own (~\\.claude); each other is a\r\n"
+                                              "# config folder. Lines: account <name> = <config folder>, theme <name> = <theme>, folder <path> = <name>\r\n"
+                                              "# (claudes in that folder must use that account, and it is used nowhere else).\r\n");
+    String sep = old.count && old.data[old.count - 1] != '\n' ? S("\r\n") : (String){0};
+    String line = Str_PushFormat(&p->scratch, "%.*s%.*s%.*saccount %.*s = %.*s\r\n", STR_ARG(head), STR_ARG(old), STR_ARG(sep), STR_ARG(name),
+                                 STR_ARG(Utf16ToUtf8(&p->scratch, (WString){ (u16 *)dir, (s64)wcslen(dir) })));
+    Term_WriteFileAtomic(p->accounts_path, line);
+    p->accounts_checked_us = 0;
+    p->accounts_write = 0;
+    Logf("app", "added the account %.*s: %S", STR_ARG(name), dir);
+}
+
+// An account's theme in accounts.txt (the accounts palette's arrows): its `theme <name> = ...` lines replaced by one with
+// the new theme, or none (empty: the window's).
+static void SetAccountTheme(Platform *p, String name, String theme)
+{
+    if (!wcscmp(p->accounts_path, L"NUL")) { Logf("headless", "account %.*s theme %.*s: no accounts file in this run", STR_ARG(name), STR_ARG(theme)); return; }
+    String old = Term_ReadFile(&p->scratch, p->accounts_path);
+    TextBuilder tb = { &p->scratch, NULL, 0, 0 };
+    for (s64 at = 0; at < old.count;) {
+        s64 end = at;
+        while (end < old.count && old.data[end] != '\n') end++;
+        String line = { old.data + at, end - at + (end < old.count ? 1 : 0) };
+        at = end + 1;
+        // "theme <name> =" (spaces and case not counting): dropped
+        s64 k = 0;
+        while (k < line.count && (line.data[k] == ' ' || line.data[k] == '\t')) k++;
+        b32 drop = line.count - k > 6 && Str_EqualNoCase((String){ line.data + k, 5 }, S("theme")) && (line.data[k + 5] == ' ' || line.data[k + 5] == '\t');
+        if (drop) {
+            k += 5;
+            while (k < line.count && (line.data[k] == ' ' || line.data[k] == '\t')) k++;
+            s64 n0 = k;
+            while (k < line.count && line.data[k] != '=' && line.data[k] != ' ' && line.data[k] != '\t') k++;
+            drop = Str_EqualNoCase((String){ line.data + n0, k - n0 }, name);
+        }
+        if (!drop) TB_Append(&tb, line);
+    }
+    if (tb.count && tb.data[tb.count - 1] != '\n') TB_Append(&tb, S("\r\n"));
+    if (theme.count) TB_Format(&tb, "theme %.*s = %.*s\r\n", STR_ARG(name), STR_ARG(theme));
+    Term_WriteFileAtomic(p->accounts_path, (String){ tb.data, tb.count });
+    p->accounts_checked_us = 0;
+    p->accounts_write = 0;
+    Logf("app", "account %.*s theme: %.*s", STR_ARG(name), theme.count ? (int)theme.count : 8, theme.count ? (const char *)theme.data : "window's");
 }
 
 static void RunFileOps(Platform *p, const FileOp *ops, s64 count)
@@ -786,6 +895,9 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     fi->image_count = ready;
     fi->images = p->image_list;
     fi->editor = p->editor;
+    ReadAccounts(p);
+    fi->accounts_text = (String){ p->accounts_text, p->accounts_len };
+    fi->accounts_version = p->accounts_version;
     // --- the debug overlay's numbers ---
     Debug_RecentWork(120, &fi->debug.work_ms_avg, &fi->debug.work_ms_max);
     fi->debug.frames_drawn = p->frames_drawn;
@@ -983,6 +1095,8 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         if (!p->headless) SetClipboardFiles(p->hwnd, out.clipboard_files, out.clipboard_file_count, &p->scratch);
     }
     if (out.session_text.count && p->session_path.count) Term_WriteFileAtomic((const wchar_t *)p->session_path.data, out.session_text);
+    if (out.add_account.count) AddAccount(p, out.add_account);
+    if (out.account_theme_name.count) SetAccountTheme(p, out.account_theme_name, out.account_theme);
     if (out.paths_text.count && p->paths_path.count) Term_WriteFileAtomic((const wchar_t *)p->paths_path.data, out.paths_text);
     for (s32 i = 0; i < out.setting_count && !p->headless; i++) {
         char key[64] = {0};
@@ -2141,6 +2255,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         SetEnvironmentVariableW(L"MOSS_INSTANCE", name);
         SetEnvironmentVariableW(L"MOSS_EPHEMERAL", L"1");
     }
+    // the user's Claude accounts and folder rules aren't a test's (its server inherits this): none unless the test has some
+    if ((headless || test) && !GetEnvironmentVariableW(L"MOSS_ACCOUNTS_FILE", NULL, 0)) SetEnvironmentVariableW(L"MOSS_ACCOUNTS_FILE", L"NUL");
     OleInitialize(NULL);   // COM (apartment) and OLE: drag and drop, the clipboard
     Term_RaiseForTyping();
     Term_PrepareUser();
@@ -2211,11 +2327,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
         swprintf_s(settings_path, MAX_PATH, L"%s\\.moss\\settings.txt", home);
         if (!headless) init.settings_text = Term_ReadFile(&p->arena, settings_path);
+        if (!GetEnvironmentVariableW(L"MOSS_ACCOUNTS_FILE", p->accounts_path, MAX_PATH)) swprintf_s(p->accounts_path, MAX_PATH, L"%s\\.moss\\accounts.txt", home);
         String cursor = headless ? (String){0} : Term_ReadSetting(&p->arena, "cursor");
         init.cursor = Str_EqualNoCase(cursor, S("bar")) ? 1 : Str_EqualNoCase(cursor, S("underline")) ? 2 : 0;
         init.cursor_blink = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "cursor_blink"), S("on"));
         init.ligatures = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "ligatures"), S("on"));
         init.copy_on_select_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "copy_on_select"), S("off"));
+        init.dim_unfocused_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "dim_unfocused"), S("off"));
         init.paste_warning_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
         init.win32_input_off = !headless && Str_EqualNoCase(Term_ReadSetting(&p->arena, "win32_input"), S("off"));
         init.backdrop = Str_EqualNoCase(backdrop, S("acrylic")) ? 1 : Str_EqualNoCase(backdrop, S("mica")) ? 2 : 0;

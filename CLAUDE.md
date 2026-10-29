@@ -257,13 +257,51 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `CLAUDE_CONFIG_DIR`, which picks the account), `.claude.json`'s `oauthAccount`, `.credentials.json`'s
   `subscriptionType` (nothing else is taken from it; secrets read on the way are wiped), and the model of the
   transcript's last reply (else `--model`, `ANTHROPIC_MODEL`, settings.json, "Default"). Organization and email only
-  for a claude.ai login. A claude under another `CLAUDE_CONFIG_DIR` than the server's isn't found as claude at all
-  (its sessions\<pid>.json is elsewhere), so it gets no line. Test: `tests/sessions` (a made-up Max login).
+  for a claude.ai login. Test: `tests/sessions` (a made-up Max login).
+- Another account's claude (its own `CLAUDE_CONFIG_DIR`, e.g. set in the shell) registers in its own config folder:
+  the scan looks there too (the process's environment, `EnvVar`) and keeps it in `tab::ConfigDir`. tabs.txt saves it
+  (the 7th field), a restart resumes the claude under it (the tab's environment gets that `CLAUDE_CONFIG_DIR`), and the
+  history search and the wait for a previous server's claudes look in it.
 - A login, organization or email that changes under a running claude (a /login elsewhere, files rewritten) holds it so
   it can't go on billing the new account unasked (`tab::AccountWas`, `TAB_ACCOUNT_HELD`): the server stops its turn
   (Esc, when busy or asking), drops every `MSG_INPUT` to it, gives the tab a notice and a tray notification. The pane
   shows a card (was / now) whose "Go on with the new account" sends `MSG_ACCOUNT_OK`; the account changing back ends
   it too. A model change is only shown. A config file caught mid-write (not whole JSON) is unknown, never a change.
+  The tab the change came from isn't held: the server follows each claude's prompt line as typed (`tab::TypedLine`,
+  win32-input-mode key events decoded), and a submitted line starting `/log` (/login, /logout) makes an account change
+  within 10 minutes that tab's own (`tab::LoginAtMs`); the other claudes on the same config folder are still held.
+
+## Claude accounts and work folders — the billing safety net, don't weaken it
+
+- The user bills a personal account and an Enterprise one; Enterprise must only ever be billed for work, which lives
+  under `C:\dev`. `~\.moss\accounts.txt` (`MOSS_ACCOUNTS_FILE` in tests; headless and test runs get `NUL`, none) is the
+  one source the server, the window and clink read: `account <name> = <config folder>`, `theme <name> = <theme>`,
+  `folder <path> = <name>` (claudes in it and below must use that account, and it is used nowhere else). The default
+  account (`default`) is Claude Code's own, `~\.claude` with `CLAUDE_CONFIG_DIR` unset (set to `~\.claude` it would move
+  `.claude.json`). Server: `ParseAccounts`, `FolderRuleFor` (term_settings.cpp); app: parsed in `App_Frame` when
+  `accounts_version` changes (the platform re-reads it on a write, once a second at most).
+- Enforcement (server, scan apply): a claude whose folder's rule names another account, or of a ruled account outside
+  its folders, is held from its first scan, like an account change (`tab::RuleWhy`, `TabHeld`: Esc when busy, input
+  dropped, notice, tray), with the reason on its card (`msg_tab` hold-why). Which account a claude is: its config folder,
+  or a ruled account's login (`ConfigLogin`, organization and email) found in it, so a work login copied into another
+  folder still counts as work. A rule naming an account that doesn't exist holds every claude there. "Go on anyway"
+  (`MSG_ACCOUNT_OK`) waives it for that claude process only (`tab::RuleOkPid`); `/login` never waives it.
+- Starting the right one: Ctrl+Shift+A takes the account the focused folder's rule names; the palette's "Claude
+  accounts" (the manager: every account with the login of an open claude of it and its folders, Enter a claude tab as
+  it, the arrows step its theme into accounts.txt: `AppOutput.account_theme_name`, `SetAccountTheme`; a new name typed
+  adds one) and "Add a Claude account" (the same `PaletteMode_Account`, only asking for a name; adding makes `<accounts.txt's folder>\accounts\<name>`,
+  copies settings.json, CLAUDE.md, agents, commands, skills, output-styles from the main setup, never the login,
+  sessions or history, appends the line, and opens a claude tab under it to /login: `AddAccount` in term_win32.c);
+  sidebar sessions resume under their own account (`ScanSessions` reads every account's folder, `msg_session` config
+  folder, a tag on the row). `MSG_NEW_TAB` carries the config folder. A claude typed in a shell: `clink-moss\accounts.lua`
+  (shipped next to moss.exe, on `CLINK_PATH`, so existing users get it; `~\.moss` is only seeded once) sets
+  `CLAUDE_CONFIG_DIR` before each prompt line from the folder's rule, and unsets one it or moss (`MOSS_ACCOUNT_DIR`) set
+  on leaving.
+- Seeing it: the account line starts with the account's name; every claude tab in a strip carries its account's name
+  (once accounts.txt has one), tinted in that account's theme's accent, and a held one's icon is red; a pane whose
+  claude's account has a theme draws in it, the default account's too (`TermPaletteFor`, `ChromeFor`; the window's
+  shared chrome stays). New accounts start in the window's theme. Test: `tests/accounts` (rules held both ways, a
+  leaked login, clink, a sidebar resume, Add, then a restart on a named server).
 
 ## The sessions sidebar
 
@@ -272,7 +310,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   newest first under day headings; typing filters (project, first prompt, folder); Enter or a click brings up the
   tab running it (marked with a dot), else resumes it in a new tab of the focused pane (`OpenSession`:
   `MSG_NEW_TAB` with the session id, in its folder). The panes start after it (`Panes_ComputePixels` takes an
-  origin). Open or not is kept in layout.txt (`Sidebar`).
+  origin). Open or not is kept in layout.txt (`Sidebar`). Without the keyboard it highlights the focused tab's session
+  (scrolled into view; nothing for a tab that isn't a claude), with it the keyboard's cursor (`App.side_cursor`).
 - The server reads the sessions (`ScanSessions`, unchanged transcripts not read again) on its own thread every 5 s,
   only while the window shows the list (`MSG_WANT_SESSIONS`), and sends them when they change (`MSG_SESSIONS`).
   Tests point `CLAUDE_CONFIG_DIR` at made-up transcripts (`tests/sessions`).
@@ -289,8 +328,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   list is the installed monospace families (`TermCells_MonoFonts`, DirectWrite), read the first time the settings
   open (`want_fonts`); `AppOutput.term_font` switches the cells' font. Server-read keys (`agents`, `notifications`,
   `vs_env`) take effect at their next read: the next scan, notice, or new tab.
-- Keys a zeroed setting means "on" for: `hidden_files = off`, `folder_sizes = off`, `notifications = off`, `vs_env = off`. Ctrl+H in a
-  browser writes `hidden_files` too.
+- Keys a zeroed setting means "on" for: `hidden_files = off`, `folder_sizes = off`, `notifications = off`, `vs_env = off`,
+  `dim_unfocused = off`. Ctrl+H in a browser writes `hidden_files` too.
+- "Dim the panes not in focus" (on by default): with more than one pane showing, the others get a dark wash (a held
+  claude's card stays bright above it).
 
 ## The file browser (each tab's other face)
 
@@ -404,7 +445,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   the captured PNGs. The window path itself: `tools/window_test.ps1` (an off-screen window that never takes
   the foreground, posted keys, `-Clicks "x,y"` posted clicks at window pixels, PrintWindow capture; a test
   window takes the mouse from the posted messages, not the real cursor).
-- Test sets: `tests/run_all.sh` (smoke, layout, terminal, browser, settings, find, tabs, links, shells, agents, sessions, session, windows); each runs in a temp folder outside
+- Test sets: `tests/run_all.sh` (smoke, layout, terminal, browser, settings, find, tabs, links, shells, agents, sessions, session, windows, accounts); each runs in a temp folder outside
   any repo (prompts must not show git state) and compares with its local `reference/` (`bless` to accept).
   `tests/claude` is a manual set with real Claude Code. Captures named `*_varies.png` (counters, timings) are
   looked at, never compared. Headless runs ignore the user's settings.txt (defaults only).

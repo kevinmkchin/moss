@@ -1,0 +1,7 @@
+# After the restart: the work session resumes under the work account (tabs.txt keeps its config folder), not held.
+# (The fake claudes that never wrote a transcript come back as shells, like a real claude that got no prompt.)
+sleep 4000
+waitidle
+dump tabs
+quitserver
+exit

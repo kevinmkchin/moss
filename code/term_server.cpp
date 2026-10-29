@@ -21,9 +21,15 @@ struct tab
     std::string Title;      // from the session file; used when the child sets no title
     std::string Agent;      // the CLI agent running in it: "claude" (SessionId set) or another found by the scan; empty = shell
     std::wstring AgentCommand; // started with the tab after init (NEW_TAB_AGENT), once
+    std::string ConfigDir;  // the CLAUDE_CONFIG_DIR its claude runs with (another account's), kept in tabs.txt and given to
+                            // the claude it resumes; empty = the server's own (ClaudeConfigDir)
     std::string Account;    // the claude's login, organization, email and model, '\n' between (ClaudeAccount); empty = none
     std::string AccountWas; // held: the account before its login, organization or email changed. Its turn was stopped and
                             // input to it is dropped until the window says go on (MSG_ACCOUNT_OK); empty = not held
+    std::string RuleWhy;    // its claude breaks a folder rule (accounts.txt): why; held for it unless RuleOkPid is that claude
+    DWORD RuleOkPid;        // the claude the window said may go on anyway (MSG_ACCOUNT_OK); a new claude is checked again
+    std::string TypedLine;  // claude's prompt line as typed (ASCII; others as '?'), so a /login there is known
+    u64 LoginAtMs;          // a /login or /logout went in here: an account change within 10 minutes is this tab's own, not held
     s32 ScrollOffset;       // lines scrolled back from live output; 0 = following
     u64 SeenPushed;         // Term.ScrollbackPushed as of the last scroll fix-up
     std::string Notice;     // why it wants a look ("finished", "needs you", ...), set while the window didn't show it
@@ -55,6 +61,12 @@ struct tab
     u64 SyncSinceMs;        // when it began a synchronized update (frames hold up to 100 ms for its end)
     pty* Pty;
 };
+
+// Held: its claude's account changed under it, or it breaks a folder rule and wasn't let go on. Its typing is dropped.
+static bool32 TabHeld(const tab& T)
+{
+    return !T.AccountWas.empty() || (!T.RuleWhy.empty() && T.RuleOkPid != T.ClaudePid);
+}
 
 struct server_state
 {
@@ -144,12 +156,12 @@ static std::string ProjectName(const std::string& Cwd)
     return (Slash == std::string::npos) ? Cwd : Cwd.substr(Slash + 1);
 }
 
-// The session a running claude registered in <ClaudeConfigDir>\sessions\<pid>.json. False when
-// there's no such file, it names no session, or it's left over from an earlier process that had
-// the same pid (its recorded start time differs).
-static bool32 ReadClaudeSession(DWORD Pid, std::string& Id, std::string& Cwd)
+// The session a running claude registered in <ConfigDir>\sessions\<pid>.json (its config folder: the server's,
+// ClaudeConfigDir, unless it runs with another CLAUDE_CONFIG_DIR). False when there's no such file, it names no
+// session, or it's left over from an earlier process that had the same pid (its recorded start time differs).
+static bool32 ReadClaudeSession(const std::wstring& ConfigDir, DWORD Pid, std::string& Id, std::string& Cwd)
 {
-    std::wstring Path = ClaudeConfigDir() + L"\\sessions\\" + std::to_wstring(Pid) + L".json";
+    std::wstring Path = ConfigDir + L"\\sessions\\" + std::to_wstring(Pid) + L".json";
     HANDLE File = CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
     if(File == INVALID_HANDLE_VALUE) { return false; }
     std::string Json = ReadFileRange(File, 0, 64 * 1024);
@@ -237,6 +249,48 @@ static std::wstring ProcessEnvironment(DWORD Pid)
     return Out;
 }
 
+// A variable's value in an environment block (ProcessEnvironment's), UTF-8; empty when it isn't set.
+static std::string EnvVar(const std::wstring& Env, const wchar_t* Name)
+{
+    size_t Len = wcslen(Name);
+    for(size_t At = 0; At < Env.size() && Env[At];)
+    {
+        size_t End = Env.find(L'\0', At);
+        if(End == std::wstring::npos) { End = Env.size(); }
+        if(End - At > Len && Env[At + Len] == L'=' && _wcsnicmp(&Env[At], Name, Len) == 0) { return WideToUtf8(Env.substr(At + Len + 1, End - At - Len - 1)); }
+        At = End + 1;
+    }
+    return std::string();
+}
+
+// "Key": "value" in JSON, pretty-printed or not: the first one at or after From (npos = none), decoded; empty if none.
+static std::string JsonFindLoose(const std::string& Json, const char* Key, size_t From)
+{
+    std::string Pattern = std::string("\"") + Key + "\"";
+    for(size_t At = From == std::string::npos ? From : Json.find(Pattern, From); At != std::string::npos; At = Json.find(Pattern, At + 1))
+    {
+        size_t I = At + Pattern.size();
+        while(I < Json.size() && (Json[I] == ' ' || Json[I] == '\t' || Json[I] == '\r' || Json[I] == '\n' || Json[I] == ':')) { ++I; }
+        std::string Out;
+        if(I < Json.size() && Json[I] == '"' && JsonDecodeString(Json, I + 1, Out)) { return Out; }
+    }
+    return std::string();
+}
+
+// The claude.ai login kept in a config folder (empty Dir = the default account's: ~\.claude.json), as
+// "organization\nemail"; empty when it has none or the file is mid-write.
+static std::string ConfigLogin(const std::string& Dir)
+{
+    wchar_t Home[MAX_PATH] = {};
+    GetEnvironmentVariableW(L"USERPROFILE", Home, MAX_PATH);
+    std::string Global = ReadWholeFile(!Dir.empty() ? Utf8ToWide(Dir) + L"\\.claude.json" : std::wstring(Home) + L"\\.claude.json");
+    size_t End = Global.find_last_not_of(" \t\r\n");
+    if(End == std::string::npos || Global[End] != '}') { return std::string(); }
+    size_t Oauth = Global.find("\"oauthAccount\"");
+    std::string Email = JsonFindLoose(Global, "emailAddress", Oauth);
+    return Email.empty() ? std::string() : JsonFindLoose(Global, "organizationName", Oauth) + "\n" + Email;
+}
+
 // Who a running claude bills and reports to, as its /status says it: login method, organization, email and model,
 // '\n' between them (organization and email only for a claude.ai login). From its own environment (a cloud provider
 // or an approved API key takes over from the login; CLAUDE_CONFIG_DIR picks the account) and Claude Code's files:
@@ -246,18 +300,7 @@ static std::wstring ProcessEnvironment(DWORD Pid)
 static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const std::string& Cwd)
 {
     std::wstring Env = ProcessEnvironment(Pid);
-    auto Var = [&Env](const wchar_t* Name) -> std::string
-    {
-        size_t Len = wcslen(Name);
-        for(size_t At = 0; At < Env.size() && Env[At];)
-        {
-            size_t End = Env.find(L'\0', At);
-            if(End == std::wstring::npos) { End = Env.size(); }
-            if(End - At > Len && Env[At + Len] == L'=' && _wcsnicmp(&Env[At], Name, Len) == 0) { return WideToUtf8(Env.substr(At + Len + 1, End - At - Len - 1)); }
-            At = End + 1;
-        }
-        return std::string();
-    };
+    auto Var = [&Env](const wchar_t* Name) { return EnvVar(Env, Name); };
     auto Truthy = [](const std::string& V) { std::string L = ToLower(V); return !L.empty() && L != "0" && L != "false" && L != "no" && L != "off"; };
     auto ReadTail = [](const std::wstring& Path, u64 Most) -> std::string
     {
@@ -270,19 +313,7 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
         CloseHandle(File);
         return Out;
     };
-    // "Key": "value", pretty-printed or not (the first one at or after From)
-    auto Find = [](const std::string& Json, const char* Key, size_t From) -> std::string
-    {
-        std::string Pattern = std::string("\"") + Key + "\"";
-        for(size_t At = From == std::string::npos ? From : Json.find(Pattern, From); At != std::string::npos; At = Json.find(Pattern, At + 1))
-        {
-            size_t I = At + Pattern.size();
-            while(I < Json.size() && (Json[I] == ' ' || Json[I] == '\t' || Json[I] == '\r' || Json[I] == '\n' || Json[I] == ':')) { ++I; }
-            std::string Out;
-            if(I < Json.size() && Json[I] == '"' && JsonDecodeString(Json, I + 1, Out)) { return Out; }
-        }
-        return std::string();
-    };
+    auto Find = JsonFindLoose;
 
     // --- Claude Code's files, where this claude's environment puts them ---
     std::string Dir = Var(L"CLAUDE_CONFIG_DIR");
@@ -419,6 +450,7 @@ struct claude_find
     std::string Cwd;
     std::string ShellCwd;
     std::string Agent;   // another CLI agent running under it (settings `agents`), when there's no claude
+    std::string ConfigDir; // the claude's CLAUDE_CONFIG_DIR when it isn't the server's (another account); empty = the server's
     std::string Account; // the claude's login, organization, email and model (ClaudeAccount)
     bool32 HasChild; // the cmd runs a program
     u64 CpuUsed;     // CPU time the cmd and everything under it used since the last scan (100 ns units)
@@ -438,7 +470,9 @@ static DWORD WINAPI SessionsScanThread(void* Param)
 {
     Debug_NameThread("sessions scan");
     sessions_scan* S = (sessions_scan*)Param;
-    S->Sessions = ScanSessions(S->Known);
+    std::vector<std::string> ConfigDirs;
+    for(const claude_account& A : ParseAccounts(ReadWholeFile(AccountsPath())).List) { ConfigDirs.push_back(A.Dir); }
+    S->Sessions = ScanSessions(S->Known, ConfigDirs);
     InterlockedExchange(&S->Done, 1);
     SetEvent(S->Wake);
     return 0;
@@ -449,6 +483,7 @@ static DWORD WINAPI SessionsScanThread(void* Param)
 struct history_read
 {
     u32 TabId;
+    std::wstring ConfigDir; // the claude's config folder (tab::ConfigDir, else the server's)
     std::string SessionId;
     std::string Reply;
     HANDLE Wake;
@@ -459,7 +494,7 @@ static DWORD WINAPI HistoryReadThread(void* Param)
 {
     Debug_NameThread("history read");
     history_read* H = (history_read*)Param;
-    H->Reply = ReadHistory(H->TabId, H->SessionId);
+    H->Reply = ReadHistory(H->TabId, H->ConfigDir, H->SessionId);
     InterlockedExchange(&H->Done, 1);
     SetEvent(H->Wake);
     return 0;
@@ -474,12 +509,13 @@ static std::string EncodeSessions(const std::vector<session_info>& Sessions)
     for(u32 I = 0; I < Count; ++I)
     {
         const session_info& S = Sessions[I];
-        msg_session M = {S.ModifiedTime, (u32)S.Id.size(), (u32)S.Cwd.size(), (u32)S.Project.size(), (u32)S.Title.size()};
+        msg_session M = {S.ModifiedTime, (u32)S.Id.size(), (u32)S.Cwd.size(), (u32)S.Project.size(), (u32)S.Title.size(), (u32)S.ConfigDir.size()};
         Out.append((const char*)&M, sizeof(M));
         Out += S.Id;
         Out += S.Cwd;
         Out += S.Project;
         Out += S.Title;
+        Out += S.ConfigDir;
     }
     return Out;
 }
@@ -493,6 +529,9 @@ struct claude_scan
     std::map<std::pair<DWORD, u64>, u64> Cpu; // in: each tab process's CPU time at the last scan, by pid and start time; out: now
     u64 PrevAtFt;  // in: when the last scan read them (0 = none yet)
     u64 AtFt;      // out: when this one did
+    accounts Accounts;               // out: accounts.txt as of this scan
+    std::vector<std::string> Logins; // out: per account, the login in its config folder ("organization\nemail"), for the
+                                     // accounts folder rules name (ConfigLogin); empty for the others
     HANDLE Wake;
     volatile LONG Done;
 };
@@ -510,6 +549,15 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
     FILETIME NowFt = {};
     GetSystemTimeAsFileTime(&NowFt);
     S->AtFt = ((u64)NowFt.dwHighDateTime << 32) | NowFt.dwLowDateTime;
+    S->Accounts = ParseAccounts(ReadWholeFile(AccountsPath()));
+    S->Logins.resize(S->Accounts.List.size());
+    for(size_t I = 0; I < S->Accounts.List.size(); ++I)
+    {
+        for(const folder_rule& R : S->Accounts.Folders)
+        {
+            if(_stricmp(R.Account.c_str(), S->Accounts.List[I].Name.c_str()) == 0 && S->Logins[I].empty()) { S->Logins[I] = ConfigLogin(S->Accounts.List[I].Dir); }
+        }
+    }
     std::map<std::pair<DWORD, u64>, u64> Cpu;
     for(const PROCESSENTRY32W& P : Procs)
     {
@@ -559,7 +607,21 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
         }
         for(size_t K = 1; K < Tree.size() && !F.Pid; ++K)
         {
-            if(ReadClaudeSession(Tree[K], F.Id, F.Cwd)) { F.Pid = Tree[K]; }
+            if(ReadClaudeSession(ClaudeConfigDir(), Tree[K], F.Id, F.Cwd)) { F.Pid = Tree[K]; }
+        }
+        // --- a claude of another account registers in its own config folder (its CLAUDE_CONFIG_DIR) ---
+        for(size_t K = 1; K < Tree.size() && !F.Pid; ++K)
+        {
+            std::string Dir = EnvVar(ProcessEnvironment(Tree[K]), L"CLAUDE_CONFIG_DIR");
+            wchar_t Full[MAX_PATH] = {};
+            if(!Dir.empty() && GetFullPathNameW(Utf8ToWide(Dir).c_str(), MAX_PATH, Full, 0)) { Dir = WideToUtf8(Full); } // "a\..\b" as "b"
+            while(Dir.size() > 3 && (Dir.back() == '\\' || Dir.back() == '/')) { Dir.pop_back(); }
+            if(!Dir.empty() && _wcsicmp(Utf8ToWide(Dir).c_str(), ClaudeConfigDir().c_str()) != 0 &&
+               ReadClaudeSession(Utf8ToWide(Dir), Tree[K], F.Id, F.Cwd))
+            {
+                F.Pid = Tree[K];
+                F.ConfigDir = Dir;
+            }
         }
         // --- no claude: another CLI agent, by its exe's name or its script's path ---
         for(size_t K = 1; K < Tree.size() && !F.Pid && F.Agent.empty(); ++K)
@@ -759,7 +821,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, serv
         }
         else
         {
-            bool32 Resume = !SessionFilePath(Tab.SessionId).empty();
+            bool32 Resume = !SessionFilePath(!Tab.ConfigDir.empty() ? Utf8ToWide(Tab.ConfigDir) : ClaudeConfigDir(), Tab.SessionId).empty();
             Inner += L"cd /d \"" + Cwd + L"\" & " + Claude + (Resume ? L" --resume " : L" --session-id ") + Utf8ToWide(Tab.SessionId);
             Tab.LaunchedAtMs = NowMs;
         }
@@ -770,7 +832,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, serv
     // --- environment: drop the markers a parent Claude Code session leaves behind (ClaudeMarkers) ---
     // Inherited clink config locations are dropped, so another clink setup never leaks into term's.
     static const wchar_t* Strip[] = {
-        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL", L"MOSS_DIR",
+        L"CLINK_SETTINGS", L"CLINK_INPUTRC", L"CLINK_PATH", L"CLINK_PROFILE", L"CLINK_HISTORY_LABEL", L"MOSS_DIR", L"MOSS_ACCOUNT_DIR",
     };
     std::wstring Env;
     bool32 Vs = ReadSetting("vs_env") != "off";
@@ -783,6 +845,7 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, serv
         bool32 Drop = false;
         for(const wchar_t* S : Strip) { if(wcslen(S) == NameLen && _wcsnicmp(Var, S, NameLen) == 0) { Drop = true; } }
         for(const wchar_t* S : ClaudeMarkers) { if(wcslen(S) == NameLen && _wcsnicmp(Var, S, NameLen) == 0) { Drop = true; } }
+        if(!Tab.ConfigDir.empty() && NameLen == 17 && _wcsnicmp(Var, L"CLAUDE_CONFIG_DIR", 17) == 0) { Drop = true; } // the tab's own, below
         if(Drop) { continue; }
         // Visual Studio's build environment changes this one: set, or put around its own value.
         std::wstring Entry = Var;
@@ -810,17 +873,31 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, serv
     for(char Ch : Tab.SessionId.empty() ? Tab.HistoryId : Tab.SessionId) { if(isalnum((u8)Ch) && Label.size() < 32) { Label += (wchar_t)Ch; } }
     Env += L"CLINK_HISTORY_LABEL=" + Label;
     Env.push_back(0);
-    // Tab completion for git, npm, winget, ... (vendored clink-completions, next to moss.exe). Clink
-    // still loads the profile's own scripts; init.bat can add to CLINK_PATH or clear it.
-    std::wstring Completions = ExeDir() + L"clink-completions";
-    if(GetFileAttributesW(Completions.c_str()) != INVALID_FILE_ATTRIBUTES)
+    // moss's own clink scripts (clink-moss: a typed claude uses its folder's account) and tab completion for git, npm,
+    // winget, ... (vendored clink-completions), both next to moss.exe. Clink still loads the profile's own scripts;
+    // init.bat can add to CLINK_PATH or clear it.
+    std::wstring ClinkPath;
+    for(const wchar_t* Name : {L"clink-moss", L"clink-completions"})
     {
-        Env += L"CLINK_PATH=" + Completions;
+        std::wstring Dir = ExeDir() + Name;
+        if(GetFileAttributesW(Dir.c_str()) != INVALID_FILE_ATTRIBUTES) { ClinkPath += (ClinkPath.empty() ? L"" : L";") + Dir; }
+    }
+    if(!ClinkPath.empty())
+    {
+        Env += L"CLINK_PATH=" + ClinkPath;
         Env.push_back(0);
     }
     // Where moss.exe is (with a trailing backslash).
     Env += L"MOSS_DIR=" + ExeDir();
     Env.push_back(0);
+    // A claude of another account comes back under it: its config folder, for the whole tab.
+    if(!Tab.ConfigDir.empty())
+    {
+        Env += L"CLAUDE_CONFIG_DIR=" + Utf8ToWide(Tab.ConfigDir);
+        Env.push_back(0);
+        Env += L"MOSS_ACCOUNT_DIR=" + Utf8ToWide(Tab.ConfigDir); // moss set it: clink-moss may unset it outside its folders
+        Env.push_back(0);
+    }
     Env.push_back(0);
 
     std::string Error;
@@ -836,11 +913,12 @@ static void StartTab(tab& Tab, s32 Cols, s32 Rows, HANDLE Job, HANDLE Wake, serv
 
 // Shell: a plain cmd. Otherwise claude runs in it, with SessionId or a brand new one.
 static tab* OpenTab(server_state& Server, bool32 Shell, const std::string& SessionId, const std::string& HistoryId, const std::string& Cwd,
-                    const std::string& Title, s32 Cols, s32 Rows, u32 Request, const std::string& AgentCommand, HANDLE Job,
-                    HANDLE Wake, u64 NowMs)
+                    const std::string& Title, const std::string& ConfigDir, s32 Cols, s32 Rows, u32 Request,
+                    const std::string& AgentCommand, HANDLE Job, HANDLE Wake, u64 NowMs)
 {
     tab* T = new tab();
     T->AgentCommand = Utf8ToWide(AgentCommand);
+    T->ConfigDir = Shell ? std::string() : ConfigDir;
     T->Id = ++Server.NextId;
     T->Request = Request;
     T->SessionId = Shell ? std::string() : (SessionId.empty() ? NewUuid() : SessionId);
@@ -1079,7 +1157,7 @@ static std::string EncodeTabs(const server_state& Server)
         M.Request = T->Request;
         std::string Agent = !T->SessionId.empty() ? std::string("claude") : T->Agent;
         M.Flags = (Agent.empty() ? 0 : TAB_AGENT) | (T->TitleBusy ? TAB_BUSY : 0) | (T->NeedsInput ? TAB_NEEDS_INPUT : 0) |
-                  (T->Exited ? TAB_EXITED : 0) | (T->Running ? TAB_RUNNING : 0) | (!T->AccountWas.empty() ? TAB_ACCOUNT_HELD : 0);
+                  (T->Exited ? TAB_EXITED : 0) | (T->Running ? TAB_RUNNING : 0) | (TabHeld(*T) ? TAB_ACCOUNT_HELD : 0);
         M.Cpu = (float)(s32)(T->Cpu + 0.5f); // whole percents: a change of a tenth doesn't resend the list
         M.KeyLen = (u32)Key.size();
         M.NameLen = (u32)Name.size();
@@ -1089,6 +1167,9 @@ static std::string EncodeTabs(const server_state& Server)
         M.OwnerLen = (u32)T->Owner.size();
         M.AccountLen = (u32)T->Account.size();
         M.AccountWasLen = (u32)T->AccountWas.size();
+        std::string HoldWhy = !T->RuleWhy.empty() && T->RuleOkPid != T->ClaudePid ? T->RuleWhy : std::string();
+        M.ConfigDirLen = (u32)T->ConfigDir.size();
+        M.HoldWhyLen = (u32)HoldWhy.size();
         Out.append((const char*)&M, sizeof(M));
         Out += Key;
         Out += Name;
@@ -1098,6 +1179,8 @@ static std::string EncodeTabs(const server_state& Server)
         Out += T->Owner;
         Out += T->Account;
         Out += T->AccountWas;
+        Out += T->ConfigDir;
+        Out += HoldWhy;
     }
     return Out;
 }
@@ -1214,14 +1297,14 @@ static std::wstring TabsFilePath()
     return Dir + L"\\tabs" + InstanceSuffix() + L".txt";
 }
 
-// One line per tab: "tab|shell <tab> lasting id <tab> cwd <tab> project <tab> title". The layout is the
-// window's (session.json): it finds the tabs again by their lasting ids.
+// One line per tab: "tab|shell <tab> lasting id <tab> cwd <tab> project <tab> title <tab> owner <tab> claude's config
+// folder". The layout is the window's (session.json): it finds the tabs again by their lasting ids.
 static std::string TabsFileContents(const server_state& Server)
 {
     std::string Out;
     for(const tab* T : Server.Tabs)
     {
-        std::string Fields[5] = {T->SessionId.empty() ? T->HistoryId : T->SessionId, T->Cwd, T->Project, T->Title, T->Owner};
+        std::string Fields[6] = {T->SessionId.empty() ? T->HistoryId : T->SessionId, T->Cwd, T->Project, T->Title, T->Owner, T->ConfigDir};
         Out += T->SessionId.empty() ? "shell" : "tab";
         for(std::string& F : Fields)
         {
@@ -1395,28 +1478,33 @@ static int ServerMain()
         // resumed next to a still-live process of the same session, Claude renames the session ---
         {
             std::vector<std::string> Resuming;
+            std::vector<std::wstring> Dirs = {ClaudeConfigDir()}; // every account's config folder they ran under
             for(size_t At = 0; At < Saved.size();)
             {
                 size_t End = Saved.find('\n', At);
                 if(End == std::string::npos) { End = Saved.size(); }
                 std::vector<std::string> F = SplitTabs(Saved.substr(At, End - At));
                 if(F.size() >= 2 && F[0] == "tab") { Resuming.push_back(F[1]); }
+                if(F.size() >= 7 && F[0] == "tab" && !F[6].empty() && std::find(Dirs.begin(), Dirs.end(), Utf8ToWide(F[6])) == Dirs.end()) { Dirs.push_back(Utf8ToWide(F[6])); }
                 At = End + 1;
             }
             std::vector<HANDLE> Still;
-            WIN32_FIND_DATAW Found = {};
-            HANDLE Find = Resuming.empty() ? INVALID_HANDLE_VALUE : FindFirstFileW((ClaudeConfigDir() + L"\\sessions\\*.json").c_str(), &Found);
-            while(Find != INVALID_HANDLE_VALUE)
+            for(const std::wstring& Dir : Dirs)
             {
-                DWORD Pid = (DWORD)_wtoi(Found.cFileName);
-                std::string Id;
-                std::string Cwd;
-                if(Pid && ReadClaudeSession(Pid, Id, Cwd) && std::find(Resuming.begin(), Resuming.end(), Id) != Resuming.end() && Still.size() < MAXIMUM_WAIT_OBJECTS)
+                WIN32_FIND_DATAW Found = {};
+                HANDLE Find = Resuming.empty() ? INVALID_HANDLE_VALUE : FindFirstFileW((Dir + L"\\sessions\\*.json").c_str(), &Found);
+                while(Find != INVALID_HANDLE_VALUE)
                 {
-                    HANDLE Proc = OpenProcess(SYNCHRONIZE, FALSE, Pid);
-                    if(Proc) { Still.push_back(Proc); }
+                    DWORD Pid = (DWORD)_wtoi(Found.cFileName);
+                    std::string Id;
+                    std::string Cwd;
+                    if(Pid && ReadClaudeSession(Dir, Pid, Id, Cwd) && std::find(Resuming.begin(), Resuming.end(), Id) != Resuming.end() && Still.size() < MAXIMUM_WAIT_OBJECTS)
+                    {
+                        HANDLE Proc = OpenProcess(SYNCHRONIZE, FALSE, Pid);
+                        if(Proc) { Still.push_back(Proc); }
+                    }
+                    if(!FindNextFileW(Find, &Found)) { FindClose(Find); break; }
                 }
-                if(!FindNextFileW(Find, &Found)) { FindClose(Find); break; }
             }
             if(!Still.empty())
             {
@@ -1435,9 +1523,10 @@ static int ServerMain()
             At = End + 1;
             if(F.size() >= 5 && (F[0] == "tab" || F[0] == "shell"))
             {
-                bool32 Claude = (F[0] == "tab" && !SessionFilePath(F[1]).empty());
-                tab* T = OpenTab(Server, !Claude, F[1], Claude ? std::string() : F[1], F[2], Claude ? F[4] : std::string(), 120, 40, 0, std::string(),
-                                 Job, Wake, GetTickCount64());
+                std::string ConfigDir = F.size() >= 7 ? F[6] : std::string();   // a claude of another account resumes under it
+                bool32 Claude = (F[0] == "tab" && !SessionFilePath(!ConfigDir.empty() ? Utf8ToWide(ConfigDir) : ClaudeConfigDir(), F[1]).empty());
+                tab* T = OpenTab(Server, !Claude, F[1], Claude ? std::string() : F[1], F[2], Claude ? F[4] : std::string(), ConfigDir, 120, 40, 0,
+                                 std::string(), Job, Wake, GetTickCount64());
                 if(F.size() >= 6) { T->Owner = F[5]; }
             }
         }
@@ -1621,7 +1710,7 @@ static int ServerMain()
                     u32 Id = 0;
                     memcpy(&Id, Payload.data(), 4);
                     tab* T = FindTab(Server, Id);
-                    if(T && T->Pty && !T->AccountWas.empty()) { Logf("server", "tab %u: input dropped: account changed", T->Id); }
+                    if(T && T->Pty && TabHeld(*T)) { Logf("server", "tab %u: input dropped: account changed", T->Id); }
                     else if(T && T->Pty)
                     {
                         PtyWrite(T->Pty, Payload.substr(4));
@@ -1629,6 +1718,47 @@ static int ServerMain()
                         T->NeedsInput = false; // typed into: whatever it asked is being answered
                         if(Payload.find('\r', 4) != std::string::npos) { T->AtPrompt = false; T->EnterAtMs = GetTickCount64(); T->Running = T->PromptSeen && T->SessionId.empty(); } // a command line went in
                         if(T->ScrollOffset) { T->ScrollOffset = 0; T->SentValid = false; }
+                        // --- claude's prompt line as typed (after the write: typing never waits for this), so a /login
+                        //     there makes the account change that follows this tab's own. Keys come as text or as
+                        //     win32-input-mode events (ESC [ Vk;Sc;Uc;Kd;Cs;Rc _, its character when pressed) ---
+                        for(size_t I = 4; !T->SessionId.empty() && I < Payload.size(); ++I)
+                        {
+                            u32 Ch = (u8)Payload[I];
+                            if(Ch == 0x1b && I + 1 < Payload.size() && Payload[I + 1] == '[')
+                            {
+                                size_t End = I + 2;
+                                while(End < Payload.size() && !(Payload[End] >= 0x40 && Payload[End] <= 0x7e)) { ++End; }
+                                if(End >= Payload.size()) { break; }
+                                Ch = 0;
+                                if(Payload[End] == '_')
+                                {
+                                    s32 P[6] = {};
+                                    s32 K = 0;
+                                    for(size_t J = I + 2; J < End && K < 6; ++J)
+                                    {
+                                        if(Payload[J] == ';') { ++K; }
+                                        else if(Payload[J] >= '0' && Payload[J] <= '9') { P[K] = P[K] * 10 + (Payload[J] - '0'); }
+                                    }
+                                    if(P[3] == 1) { Ch = (u32)P[2]; } // pressed: its character
+                                }
+                                I = End; // other sequences (arrows, paste marks) don't change the line here
+                                if(!Ch) { continue; }
+                            }
+                            else if(Ch == 0x1b) { continue; } // Alt's prefix
+                            if(Ch == '\r' || Ch == '\n')
+                            {
+                                size_t First = T->TypedLine.find_first_not_of(' ');
+                                if(First != std::string::npos && T->TypedLine.compare(First, 4, "/log") == 0)
+                                {
+                                    Logf("server", "tab %u: %s typed: its account change is its own for 10 minutes", T->Id, T->TypedLine.substr(First, 16).c_str());
+                                    T->LoginAtMs = GetTickCount64();
+                                }
+                                T->TypedLine.clear();
+                            }
+                            else if(Ch == 8 || Ch == 0x7f) { if(!T->TypedLine.empty()) { T->TypedLine.pop_back(); } }
+                            else if(Ch == 3 || Ch == 0x15) { T->TypedLine.clear(); } // Ctrl+C, Ctrl+U
+                            else if(Ch >= 32 && T->TypedLine.size() < 256) { T->TypedLine += Ch < 0x80 ? (char)Ch : '?'; }
+                        }
                     }
                 }
                 else if(Type == MSG_NEW_TAB && Payload.size() >= sizeof(msg_new_tab))
@@ -1637,8 +1767,8 @@ static int ServerMain()
                     memcpy(&N, Payload.data(), sizeof(N));
                     // cwd \0 session \0 agent command
                     std::string Rest = Payload.substr(sizeof(N));
-                    std::string Parts[3];
-                    for(s32 K = 0, At = 0; K < 3 && At <= (s32)Rest.size(); ++K)
+                    std::string Parts[4];
+                    for(s32 K = 0, At = 0; K < 4 && At <= (s32)Rest.size(); ++K)
                     {
                         size_t Zero = Rest.find('\0', At);
                         Parts[K] = Rest.substr(At, Zero == std::string::npos ? std::string::npos : Zero - At);
@@ -1646,7 +1776,7 @@ static int ServerMain()
                     }
                     std::string Cwd = Parts[0].empty() ? Server.LaunchCwd : Parts[0];
                     bool32 Claude = N.Kind == NEW_TAB_CLAUDE;
-                    tab* T = OpenTab(Server, !Claude, Parts[1], std::string(), Cwd, std::string(), N.Cols, N.Rows, N.Request,
+                    tab* T = OpenTab(Server, !Claude, Parts[1], std::string(), Cwd, std::string(), Parts[3], N.Cols, N.Rows, N.Request,
                                      Claude ? std::string() : Parts[2], Job, Wake, NowMs);   // a shell's: run it first (an editor)
                     T->Owner = C.Name;
                 }
@@ -1801,10 +1931,11 @@ static int ServerMain()
                     u32 Id = 0;
                     memcpy(&Id, Payload.data(), 4);
                     tab* T = FindTab(Server, Id);
-                    if(T && !T->AccountWas.empty())
+                    if(T && TabHeld(*T))
                     {
-                        Logf("server", "tab %u: going on with the new account", T->Id);
+                        Logf("server", "tab %u: going on with this account", T->Id);
                         T->AccountWas.clear();
+                        T->RuleOkPid = T->ClaudePid;
                     }
                 }
                 else if(Type == MSG_HISTORY_GET && Payload.size() >= 4 && !HistoryRead)
@@ -1816,6 +1947,7 @@ static int ServerMain()
                     HistoryRead = new history_read();
                     HistoryRead->TabId = Id;
                     HistoryRead->SessionId = T ? T->SessionId : std::string();
+                    HistoryRead->ConfigDir = T && !T->ConfigDir.empty() ? Utf8ToWide(T->ConfigDir) : ClaudeConfigDir();
                     HistoryRead->Wake = Wake;
                     HANDLE Thread = CreateThread(0, 0, HistoryReadThread, HistoryRead, 0, 0);
                     if(Thread) { CloseHandle(Thread); }
@@ -2062,7 +2194,7 @@ static int ServerMain()
                 if(!Find) { continue; } // opened after the scan started
                 if(Elapsed) { T->Cpu = (float)(Find->CpuUsed * 100.0 / ((double)Elapsed * Cores)); }
                 // a program under the cmd; or just after Enter while the prompt isn't back (the scan may predate it)
-                T->Running = T->SessionId.empty() && (Find->HasChild || (T->PromptSeen && !T->AtPrompt && GetTickCount64() - T->EnterAtMs < 3000));
+                T->Running = T->SessionId.empty() && !Find->Pid && (Find->HasChild || (T->PromptSeen && !T->AtPrompt && GetTickCount64() - T->EnterAtMs < 3000));
                 if(Find->Agent != T->Agent && !Find->Pid)
                 {
                     Logf("server", "tab %u: agent %s", T->Id, Find->Agent.empty() ? "gone" : Find->Agent.c_str());
@@ -2084,6 +2216,12 @@ static int ServerMain()
                     }
                     if(!Find->Cwd.empty() && Find->Cwd != T->Cwd) { T->Cwd = Find->Cwd; T->Project = ProjectName(Find->Cwd); }
                     bool32 SameClaude = T->ClaudePid == Find->Pid;
+                    bool32 HeldBefore = SameClaude && TabHeld(*T);
+                    if(Find->ConfigDir != T->ConfigDir)
+                    {
+                        Logf("server", "tab %u: claude config folder %s", T->Id, Find->ConfigDir.empty() ? "(the server's)" : Find->ConfigDir.c_str());
+                        T->ConfigDir = Find->ConfigDir;
+                    }
                     T->ClaudePid = Find->Pid;
                     T->LaunchedAtMs = 0;
                     // --- its account: a login, organization or email that changes under a running claude holds it, so it
@@ -2094,15 +2232,15 @@ static int ServerMain()
                     std::string WhoHeld = T->AccountWas.substr(0, T->AccountWas.rfind('\n'));
                     if(!Find->Account.empty() && SameClaude && !T->Account.empty() && Who != WhoWas)
                     {
-                        if(T->AccountWas.empty())
+                        if(T->AccountWas.empty() && T->LoginAtMs && NowMs - T->LoginAtMs < 10 * 60 * 1000)
+                        {
+                            Logf("server", "tab %u: claude account changed after a /login here: not held", T->Id);
+                        }
+                        else if(T->AccountWas.empty())
                         {
                             Logf("server", "tab %u: claude account changed (%s -> %s): held", T->Id, T->Account.substr(0, T->Account.find('\n')).c_str(),
                                  Find->Account.substr(0, Find->Account.find('\n')).c_str());
                             T->AccountWas = T->Account;
-                            if(T->Pty && (T->TitleBusy || T->NeedsInput)) { PtyWrite(T->Pty, T->Term.Win32Input ? "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_" : "\x1b"); }
-                            if(!T->Viewer) { T->Notice = "account changed"; }
-                            if(ReadSetting("notifications") != "off") { TrayNotify(Tray, TabName(*T), "Claude's account changed: stopped until you say go on", (s32)T->Id); }
-                            T->NotifiedAtMs = NowMs;
                         }
                         else if(Who == WhoHeld)
                         {
@@ -2116,6 +2254,61 @@ static int ServerMain()
                              Find->Account.substr(Find->Account.rfind('\n') + 1).c_str());
                         T->Account = Find->Account;
                     }
+                    // --- the folder rules (accounts.txt): a claude in a ruled folder must use that folder's account, and an
+                    //     account with folders is used nowhere else. Which ruled account it is: by its config folder, or by a
+                    //     ruled account's login found in it (that login copied elsewhere bills the same). From the start: no
+                    //     /login waives it. Unknown this scan (a file mid-write): as it was ---
+                    if(!Find->Account.empty())
+                    {
+                        const accounts& Acc = Scan->Accounts;
+                        std::string Folder = !Find->Cwd.empty() ? Find->Cwd : T->Cwd;
+                        const folder_rule* Rule = FolderRuleFor(Acc, Folder);
+                        size_t First = Find->Account.find('\n');
+                        size_t Third = Find->Account.find('\n', Find->Account.find('\n', First + 1) + 1);
+                        std::string Login = Find->Account.substr(First + 1, Third - First - 1); // "organization\nemail"
+                        std::string Is;   // the ruled account it is; empty = none
+                        bool32 ByLogin = false; // it is that account by its login, in another account's folder
+                        bool32 Exists = !Rule;
+                        for(size_t I = 0; I < Acc.List.size(); ++I)
+                        {
+                            const claude_account& A = Acc.List[I];
+                            if(Rule && _stricmp(A.Name.c_str(), Rule->Account.c_str()) == 0) { Exists = true; }
+                            bool32 Ruled = false;
+                            for(const folder_rule& R : Acc.Folders) { Ruled |= _stricmp(R.Account.c_str(), A.Name.c_str()) == 0; }
+                            bool32 SameDir = A.Dir.empty() ? Find->ConfigDir.empty() : _wcsicmp(Utf8ToWide(A.Dir).c_str(), Utf8ToWide(Find->ConfigDir).c_str()) == 0;
+                            bool32 SameLogin = Login.size() > 1 && Scan->Logins[I] == Login;
+                            if(Ruled && (SameDir || SameLogin)) { Is = A.Name; ByLogin = !SameDir; }
+                        }
+                        std::string Why;
+                        if(Rule && _stricmp(Is.c_str(), Rule->Account.c_str()) != 0)
+                        {
+                            Why = Rule->Folder + " is for the " + Rule->Account + " account" + (Exists ? "" : ", which isn't set up yet") + "; this claude isn't using it.";
+                        }
+                        else if(!Rule && !Is.empty())
+                        {
+                            Why = "The " + Is + " account" + (ByLogin ? "'s login (here in another account's config folder)" : "") +
+                                  " is only for its folders, and this claude is in " + Folder + ".";
+                        }
+                        if(Why != T->RuleWhy)
+                        {
+                            Logf("server", "tab %u: folder rule %s", T->Id, Why.empty() ? "kept" : ("broken: " + Why).c_str());
+                            T->RuleWhy = Why;
+                        }
+                    }
+                    // --- newly held (an account change, a broken folder rule): its turn stopped (Esc, when it's working
+                    //     or asking), the user told ---
+                    if(!HeldBefore && TabHeld(*T))
+                    {
+                        bool32 ByRule = !T->RuleWhy.empty() && T->RuleOkPid != T->ClaudePid;
+                        if(T->Pty && (T->TitleBusy || T->NeedsInput)) { PtyWrite(T->Pty, T->Term.Win32Input ? "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_" : "\x1b"); }
+                        if(!T->Viewer) { T->Notice = ByRule ? "wrong account" : "account changed"; }
+                        if(ReadSetting("notifications") != "off")
+                        {
+                            TrayNotify(Tray, TabName(*T), ByRule ? "Wrong Claude account for this folder: stopped until you say go on" :
+                                                                   "Claude's account changed: stopped until you say go on", (s32)T->Id);
+                        }
+                        T->NotifiedAtMs = NowMs;
+                    }
                 }
                 else if(T->ClaudePid || (T->LaunchedAtMs && NowMs - T->LaunchedAtMs > 30000))
                 {
@@ -2128,6 +2321,11 @@ static int ServerMain()
                     T->TitleBusy = false;
                     T->Account.clear();
                     T->AccountWas.clear();
+                    T->ConfigDir.clear();
+                    T->TypedLine.clear();
+                    T->LoginAtMs = 0;
+                    T->RuleWhy.clear();
+                    T->RuleOkPid = 0;
                 }
             }
             delete Scan;

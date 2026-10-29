@@ -46,6 +46,8 @@ typedef struct TermTab {
     String owner;    // the window it belongs to (its name; empty = the main window)
     String account;  // claude: login method, organization, email, model ('\n' between; empty = no claude)
     String account_was; // TermTab_AccountHeld: the account before it changed, the same way
+    String config_dir;  // claude: its account's config folder (empty = the default account's)
+    String hold_why;    // TermTab_AccountHeld for a broken folder rule: why (empty = an account change)
 } TermTab;
 
 // The screen of a tab a pane shows (the latest msg_cells applied). cells: cols * rows, row-major.
@@ -71,8 +73,8 @@ typedef struct TermGrid {
 typedef struct TermWatch { u32 tab_id; s32 cols, rows; b32 shown; } TermWatch;   // every tab the window has
 typedef struct TermInput { u32 tab_id; String bytes; } TermInput;
 enum { TermNew_Shell = 0, TermNew_Claude = 1, TermNew_Agent = 2 };
-// command: the agent's (TermNew_Agent)
-typedef struct TermNewTab { u32 request; u32 kind; s32 cols, rows; String cwd; String session; String command; } TermNewTab;
+// command: the agent's (TermNew_Agent); config_dir: claude's account (its config folder, empty = the default)
+typedef struct TermNewTab { u32 request; u32 kind; s32 cols, rows; String cwd; String session; String command; String config_dir; } TermNewTab;
 // A terminal theme: the terminal's colors (0xRRGGBB); the chrome is made from them.
 typedef struct TermTheme {
     const char *name;
@@ -98,6 +100,7 @@ typedef struct TermSession {
     String project;   // that folder's name
     String title;     // its first prompt, on one line
     u64 modified;     // its transcript's last write (FILETIME, UTC)
+    String config_dir; // its account's config folder (empty = the default account's)
 } TermSession;
 
 // The terminal colours of a theme (0xRRGGBB): what cells with default and palette colours look like.

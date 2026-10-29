@@ -9,13 +9,13 @@ enum msg_type
     MSG_ATTACH,    // window -> server: msg_attach, then the window's cwd (UTF-8), a 0 byte, the window's name (empty = the main window)
     MSG_BYE,       // server -> window: reason text, then a 0 byte and a BYE_* byte (older windows read just the text)
     MSG_TABS,      // server -> window: msg_tabs, then per tab msg_tab and its strings (key, name, cwd, notice, agent, owner, account, account
-                   // before it changed)
+                   // before it changed, config folder, why it's held)
     MSG_CELLS,     // server -> window: msg_cells, then RowCount x (s32 Y, cell[Cols]); one tab per message
     MSG_OUTPUT,    // server -> window: what programs pass to the terminal itself (OSC 52 clipboard) and BEL
     MSG_WATCH,     // window -> server: u32 Count, then Count x msg_watch: every tab the window has, its size, shown or not
     MSG_INPUT,     // window -> server: u32 TabId, then VT input bytes for its program
     MSG_NEW_TAB,   // window -> server: msg_new_tab, then the cwd (UTF-8), a 0 byte, the claude session to resume (or empty), a 0 byte, the
-                   // agent command (NEW_TAB_AGENT)
+                   // agent command (NEW_TAB_AGENT), a 0 byte, claude's config folder (an account; empty = the default)
     MSG_CLOSE_TAB, // window -> server: u32 TabId
     MSG_SCROLL,    // window -> server: u32 TabId, s32 Lines (> 0 back into the scrollback; SCROLL_TO_BOTTOM = live)
     MSG_FOCUS,     // window -> server: u32 TabId with the keyboard focus (0 = the window lost it): focus reports
@@ -57,7 +57,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 13
+#define TERM_PROTOCOL_VERSION 14
 
 struct msg_attach
 {
@@ -96,6 +96,8 @@ struct msg_tab
     u32 OwnerLen;  // the window it belongs to (empty = the main window)
     u32 AccountLen; // claude: its login method, organization, email and model, '\n' between (empty = no claude)
     u32 AccountWasLen; // TAB_ACCOUNT_HELD: the account before it changed, the same way
+    u32 ConfigDirLen; // claude: its config folder (CLAUDE_CONFIG_DIR, an account of accounts.txt); empty = the default account's
+    u32 HoldWhyLen;   // TAB_ACCOUNT_HELD for a broken folder rule: why (empty = held for an account change)
 };
 
 struct msg_watch
@@ -147,6 +149,7 @@ struct msg_session
     u32 CwdLen;
     u32 ProjectLen;
     u32 TitleLen;
+    u32 ConfigDirLen; // then its account's config folder (empty = the default account's)
 };
 
 struct msg_cells

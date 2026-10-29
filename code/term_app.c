@@ -43,6 +43,7 @@ enum {
     Cmd_Palette, Cmd_Profile, Cmd_DebugOverlay, Cmd_CloseWindow, Cmd_ToggleBrowser, Cmd_PrevCommand, Cmd_NextCommand, Cmd_Sessions, Cmd_Settings, Cmd_TearOff,
     Cmd_Find, Cmd_Search, Cmd_RenameTab, Cmd_ZoomPane, Cmd_ClearScrollback, Cmd_CopyAll, Cmd_Broadcast, Cmd_Topmost, Cmd_Duplicate,
     Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode,
+    Cmd_NewClaudeAs, Cmd_AddAccount,
     Cmd_Count
 };
 
@@ -81,6 +82,8 @@ static const CommandDef g_Commands[Cmd_Count] = {
     [Cmd_PrevCommand]   = { "prev_command", "Scroll to the previous command", Key_Up, Mod_Ctrl | Mod_Shift },
     [Cmd_NextCommand]   = { "next_command", "Scroll to the next command", Key_Down, Mod_Ctrl | Mod_Shift },
     [Cmd_Settings]      = { "settings", "Settings", Key_Comma, Mod_Ctrl },
+    [Cmd_NewClaudeAs]   = { "claude_accounts", "Claude accounts", 0, 0 },
+    [Cmd_AddAccount]    = { "add_claude_account", "Add a Claude account", 0, 0 },
     [Cmd_TearOff]       = { "tear_off", "Move tab to a new window", 0, 0 },
     [Cmd_Find]          = { "find", "Find", Key_A + 'F' - 'A', Mod_Ctrl },
     [Cmd_Search]        = { "search", "Search (as vim's /)", Key_Slash, Mod_Ctrl },
@@ -103,6 +106,7 @@ static const CommandDef g_Commands[Cmd_Count] = {
 // --- settings: the palette's settings mode (Ctrl+,), a row each; a change applies at once and goes to settings.txt ---
 enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
+    Setting_DimUnfocused,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
     Setting_Agent, Setting_Agents, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Count
 };
@@ -120,6 +124,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_BackgroundStrength] = { "Appearance", "Background image strength", "how much of it shows through", SettingKind_Choice },
     [Setting_Cursor]        = { "Appearance", "Cursor", "when the program asks for none", SettingKind_Choice },
     [Setting_CursorBlink]   = { "Appearance", "Cursor blinks", "", SettingKind_Bool },
+    [Setting_DimUnfocused]  = { "Appearance", "Dim the panes not in focus", "the focused one stands out", SettingKind_Bool },
     [Setting_CopyOnSelect]  = { "Terminal", "Copy on select", "a finished selection goes to the clipboard", SettingKind_Bool },
     [Setting_Agent]         = { "Agents", "Agent command", "what Ctrl+Shift+A starts", SettingKind_Text },
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
@@ -131,7 +136,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_ExplorerMenu]  = { "More", "\"Open in moss\" in Explorer", "on folders and their background", SettingKind_Bool },
     [Setting_OpenFolder]    = { "More", "Open the settings folder", "settings.txt and the shell setup", SettingKind_Action },
 };
-enum { PaletteMode_Commands, PaletteMode_Settings, PaletteMode_GoTo };
+enum { PaletteMode_Commands, PaletteMode_Settings, PaletteMode_GoTo, PaletteMode_Account };
 
 // --- terminal themes: the terminal's colors; the chrome is made from them ----------------------------------------
 // The first is the default when settings.txt names none: Moss, term's own (the official theme).
@@ -181,6 +186,22 @@ enum { TermTheme_Count = (s32)(sizeof(g_TermThemes) / sizeof(g_TermThemes[0])) }
 typedef struct Chrome {
     u32 bg, caption, surface, text, dim, faint, line, hover, press, accent, on_accent, selection, danger;
 } Chrome;
+
+// A terminal's palette in a theme. The find bar's matches: the theme's yellow a third of the way in from the background.
+static TermPalette TermPaletteFor(const TermTheme *tt, b32 ligatures)
+{
+    u32 found_bg = 0;
+    for (s32 k = 0; k < 3; k++) {
+        u32 a = (tt->bg >> (k * 8)) & 0xFF, b = (tt->ansi[3] >> (k * 8)) & 0xFF;
+        found_bg |= ((a * 2 + b) / 3) << (k * 8);
+    }
+    TermPalette p = {
+        tt->fg, tt->bg, tt->selection, tt->accent, found_bg, tt->ansi[11], 0, 0, 0, 0, ligatures,
+        { tt->ansi[0], tt->ansi[1], tt->ansi[2], tt->ansi[3], tt->ansi[4], tt->ansi[5], tt->ansi[6], tt->ansi[7],
+          tt->ansi[8], tt->ansi[9], tt->ansi[10], tt->ansi[11], tt->ansi[12], tt->ansi[13], tt->ansi[14], tt->ansi[15] },
+    };
+    return p;
+}
 
 static Chrome ChromeFor(const TermTheme *tt)
 {
@@ -357,6 +378,7 @@ struct App {
     b32 cursor_blink;
     b32 ligatures;
     b32 copy_on_select_off;
+    b32 dim_unfocused_off;    // settings.txt `dim_unfocused = off`
     b32 broadcast;            // keys typed go to every terminal shown in the window
     b32 explorer_menu;        // Explorer has "Open in moss"
     b32 start_with_windows;   // the server starts at sign-in
@@ -392,6 +414,17 @@ struct App {
     s32 hist_current;         // the current match, -1 = none
     f32 hist_scroll;          // px from the top
     b32 hist_follow;          // scroll the current match into view (or the end, with none)
+    // --- Claude accounts (accounts.txt): [0] is the default one (Claude Code's own); a claude tab's account is the one
+    //     with its config folder ---
+    u32 accounts_version;
+    u8 accounts_buf[8192];
+    struct { String name, dir; s32 theme; } accounts[16];   // theme: a g_TermThemes index, -1 = the window's
+    s32 account_count;
+    struct { String folder, account; } folder_rules[32];  // claudes under folder use account, and it is used nowhere else
+    s32 folder_rule_count;
+    u8 pending_account[64];   // an account just asked for: its claude tab opens (to /login) once accounts.txt lists it
+    s32 pending_account_len;
+    b32 account_adding;       // the accounts palette came from "Add a Claude account" (its prompt asks for a name)
     b32 palette_open;
     u8 palette_mode;          // PaletteMode_*
     TextEdit palette_edit;
@@ -775,6 +808,9 @@ App *App_Create(const AppInit *init)
     app->headless = init->headless;
     app->opacity = init->opacity > 0 ? Clamp(init->opacity, 0.2f, 1.0f) : 1.0f;
     app->agent_command = CopyInto(app->agent_buf, sizeof(app->agent_buf), init->agent_command);
+    app->account_count = 1;   // the default account, until accounts.txt is read
+    app->accounts[0].name = S("default");
+    app->accounts[0].theme = -1;
     app->agents = CopyInto(app->agents_buf, sizeof(app->agents_buf), init->agents);
     app->term_font = CopyInto(app->term_font_buf, sizeof(app->term_font_buf), init->term_font);
     app->window_name = CopyInto(app->window_name_buf, sizeof(app->window_name_buf), init->window_name);
@@ -788,6 +824,7 @@ App *App_Create(const AppInit *init)
     app->cursor_blink = init->cursor_blink;
     app->ligatures = init->ligatures;
     app->copy_on_select_off = init->copy_on_select_off;
+    app->dim_unfocused_off = init->dim_unfocused_off;
     app->paste_warning_off = init->paste_warning_off;
     app->win32_input_off = init->win32_input_off;
     app->explorer_menu = init->explorer_menu;
@@ -975,6 +1012,14 @@ static void SetSetting(AppOutput *out, String key, String value)
 
 // A new terminal tab in `leaf` (a shell, or the agent), asked of the server; it shows "starting" until the server
 // lists it.
+// The account a claude config folder belongs to (empty = the default account's): its index, -1 = not in accounts.txt.
+static s32 AccountIndex(App *app, String dir)
+{
+    if (!dir.count) return 0;
+    for (s32 i = 1; i < app->account_count; i++) if (Str_EqualNoCase(app->accounts[i].dir, dir)) return i;
+    return -1;
+}
+
 static PaneTab *RequestTab(App *app, Frame *f, PaneNode *leaf, u32 kind, String cwd)
 {
     PaneTab *t = Panes_NewTab(&app->panes, leaf, NULL);
@@ -990,6 +1035,16 @@ static PaneTab *RequestTab(App *app, Frame *f, PaneNode *leaf, u32 kind, String 
     if (kind == TermNew_Agent) n->command = app->agent_command;
     Logf("app", "new tab requested (#%u, %s)", t->request, kind == TermNew_Shell ? "shell" : kind == TermNew_Claude ? "claude" : "agent");
     return t;
+}
+
+static String FocusedCwd(App *app);
+
+// A new claude tab in the focused pane, at its folder, under an account (its config folder; empty = the default).
+static void RequestClaudeTab(App *app, Frame *f, String config_dir)
+{
+    PaneTab *t = app->panes.selected;
+    RequestTab(app, f, t ? t->node : app->panes.root, TermNew_Claude, FocusedCwd(app));
+    f->new_tabs.data[f->new_tabs.count - 1].config_dir = config_dir;
 }
 
 // The text a paste types into a terminal: line ends as Enter (\r), bracketed when the program asked.
@@ -1621,6 +1676,7 @@ static void OpenSession(App *app, Frame *f, const TermSession *s)
     PaneTab *t = app->panes.selected;
     RequestTab(app, f, t ? t->node : app->panes.root, TermNew_Claude, s->cwd);
     f->new_tabs.data[f->new_tabs.count - 1].session = Str_PushCopy(f->fa, s->id);
+    f->new_tabs.data[f->new_tabs.count - 1].config_dir = Str_PushCopy(f->fa, s->config_dir);   // resumed under its own account
     Logf("app", "resume session %.*s", STR_ARG(s->id));
 }
 
@@ -1669,8 +1725,29 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
     const TermGrid *g = t ? FindGrid(f->in, t->term_id) : NULL;
     switch (cmd) {
     case Cmd_NewTab: RequestTab(app, f, t ? t->node : app->panes.root, TermNew_Shell, FocusedCwd(app)); break;
-    case Cmd_NewAgentTab:
-        RequestTab(app, f, t ? t->node : app->panes.root, app->agent_command.count ? TermNew_Agent : TermNew_Claude, FocusedCwd(app));
+    case Cmd_NewAgentTab: {
+        if (app->agent_command.count) { RequestTab(app, f, t ? t->node : app->panes.root, TermNew_Agent, FocusedCwd(app)); break; }
+        // claude: under the account the folder's rule names (the longest rule folder holding it), else the default
+        String cwd = FocusedCwd(app), want = {0};
+        s64 best = -1;
+        for (s32 r = 0; r < app->folder_rule_count; r++) {
+            String folder = app->folder_rules[r].folder;
+            b32 holds = cwd.count >= folder.count && Str_EqualNoCase((String){ cwd.data, folder.count }, folder) &&
+                        (cwd.count == folder.count || cwd.data[folder.count] == '\\' || cwd.data[folder.count] == '/');
+            if (holds && folder.count > best) { best = folder.count; want = app->folder_rules[r].account; }
+        }
+        s32 account = 0;
+        for (s32 i = 1; i < app->account_count && want.count; i++) if (Str_EqualNoCase(app->accounts[i].name, want)) account = i;
+        if (want.count && !account) Logf("app", "the folder is for the %.*s account, which isn't set up: claude starts as the default one (and is held)", STR_ARG(want));
+        RequestClaudeTab(app, f, app->accounts[account].dir);
+    } break;
+    case Cmd_NewClaudeAs: case Cmd_AddAccount:
+        app->palette_open = 1;
+        app->palette_mode = PaletteMode_Account;
+        app->account_adding = cmd == Cmd_AddAccount;
+        memset(&app->palette_edit, 0, sizeof(app->palette_edit));
+        app->palette_sel = 0;
+        app->palette_top = 0;
         break;
     case Cmd_CloseTab: if (t) CloseTab(app, f, t, 0); break;
     case Cmd_SplitRight: SplitFocused(app, f, 1); break;
@@ -2068,6 +2145,61 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         f.pane_rows = ((s32)(n->px[3] - n->px[1]) - caption_h - 2 * term_margin) / cell_h;
     }
 
+    // --- accounts.txt, read again when it changed: "account <name> = <config folder>", "theme <name> = <theme>",
+    //     "folder <folder> = <name>" lines (the accounts first, then their themes and folders) ---
+    if (in->accounts_version != app->accounts_version) {
+        app->accounts_version = in->accounts_version;
+        String text = CopyInto(app->accounts_buf, sizeof(app->accounts_buf), in->accounts_text);
+        app->account_count = 1;
+        app->accounts[0].name = S("default");
+        app->accounts[0].dir = (String){0};
+        app->accounts[0].theme = -1;
+        app->folder_rule_count = 0;
+        for (s32 pass = 0; pass < 2; pass++) {
+            for (s64 at = 0; at < text.count;) {
+                s64 end = at;
+                while (end < text.count && text.data[end] != '\n') end++;
+                String line = { text.data + at, end - at };
+                at = end + 1;
+                while (line.count && (line.data[0] == ' ' || line.data[0] == '\t')) { line.data++; line.count--; }
+                while (line.count && strchr(" \t\r", line.data[line.count - 1])) line.count--;
+                s64 sp = 0, eq = 0;
+                while (sp < line.count && line.data[sp] != ' ' && line.data[sp] != '\t') sp++;
+                while (eq < line.count && line.data[eq] != '=') eq++;
+                if (!line.count || line.data[0] == '#' || eq >= line.count || eq < sp) continue;
+                String kind = { line.data, sp }, name = { line.data + sp, eq - sp }, value = { line.data + eq + 1, line.count - eq - 1 };
+                while (name.count && (name.data[0] == ' ' || name.data[0] == '\t')) { name.data++; name.count--; }
+                while (name.count && (name.data[name.count - 1] == ' ' || name.data[name.count - 1] == '\t')) name.count--;
+                while (value.count && (value.data[0] == ' ' || value.data[0] == '\t')) { value.data++; value.count--; }
+                while (value.count > 3 && (value.data[value.count - 1] == '\\' || value.data[value.count - 1] == '/')) value.count--;
+                while (name.count > 3 && (name.data[name.count - 1] == '\\' || name.data[name.count - 1] == '/')) name.count--;
+                if (!name.count || !value.count) continue;
+                s32 known = -1;
+                for (s32 i = 0; i < app->account_count; i++) if (Str_EqualNoCase(app->accounts[i].name, name)) known = i;
+                if (pass == 0 && Str_Equal(kind, S("account")) && known != 0) {
+                    if (known < 0 && app->account_count < (s32)ArrayCount(app->accounts)) {
+                        known = app->account_count++;
+                        app->accounts[known].name = name;
+                        app->accounts[known].theme = -1;
+                    }
+                    if (known > 0) app->accounts[known].dir = value;
+                } else if (pass == 1 && Str_Equal(kind, S("theme")) && known >= 0) {
+                    for (s32 k = 0; k < TermTheme_Count; k++) if (Str_EqualNoCase(Str_FromCStr(g_TermThemes[k].name), value)) app->accounts[known].theme = k;
+                } else if (pass == 1 && Str_Equal(kind, S("folder")) && app->folder_rule_count < (s32)ArrayCount(app->folder_rules)) {
+                    app->folder_rules[app->folder_rule_count].folder = name;
+                    app->folder_rules[app->folder_rule_count++].account = value;
+                }
+            }
+        }
+        Logf("app", "accounts: %d, folder rules: %d", app->account_count, app->folder_rule_count);
+    }
+    // an account just added: its claude tab (to /login) once it's listed
+    for (s32 i = 1; i < app->account_count && app->pending_account_len && in->connected && app->tabs_seen; i++) {
+        if (!Str_EqualNoCase(app->accounts[i].name, (String){ app->pending_account, app->pending_account_len })) continue;
+        app->pending_account_len = 0;
+        RequestClaudeTab(app, &f, app->accounts[i].dir);
+    }
+
     // --- a tab asked for from outside (`moss -d DIR [-- command]`, Explorer's "Open in moss"): into the focused pane ---
     if (in->open_request && in->connected && app->tabs_seen) {
         PaneTab *ft = panes->selected;
@@ -2350,8 +2482,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (want.count && !ContainsNoCase(ss->project, want) && !ContainsNoCase(ss->title, want) && !ContainsNoCase(ss->cwd, want)) continue;
             side_rows[side_count++] = (s32)i;
         }
-        app->side_cursor = Clamp(app->side_cursor, 0, Max(0, side_count - 1));
         if (in->input.button[Mouse_Left].pressed && !modal) app->side_focus = mouse_x < sidebar_w;
+        if (app->side_focus) {
+            app->side_cursor = Clamp(app->side_cursor, 0, Max(0, side_count - 1));
+        } else {
+            // without the keyboard it marks the focused tab's session (none for a tab that isn't a claude), in view
+            const TermTab *ft = panes->selected ? FindServerTab(app, panes->selected->term_id) : NULL;
+            s64 at = -1;
+            for (s64 k = 0; ft && ft->key.count && k < side_count && at < 0; k++) if (Str_Equal(in->sessions[side_rows[k]].id, ft->key)) at = k;
+            if (at >= 0 && at != app->side_cursor) app->side_reveal = 1;
+            app->side_cursor = at;
+        }
     }
     if (app->sidebar_open && app->side_focus && !modal) {
         s64 page = Max(1, (in->client_h - caption_h - R(3)) / side_row_h - 1);
@@ -3021,6 +3162,13 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 age = Str_PushFormat(fa, "%s %d", g_Months[(mm - 1 + 12) % 12], dd);
             }
             Draw_TextIn(dl, small, CutRight(&l1, Font_Measure(small, age)), c->dim, age, 1);
+            if (ss->config_dir.count) {
+                // another account's session: its name
+                s32 ai = AccountIndex(app, ss->config_dir);
+                String name = ai > 0 ? app->accounts[ai].name : S("other account");
+                CutRight(&l1, R(0.6));
+                Draw_TextIn(dl, small, CutRight(&l1, Min(Font_Measure(small, name), RectW(l1))), c->accent, name, 1);
+            }
             if (running) {
                 Rect dot = CutLeft(&l1, R(1.1));
                 Draw_Rect(dl, RectCenter(dot, R(0.6), R(0.6)), c->accent, (f32)R(0.3));
@@ -3047,18 +3195,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     b32 blink_wanted = 0;
     PaneTab *close_later = NULL;   // a tab closed from its strip: after the panes are drawn (it may take its pane along)
     // the find bar's matches: the theme's yellow a third of the way in from the background; the current one bright
-    u32 found_bg = 0;
-    for (s32 k = 0; k < 3; k++) {
-        u32 a = (tt->bg >> (k * 8)) & 0xFF, b = (tt->ansi[3] >> (k * 8)) & 0xFF;
-        found_bg |= ((a * 2 + b) / 3) << (k * 8);
-    }
-    const TermPalette term_palette = {
-        tt->fg, tt->bg, tt->selection, tt->accent, found_bg, tt->ansi[11], 0, 0, 0, 0, app->ligatures,
-        { tt->ansi[0], tt->ansi[1], tt->ansi[2], tt->ansi[3], tt->ansi[4], tt->ansi[5], tt->ansi[6], tt->ansi[7],
-          tt->ansi[8], tt->ansi[9], tt->ansi[10], tt->ansi[11], tt->ansi[12], tt->ansi[13], tt->ansi[14], tt->ansi[15] },
-    };
+    const TermPalette term_palette = TermPaletteFor(tt, app->ligatures);
     for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
         if (n->first_child) continue;
+        c = &app->c;   // the window's chrome (an account's theme may have taken the pane before)
         s32 cols = Max(2, ((s32)(n->px[2] - n->px[0]) - 2 * term_margin) / cell_w);
         s32 rows = Max(2, ((s32)(n->px[3] - n->px[1]) - caption_h - 2 * term_margin) / cell_h);
         s32 account_rows = Max(2, ((s32)(n->px[3] - n->px[1]) - caption_h - account_h - 2 * term_margin) / cell_h);   // a claude's
@@ -3075,6 +3215,19 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             continue;
         }
         PaneTab *t = Panes_VisibleTab(n);
+        // --- a claude of an account with its own theme (accounts.txt): this pane in it, strip, terminal and all ---
+        TermPalette pane_palette = term_palette;
+        Chrome pane_chrome = {0};
+        {
+            const TermTab *pst = t ? FindServerTab(app, t->term_id) : NULL;
+            s32 ai = pst && pst->account.count ? AccountIndex(app, pst->config_dir) : 0;
+            if (ai >= 0 && app->accounts[ai].theme >= 0) {
+                const TermTheme *pt = &g_TermThemes[app->accounts[ai].theme];
+                pane_chrome = ChromeFor(pt);
+                c = &pane_chrome;
+                pane_palette = TermPaletteFor(pt, app->ligatures);
+            }
+        }
         b32 focused_pane = t && t == panes->selected;
         b32 at_top = n->px[1] <= 0.5f;
         b32 titlebar = in->maximized && at_top;
@@ -3186,11 +3339,22 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Draw_Icon(dl, font, icon, text_color, spinner[(now / 120000) % 4]);
                     blink_wanted = 1;
                 } else {
-                    Draw_Icon(dl, icons_small, icon, text_color, o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
+                    b32 held = st && (st->flags & TermTab_AccountHeld);
+                    Draw_Icon(dl, icons_small, icon, held ? c->danger : text_color, o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
                 }
                 if (needs) Draw_Rect(dl, R4(icon.x1 - R(0.3), icon.y0 + RectH(icon) / 2 - R(0.8), icon.x1 + R(0.3), icon.y0 + RectH(icon) / 2 - R(0.2)), c->accent, (f32)R(0.3));
                 CutLeft(&inner, R(0.4));
                 inner.x1 = close.x0 - R(0.2);
+                if (st && st->account.count && app->account_count > 1 && !o->browsing) {
+                    // its account's name, in that account's theme's accent when it has one
+                    s32 ai = AccountIndex(app, st->config_dir);
+                    String an = ai >= 0 ? app->accounts[ai].name : S("other");
+                    u32 tint = ai >= 0 && app->accounts[ai].theme >= 0 ? 0xFF000000u | g_TermThemes[app->accounts[ai].theme].accent : c->text;
+                    Rect pill = CutLeft(&inner, Min(Font_Measure(small, an) + R(1.0), RectW(inner)));
+                    Draw_Rect(dl, RectCenter(pill, RectW(pill), R(1.5)), ColorAlpha(tint, 0.22f), radius_small);
+                    Draw_TextIn(dl, small, pill, text_color, an, 0.5f);
+                    CutLeft(&inner, Min(R(0.4), RectW(inner)));
+                }
                 if (app->rename_tab == o->id) {
                     // --- its name being edited ---
                     Rect er = RectCenter(inner, RectW(inner), R(1.9));
@@ -3282,6 +3446,15 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Rect ar = bar;
             CutLeft(&ar, R(1.0));
             CutRight(&ar, R(1.0));
+            // its account's name (accounts.txt), once there is more than one or it isn't the default's
+            s32 ai = AccountIndex(app, account_tab->config_dir);
+            if (app->account_count > 1 || ai != 0) {
+                String name = ai >= 0 ? app->accounts[ai].name : account_tab->config_dir;
+                Rect pill = CutLeft(&ar, Min(Font_Measure(bold, name) + R(1.2), RectW(ar)));
+                Draw_Rect(dl, RectShrink(pill, R(0.2)), ColorAlpha(c->accent, 0.25f), radius_small);
+                Draw_TextIn(dl, bold, pill, c->text, name, 0.5f);
+                CutLeft(&ar, Min(R(1.0), RectW(ar)));
+            }
             for (s32 k = 0; k < 4 && RectW(ar) > 0; k++) {
                 if (!parts[k].count) continue;
                 if (labels[k][0]) {
@@ -3612,7 +3785,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 draw->tab_id = g->tab_id;
                 draw->origin[0] = ox;
                 draw->origin[1] = oy;
-                draw->palette = term_palette;
+                draw->palette = pane_palette;
                 draw->opacity = app->opacity;
                 if (app->sel.visible && app->sel.term_id == g->tab_id) {
                     draw->sel_on = 1;
@@ -3944,33 +4117,39 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Draw_PopClip(dl);
             }
         }
-        // --- a claude whose login, organization or email changed under it: held (the server stopped its turn and drops
-        //     what's typed into it) until "Go on" here; what it was and what it is now ---
+        // --- the panes not in focus a shade darker (settings `dim_unfocused = off`: not), when more than one shows ---
+        if (!app->dim_unfocused_off && !focused_pane && panes->root->first_child && !app->zoom_node) {
+            Draw_Rect(dl, pane, ColorAlpha(0xFF000000u, tt->light ? 0.10f : 0.32f), 0);
+        }
+        // --- a held claude (the server stopped its turn and drops what's typed into it) until "Go on" here: its login,
+        //     organization or email changed under it (what it was, what it is now), or it breaks a folder rule (why) ---
         if (account_tab && (account_tab->flags & TermTab_AccountHeld)) {
+            b32 by_rule = account_tab->hold_why.count > 0;
             Rect card = RectCenter(content, Max(1, Min(R(56), RectW(content) - R(2))), Max(1, Min(R(13), RectH(content) - R(1))));
             Ui_Hit(ui, Ui_IdN(Ui_Id("AccountHeld"), n->id), card);
             Draw_RectEx(dl, card, c->surface, c->danger, (f32)Max(1, R(0.1)), radius_large, NULL, 0, 0, (f32)R(1));
             Rect body = RectShrink(card, R(1.2));
-            Draw_TextIn(dl, bold, CutTop(&body, R(2)), c->text, S("Claude's account changed"), 0);
-            Draw_TextIn(dl, small, CutTop(&body, R(1.8)), c->dim, S("Its turn was stopped and typing is held back, so nothing goes to the new account."), 0);
+            Draw_TextIn(dl, bold, CutTop(&body, R(2)), c->text, by_rule ? S("Wrong Claude account for this folder") : S("Claude's account changed"), 0);
+            Draw_TextIn(dl, small, CutTop(&body, R(1.8)), c->dim, by_rule ? account_tab->hold_why :
+                        S("Its turn was stopped and typing is held back, so nothing goes to the new account."), 0);
             CutTop(&body, R(0.4));
-            for (s32 k = 0; k < 2; k++) {
+            for (s32 k = by_rule ? 1 : 0; k < 2; k++) {
                 String acct = k ? account_tab->account : account_tab->account_was;
                 String m = AccountPart(acct, 0), o = AccountPart(acct, 1), e = AccountPart(acct, 2);
                 String who = Str_PushFormat(fa, "%.*s%s%.*s%s%.*s", STR_ARG(m), e.count ? "  \xC2\xB7  " : "", STR_ARG(e),
                                             o.count ? "  \xC2\xB7  " : "", STR_ARG(o));   // the email before a long organization
                 Rect line = CutTop(&body, R(1.9));
-                Draw_TextIn(dl, small, CutLeft(&line, R(3)), c->dim, k ? S("Now") : S("Was"), 0);
+                Draw_TextIn(dl, small, CutLeft(&line, R(3)), c->dim, by_rule ? S("Uses") : k ? S("Now") : S("Was"), 0);
                 Draw_TextIn(dl, font, line, k ? c->text : c->dim, who, 0);
             }
             Rect brow = CutBottom(&body, R(2.4));
-            String go = S("Go on with the new account");
+            String go = by_rule ? S("Go on anyway") : S("Go on with the new account");
             Rect gb = CutRight(&brow, Min(Font_Measure(font, go) + R(2), RectW(brow)));
             UiSignal gs = Ui_Hit(ui, Ui_IdN(Ui_Id("AccountGoOn"), n->id), gb);
             Draw_Rect(dl, gb, gs.hovered ? ColorMix(c->accent, 0xFFFFFFFFu, 0.12f) : c->accent, (f32)R(0.35));
             Draw_TextIn(dl, font, gb, c->on_accent, go, 0.5f);
             Draw_TextIn(dl, small, brow, c->dim, S("or close the tab"), 0);
-            Named(app, S("account changed"), card);
+            Named(app, by_rule ? S("wrong account") : S("account changed"), card);
             Named(app, S("account go on"), gb);
             if (gs.clicked) out->account_ok = account_tab->id;
         }
@@ -3978,6 +4157,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         pane_index++;
     }
 
+    c = &app->c;
     if (close_later) CloseTab(app, &f, close_later, 0);
 
     // --- the splitters again, on top: their lines, and their hit areas over the panes' ---
@@ -4194,15 +4374,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     // --- the command palette: type to filter, Enter or a click runs; in settings mode the settings by group ---
     if (app->palette_open) {
         b32 settings = app->palette_mode == PaletteMode_Settings, go = app->palette_mode == PaletteMode_GoTo;
+        b32 accounts_mode = app->palette_mode == PaletteMode_Account;
         b32 outside = Blocker(app, 0);
-        s32 box_w = Min(settings ? R(52) : go ? R(58) : R(40), in->client_w - R(4));
+        s32 box_w = Min(settings ? R(52) : go ? R(58) : app->palette_mode == PaletteMode_Account ? R(56) : R(40), in->client_w - R(4));
         s32 row_h = settings ? R(2.4) : R(2.2), pad = R(0.5);
         s32 fit = Max(3, (in->client_h - caption_h - R(8)) / row_h);
         String filter = TextEdit_String(&app->palette_edit);
         u64 filter_hash = Hash_Bytes(filter.data, (u64)filter.count, 0x5E1) | 1;
         if (filter_hash != app->palette_filter_hash) { app->palette_sel = 0; app->palette_top = 0; app->palette_filter_hash = filter_hash; }   // new text: the first match
         b32 run = 0, esc = 0, go_select = 0;   // go_select: Ctrl+Enter, the row selected in the browser rather than opened
-        s32 act = -1, step = 0;   // settings: the setting to change, and how: +1/-1 steps, 0 activates (Enter, click), 2 an edit is done
+        s32 act = -1, step = 0;
+        s32 account_act = -1, account_step = 0;   // the accounts palette: an account's theme stepped (arrows)   // settings: the setting to change, and how: +1/-1 steps, 0 activates (Enter, click), 2 an edit is done
         // --- the rows: settings (a group's heading, -1 - its first row, before its rows), or tabs whose name or folder
         //     has the text (not without text) and then commands ---
         typedef struct PaletteRow { s32 item; u32 cmd; PaneTab *tab; } PaletteRow;   // item: a setting, or -1 - a heading's setting (go-to: a GotoRow, or -1 - a group)
@@ -4340,6 +4522,21 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 }
                 if (go_text.count) for (s32 i = 0; i < row_count; i++) pick_row[i] = i;
             }
+        } else if (accounts_mode) {
+            // --- the accounts (the text filters them), then "add" for a new name typed (letters, digits, - and _) ---
+            b32 taken = 0, name_ok = filter.count > 0 && filter.count < (s64)sizeof(app->pending_account);
+            for (s64 k = 0; k < filter.count; k++) {
+                u8 ch = filter.data[k];
+                name_ok &= (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
+            }
+            for (s32 k = 0; k < app->account_count; k++) {
+                taken |= Str_EqualNoCase(app->accounts[k].name, filter);
+                if (filter.count && FuzzyScore(app->accounts[k].name, filter) < 0) continue;
+                if (app->account_adding && !Str_EqualNoCase(app->accounts[k].name, filter)) continue;   // adding: only a name that's taken
+                pick_row[pickable++] = row_count;
+                rows[row_count++] = (PaletteRow){ k, 0, NULL };
+            }
+            if (name_ok && !taken) { pick_row[pickable++] = row_count; rows[row_count++] = (PaletteRow){ app->account_count, 0, NULL }; }
         } else if (settings) {
             const char *group = NULL;
             for (s32 k = 0; k < Setting_Count; k++) {
@@ -4416,6 +4613,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (go && (e->key == Key_PageDown || e->key == Key_PageUp)) app->palette_sel += e->key == Key_PageDown ? fit - 1 : 1 - fit;
             if (e->key == Key_Enter || e->key == Key_KeypadEnter) { run = 1; go_select = go && kmods == Mod_Ctrl; }
             if (e->key == Key_Escape) esc = 1;
+            if (accounts_mode && !app->account_adding && (e->key == Key_Left || e->key == Key_Right) && pickable && !kmods) {
+                account_act = rows[pick_row[Clamp(app->palette_sel, 0, pickable - 1)]].item;
+                account_step = e->key == Key_Left ? -1 : 1;
+                ui->consumed[i] = 1;
+            }
             if (settings && (e->key == Key_Left || e->key == Key_Right) && pickable) {
                 act = rows[pick_row[Clamp(app->palette_sel, 0, pickable - 1)]].item;
                 step = e->key == Key_Left ? -1 : 1;
@@ -4451,7 +4653,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         Draw_RectEx(dl, edit, c->bg, c->accent, 1, radius_small, NULL, 0, 0, 0);
         if (go) Draw_Icon(dl, icons_small, R4(edit.x0 + R(0.4), edit.y0, edit.x0 + R(2.2), edit.y1), c->dim, Icon_Folder);
         Ui_TextEdit(ui, Ui_Id("PaletteFilter"), &app->palette_edit, R4(edit.x0 + (go ? R(2.4) : R(0.6)), edit.y0, edit.x1 - R(0.6), edit.y1), font, !app->setting_editing,
-                    settings ? S("Type a setting") : go ? S("Go to a folder, or search recents, bookmarks, drives and places") : S("Type a command"), c->text, c->dim, c->selection);
+                    settings ? S("Type a setting") : go ? S("Go to a folder, or search recents, bookmarks, drives and places") :
+                    accounts_mode && app->account_adding ? S("Name the new account (e.g. work, personal)") :
+                    accounts_mode ? S("Enter: a claude tab as the account  \xC2\xB7  arrows: its theme  \xC2\xB7  a new name: add one") : S("Type a command"), c->text, c->dim, c->selection);
         Named(app, go ? S("goto edit") : S("palette edit"), edit);
         Draw_PushClip(dl, body);
         for (s32 j = app->palette_top; j < app->palette_top + shown; j++) {
@@ -4548,6 +4752,48 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 if (rs.clicked) { app->palette_sel = pick_index; run = 1; }
                 continue;
             }
+            if (accounts_mode) {
+                b32 add = pr->item >= app->account_count;
+                String label = add ? Str_PushFormat(fa, "Add the account \"%.*s\"", STR_ARG(filter)) : app->accounts[pr->item].name;
+                String note = add ? S("its own config folder, your settings copied; log in in the tab that opens") :
+                              pr->item == 0 ? S("Claude Code's own (~\\.claude)") : app->accounts[pr->item].dir;
+                if (!add) {
+                    // what it is: the login of a claude of it that's open, and the folders kept for it
+                    for (s64 i = 0; i < app->tab_count; i++) {
+                        if (!app->tabs[i].account.count || AccountIndex(app, app->tabs[i].config_dir) != pr->item) continue;
+                        String e = AccountPart(app->tabs[i].account, 2), o = AccountPart(app->tabs[i].account, 1);
+                        note = e.count ? Str_PushFormat(fa, "%.*s  \xC2\xB7  %.*s", STR_ARG(e), STR_ARG(o)) : AccountPart(app->tabs[i].account, 0);
+                        break;
+                    }
+                    for (s32 r = 0; r < app->folder_rule_count; r++) {
+                        if (Str_EqualNoCase(app->folder_rules[r].account, app->accounts[pr->item].name)) note = Str_PushFormat(fa, "%.*s  \xC2\xB7  %.*s", STR_ARG(note), STR_ARG(app->folder_rules[r].folder));
+                    }
+                }
+                if (!add && !app->account_adding) {
+                    // its theme: arrows either side, like a setting's choice
+                    s32 th = app->accounts[pr->item].theme;
+                    Rect more = RectCenter(CutRight(&in_row, R(2)), R(2), R(1.8));
+                    Rect val = CutRight(&in_row, R(9));
+                    Rect less = RectCenter(CutRight(&in_row, R(2)), R(2), R(1.8));
+                    String an = app->accounts[pr->item].name;
+                    UiSignal ls = IconButton(app, Ui_IdN(Ui_Id("AccountThemeLess"), (u64)pr->item), less, Icon_ChevronLeft, icons_small, c->dim, c->hover, radius_small,
+                                             Str_PushFormat(fa, "account %.*s theme less", STR_ARG(an)));
+                    UiSignal ms = IconButton(app, Ui_IdN(Ui_Id("AccountThemeMore"), (u64)pr->item), more, Icon_ChevronRight, icons_small, c->dim, c->hover, radius_small,
+                                             Str_PushFormat(fa, "account %.*s theme more", STR_ARG(an)));
+                    if (th >= 0) Draw_Rect(dl, RectCenter(CutLeft(&val, R(1.2)), R(0.9), R(0.9)), 0xFF000000u | g_TermThemes[th].accent, (f32)R(0.45));
+                    Draw_TextIn(dl, small, val, th >= 0 ? c->text : c->dim, th >= 0 ? Str_FromCStr(g_TermThemes[th].name) : S("window's theme"), 0.5f);
+                    if (ls.clicked) { account_act = pr->item; account_step = -1; app->palette_sel = pick_index; }
+                    if (ms.clicked) { account_act = pr->item; account_step = 1; app->palette_sel = pick_index; }
+                }
+                Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.8)), c->dim, add ? Icon_Add : Icon_Robot);
+                s32 label_w = Min(Font_Measure(font, label), RectW(in_row));
+                Draw_TextIn(dl, font, CutLeft(&in_row, label_w), c->text, label, 0);
+                CutLeft(&in_row, R(0.8));
+                Draw_TextIn(dl, small, in_row, c->dim, note, 0);
+                Named(app, add ? Str_PushFormat(fa, "palette add account %.*s", STR_ARG(filter)) : Str_PushFormat(fa, "palette account %.*s", STR_ARG(label)), row);
+                if (rs.clicked) { app->palette_sel = pick_index; run = 1; }
+                continue;
+            }
             if (!settings) {
                 String label = pr->tab ? PaneTabLabel(app, pr->tab) : Str_FromCStr(g_Commands[pr->cmd].label);
                 if (pr->tab) {
@@ -4577,7 +4823,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (k == Setting_Agent) value = app->agent_command.count ? app->agent_command : S("claude");
             if (k == Setting_Agents) value = app->agents.count ? app->agents : S("the usual ones");
             b32 on = k == Setting_HiddenFiles ? !app->hide_hidden : k == Setting_FolderSizes ? !app->folder_sizes_off : k == Setting_CursorBlink ? app->cursor_blink : k == Setting_Ligatures ? app->ligatures :
-                     k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_ExplorerMenu ? app->explorer_menu :
+                     k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ExplorerMenu ? app->explorer_menu :
                      k == Setting_StartWithWindows ? app->start_with_windows : k == Setting_Notifications ? !app->notifications_off :
                      k == Setting_VsEnv ? !app->vs_env_off : 0;
             b32 clicked_value = 0;
@@ -4648,10 +4894,27 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             run = 0;
         }
+        // --- the accounts palette's arrows: the account's theme steps (the window's, then each), into accounts.txt ---
+        if (account_act >= 0 && account_act < app->account_count) {
+            s32 th = app->accounts[account_act].theme + 1 + account_step;   // -1..Count-1 as 0..Count
+            th = ((th % (TermTheme_Count + 1)) + TermTheme_Count + 1) % (TermTheme_Count + 1) - 1;
+            app->accounts[account_act].theme = th;
+            out->account_theme_name = app->accounts[account_act].name;
+            out->account_theme = th >= 0 ? Str_FromCStr(g_TermThemes[th].name) : (String){0};
+        }
         if (run && pickable && act < 0) {
             const PaletteRow *pr = &rows[pick_row[Clamp(app->palette_sel, 0, pickable - 1)]];
             if (settings) { act = pr->item; step = 0; }
-            else {
+            else if (accounts_mode) {
+                // a claude tab under the account; or a new account (made by the platform), whose tab opens once it's listed
+                app->palette_open = 0;
+                if (pr->item < app->account_count) RequestClaudeTab(app, &f, app->accounts[pr->item].dir);
+                else {
+                    out->add_account = Str_PushCopy(fa, filter);
+                    app->pending_account_len = (s32)CopyInto(app->pending_account, sizeof(app->pending_account), filter).count;
+                    Logf("app", "add account %.*s", STR_ARG(filter));
+                }
+            } else {
                 app->palette_open = 0;
                 if (pr->tab) Panes_Select(panes, pr->tab);   // shown in its pane and focused
                 else RunCommand(app, &f, pr->cmd);
@@ -4693,6 +4956,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             } else if (act == Setting_CopyOnSelect) {
                 app->copy_on_select_off = !app->copy_on_select_off;
                 key = S("copy_on_select"); val = app->copy_on_select_off ? S("off") : S("on");
+            } else if (act == Setting_DimUnfocused) {
+                app->dim_unfocused_off = !app->dim_unfocused_off;
+                key = S("dim_unfocused"); val = app->dim_unfocused_off ? S("off") : S("on");
             } else if (act == Setting_Backdrop) {
                 app->backdrop = (u8)((app->backdrop + (step < 0 ? 2 : 1)) % 3);
                 key = S("backdrop"); val = app->backdrop == 1 ? S("acrylic") : app->backdrop == 2 ? S("mica") : S("none");

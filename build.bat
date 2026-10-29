@@ -32,10 +32,12 @@ rc /nologo /i "%ROOT%build" /i "%ROOT%code" /fo moss.res "%ROOT%code\term.rc"
 if errorlevel 1 (set ERR=1& goto :done)
 
 rem --- what the tabs use, next to moss.exe: clink (vendor\clink, GPL-3.0, a separate program run in each
-rem --- tab's cmd), clink-completions (MIT), the default shell setup ---
+rem --- tab's cmd), clink-completions (MIT), moss's own clink scripts (clink-moss), the default shell setup ---
 xcopy /e /i /y /q /d "%ROOT%vendor\clink" clink >nul
 if errorlevel 1 (set ERR=1& goto :done)
 xcopy /e /i /y /q /d "%ROOT%vendor\clink-completions" clink-completions >nul
+if errorlevel 1 (set ERR=1& goto :done)
+xcopy /e /i /y /q /d "%ROOT%clink-moss" clink-moss >nul
 if errorlevel 1 (set ERR=1& goto :done)
 xcopy /e /i /y /q /d "%ROOT%shell" shell >nul
 if errorlevel 1 (set ERR=1& goto :done)
