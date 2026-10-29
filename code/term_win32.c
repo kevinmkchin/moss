@@ -134,6 +134,8 @@ typedef struct Platform {
     b32 test_window;              // MOSS_TEST_WINDOW: off screen, driven by posted messages
     s32 test_commands_run;        // MOSS_TEST_COMMAND's commands run so far (one per Test_Command)
     b32 closing;                  // the server quit for good: the window is closing
+    b32 restart;                  // the GPU device went away (a driver installed): a new window process takes over
+    u64 test_gpu_lost;            // MOSS_TEST_GPU_LOST=N: the device counts as gone from frame N on (tests the restart)
     String window_name;           // `--window NAME`: one of the other windows (empty = the main one)
     WCHAR instance[64];           // the server instance (MOSS_INSTANCE, empty = the user's): windows only trade tabs within one
     u32 tear_offs;                // windows torn off in this run (headless names them w1, w2, ...)
@@ -1166,6 +1168,16 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
             u64 t4 = Time_NowMicros();
             phase[3] = t4 - t3;
             Gpu_Present(p->gpu);
+            u32 lost = p->headless || p->restart ? 0 : Gpu_LostReason(p->gpu);
+            if (!lost && !p->restart && p->test_gpu_lost && p->frame >= p->test_gpu_lost) lost = 0x887A0005;   // DXGI_ERROR_DEVICE_REMOVED
+            if (lost) {
+                // the device is gone for good (a display driver installed or restarted: nothing drawn would show any
+                // more): the layout is saved and a new window process takes over, the tabs stay with the server
+                Logf("window", "the GPU device went away (0x%08x): starting the window again", lost);
+                p->restart = 1;
+                p->closing = 1;
+                p->quit = 1;
+            }
             Web_Presented(p->web);
             Term_LatencyMark("client_present");
             phase[4] = Time_NowMicros() - t4;
@@ -2446,6 +2458,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         else if (wcscmp(argv[i], L"--web-probe") == 0 && i + 2 < argc) { probe_url = argv[++i]; probe_png = argv[++i]; }
         else if (wcscmp(argv[i], L"--size") == 0 && i + 1 < argc) swscanf_s(argv[++i], L"%dx%d", &size_w, &size_h);
         else if (wcscmp(argv[i], L"--dpi") == 0 && i + 1 < argc) dpi_arg = _wtoi(argv[++i]);
+        else if (wcscmp(argv[i], L"--after") == 0 && i + 1 < argc) {
+            // started again by a window whose GPU device went away: once it's gone (its mutex with it)
+            HANDLE before = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)_wtoi(argv[++i]));
+            if (before) { WaitForSingleObject(before, 10000); CloseHandle(before); }
+        }
     }
     if (replay) {
         Debug_Init("replay", 1);
@@ -2751,7 +2768,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
             GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
             swprintf_s(folder, MAX_PATH, L"%s\\moss\\web", local);
         }
-        WCHAR place[64] = {0};
+        WCHAR place[64] = {0}, lost_at[16] = {0};
+        if (GetEnvironmentVariableW(L"MOSS_TEST_GPU_LOST", lost_at, 16)) {
+            p->test_gpu_lost = (u64)_wtoi(lost_at);
+            SetEnvironmentVariableW(L"MOSS_TEST_GPU_LOST", NULL);   // not again in the window started after
+        }
         if (GetEnvironmentVariableW(L"MOSS_TEST_WINDOW", place, 64)) {
             // a test window is off screen: pages there would count as covered and stop drawing
             SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"--disable-features=CalculateNativeWinOcclusion");
@@ -2892,5 +2913,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     App_Destroy(p->app);
     for (s32 i = 0; i < Font_Count; i++) Font_Destroy(&p->fonts[i]);
     Gpu_Destroy(p->gpu);
+    if (p->restart) {
+        // the same window again, once this process is gone
+        WCHAR exe[MAX_PATH] = {0}, line[1024] = {0};
+        GetModuleFileNameW(NULL, exe, MAX_PATH);
+        swprintf_s(line, ArrayCount(line), L"\"%s\"%s%s%s%s%s%s --after %u", exe, window_name ? L" --window " : L"", window_name ? window_name : L"",
+                   instance_name ? L" --instance " : L"", instance_name ? instance_name : L"", test ? L" --test" : L"", L"", GetCurrentProcessId());
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {0};
+        if (CreateProcessW(exe, line, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
+    }
     return result;
 }

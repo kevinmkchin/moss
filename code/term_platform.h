@@ -19,6 +19,7 @@ void *Gpu_LatencyHandle(Gpu *g);   // the swap chain's frame latency waitable (0
 void  Gpu_SetExternalDraw(Gpu *g, void (*fn)(void *user, const void *data, Rect clip, s32 target_w, s32 target_h), void *user);
 void  Gpu_Render(Gpu *g, const DrawList *dl, const FontAtlas *atlas, u32 clear, s32 w, s32 h);   // resizes the target to w x h first
 void  Gpu_Present(Gpu *g);
+u32   Gpu_LostReason(Gpu *g);   // the device is gone (a driver installed or restarted): why, else 0
 u8   *Gpu_ReadPixels(Gpu *g, Arena *arena, s32 *w, s32 *h);   // the last frame, RGBA rows
 void  Gpu_Times(Gpu *g, f32 *total_ms, f32 *cells_ms);           // a recent frame's GPU time, and its terminal cells'
 u64   Gpu_CreateImage(Gpu *g, const u32 *bgra_premultiplied, s32 w, s32 h);   // mipmapped; 0 on failure

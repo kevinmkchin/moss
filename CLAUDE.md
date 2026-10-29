@@ -126,6 +126,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - Popups ease in (`PopupAppear`), themes fade (`theme_from`), tooltips show at once for a moment after one was on
   screen (warm), the palette ranks by `FuzzyScore` (characters in order; word starts, runs and early matches score
   higher).
+- A lost GPU device (a display driver installed or restarted, e.g. by Windows Update during a `winget upgrade`; a GPU
+  reset) leaves nothing drawn showing, so after each present the window checks (`Gpu_LostReason`) and, once it's
+  gone, saves its layout, exits and starts the same window again (`--after <pid>`: it waits for this process, and its
+  mutex, to go; the tabs stay with the server, web pages load again). `MOSS_TEST_GPU_LOST=N` fakes it from frame N.
 - Frames are drawn on events only; unchanged frames (draw list hash) aren't presented; presents are paced to
   the refresh rate (6 ms apart at most) but a frame after a quiet spell goes out at once.
 - Opacity (`opacity` in settings.txt): the swap chain goes through DirectComposition with premultiplied alpha

@@ -486,6 +486,12 @@ extern "C" void Gpu_Present(Gpu* G)
     if(G && G->SwapChain) { G->SwapChain->Present(0, 0); }
 }
 
+// Why the device is gone (a driver installed or restarted, a GPU reset), else 0: nothing drawn shows any more.
+extern "C" u32 Gpu_LostReason(Gpu* G)
+{
+    return G && G->Device ? (u32)G->Device->GetDeviceRemovedReason() : 0;
+}
+
 // The last frame (headless), RGBA, w x h, in arena memory.
 extern "C" u8* Gpu_ReadPixels(Gpu* G, Arena* A, s32* W, s32* H)
 {
