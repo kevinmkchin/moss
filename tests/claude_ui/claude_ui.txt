@@ -44,6 +44,18 @@ waitlabel copy code 1
 sleep 500
 waitidle
 capture out/reader.png
+# a tool claude used opens: its command and its output; the edit as a diff
+cursorui tool Bash git status
+lmb down
+lmb up
+sleep 300
+waitidle
+cursorui tool Edit C:\src\parse.c
+lmb down
+lmb up
+sleep 300
+waitidle
+capture out/reader_tools.png
 cursorui copy code 1
 lmb down
 lmb up

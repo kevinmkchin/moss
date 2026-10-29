@@ -37,6 +37,18 @@ for sid, project, prompt, text, age in sessions:
     with open(path, 'w') as f:
         f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:00.000Z',
                             'message': {'role': 'user', 'content': prompt}}, separators=(',', ':')) + '\n')
+        if project == 'markdown':
+            # tools it used first: a command and an edit, and their results
+            f.write(json.dumps({'type': 'assistant', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:02.000Z',
+                                'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [
+                                    {'type': 'tool_use', 'id': 'toolu_1', 'name': 'Bash', 'input': {'command': 'git status', 'description': 'Status'}},
+                                    {'type': 'tool_use', 'id': 'toolu_2', 'name': 'Edit', 'input': {'file_path': 'C:\\src\\parse.c', 'old_string': 'int add(int a)', 'new_string': 'int add(int a, int b)'}}]}},
+                               separators=(',', ':')) + '\n')
+            f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:03.000Z',
+                                'message': {'role': 'user', 'content': [
+                                    {'type': 'tool_result', 'tool_use_id': 'toolu_1', 'content': 'On branch main\nnothing to commit, working tree clean'},
+                                    {'type': 'tool_result', 'tool_use_id': 'toolu_2', 'content': [{'type': 'text', 'text': 'The file was updated.'}]}]}},
+                               separators=(',', ':')) + '\n')
         f.write(json.dumps({'type': 'assistant', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:05.000Z',
                             'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [{'type': 'text', 'text': text}],
                                         'usage': {'input_tokens': 1200, 'cache_creation_input_tokens': 800, 'cache_read_input_tokens': 40000, 'output_tokens': 300}}},

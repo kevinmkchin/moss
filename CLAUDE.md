@@ -269,6 +269,16 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   Cascadia Mono, else Consolas; a shade; the block's copy button, `App.hist_blocks`), tables (columns as wide as their
   widest cell, narrowed together to fit), rules. A fresh read stays at the end only when the view was there. It takes
   the keys while its tab is focused (Esc back, arrows, pages, Home/End); Ctrl+F searches it.
+- It reads like an article: one centered column (about 70 characters, `R(64)` at most), Georgia 12 pt to read
+  (`Font_Read`, `Font_ReadBold`), Segoe UI 15 pt semibold headings (`Font_ReadHead`), Cascadia Mono 10 pt code; each line
+  has its own height and place (`HistLine.y/h`, worked out once per build: gaps before a message, a heading, a block);
+  the user's prompts in a soft rounded bubble; code blocks in a container with a header (the fence's language, the
+  copy button); tables padded, the header row on a shade.
+- The tools claude used are in it too: the history read keeps each `tool_use` (its name, a summary: the command, the
+  file, the pattern, ...; its detail: the whole command, an edit as '-' / '+' lines, a file written) with its
+  `tool_result` (`MSG_HISTORY` entry kind 2, fields split by \x1f; protocol 17). Each is a row (a chevron, its name,
+  the summary in mono); a click opens it (`App.hist_open` by key, `hist_dirty` builds again): the detail (an edit's
+  lines green and red) and the output under a rule, at most 400 lines.
 - Copying from an agent's tab (a selection, copy on select; not a rectangle) is cleaned (`CleanAgentCopy`): claude's ●
   and ⎿ marks become spaces, the indent the lines share goes, a line wrapped near the screen's edge joins the next.
 

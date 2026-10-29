@@ -296,7 +296,8 @@ static std::wstring SessionFilePath(const std::wstring& ConfigDir, const std::st
 // its tool calls), oldest first, from the transcript's last 16 MB; at most the last 2000 messages, 64 KB each.
 static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const std::string& SessionId)
 {
-    struct entry { bool32 FromUser; std::string Time, Text; };
+    struct entry { bool32 FromUser; u32 Kind; std::string Time, Text; };   // Kind: 0 claude, 1 the user, 2 a tool used
+    std::map<std::string, size_t> Pending;   // the tools used whose result hasn't come yet: their entry
     std::vector<entry> Entries;
     std::wstring Path = SessionFilePath(ConfigDir, SessionId);
     HANDLE File = Path.empty() ? INVALID_HANDLE_VALUE :
@@ -323,13 +324,14 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
             {
                 // a prompt as typed (tool results are arrays of blocks, not a string)
                 E.FromUser = true;
+                E.Kind = 1;
                 size_t At = Line.find("\"role\":\"user\",\"content\":\"");
                 JsonDecodeString(Line, At + 25, E.Text);
                 if(!E.Text.empty() && E.Text[0] == '<') { continue; } // a command's or hook's wrapper, not words
             }
             else if(Line.find("\"role\":\"assistant\"") != std::string::npos)
             {
-                // claude's text blocks, in order
+                // claude's text blocks, in order; then each tool it used, an entry of its own (its result comes later)
                 const char* Pattern = "\"type\":\"text\",\"text\":\"";
                 for(size_t At = Line.find(Pattern); At != std::string::npos; At = Line.find(Pattern, At + 1))
                 {
@@ -339,12 +341,87 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
                     if(!E.Text.empty()) { E.Text += "\n\n"; }
                     E.Text += Part;
                 }
+                for(size_t At = Line.find("\"type\":\"tool_use\""); At != std::string::npos; At = Line.find("\"type\":\"tool_use\"", At + 1))
+                {
+                    // --- its input object (braces counted outside strings) and the fields that say what it did ---
+                    std::string Id, Name;
+                    size_t Input = Line.find("\"input\":{", At);
+                    if(Input == std::string::npos) { continue; }
+                    std::string Head = Line.substr(At, Input - At);
+                    JsonFindString(Head, "id", false, Id);
+                    JsonFindString(Head, "name", false, Name);
+                    size_t End = Input + 8;
+                    s32 Depth = 0;
+                    bool32 InString = false;
+                    for(; End < Line.size(); ++End)
+                    {
+                        char C = Line[End];
+                        if(InString) { if(C == '\\') { End++; } else if(C == '"') { InString = false; } continue; }
+                        if(C == '"') { InString = true; }
+                        else if(C == '{') { Depth++; }
+                        else if(C == '}' && --Depth == 0) { End++; break; }
+                    }
+                    std::string In = Line.substr(Input + 8, End - Input - 8);
+                    std::string Summary, Detail, A, B;
+                    if(JsonFindString(In, "command", false, A)) { Summary = A.substr(0, A.find('\n')); Detail = A; }
+                    else if(JsonFindString(In, "file_path", false, A) || JsonFindString(In, "notebook_path", false, A))
+                    {
+                        Summary = A;
+                        std::string Old, New;
+                        if(JsonFindString(In, "old_string", false, Old) | JsonFindString(In, "new_string", false, New))
+                        {
+                            // an edit as a diff: the old lines with '-', the new with '+'
+                            for(size_t P = 0; P <= Old.size() && !Old.empty();) { size_t Q = Old.find('\n', P); if(Q == std::string::npos) { Q = Old.size(); } Detail += "-" + Old.substr(P, Q - P) + "\n"; P = Q + 1; }
+                            for(size_t P = 0; P <= New.size() && !New.empty();) { size_t Q = New.find('\n', P); if(Q == std::string::npos) { Q = New.size(); } Detail += "+" + New.substr(P, Q - P) + "\n"; P = Q + 1; }
+                        }
+                        else if(JsonFindString(In, "content", false, B)) { Detail = B; }
+                    }
+                    else if(JsonFindString(In, "pattern", false, A)) { Summary = A; }
+                    else if(JsonFindString(In, "url", false, A) || JsonFindString(In, "query", false, A) || JsonFindString(In, "description", false, A) ||
+                            JsonFindString(In, "prompt", false, A)) { Summary = A.substr(0, A.find('\n')); }
+                    if(Detail.empty()) { Detail = In.size() > 4096 ? In.substr(0, 4096) : In; }
+                    if(Detail.size() > 32 * 1024) { Detail.resize(32 * 1024); }
+                    entry T = {};
+                    T.Kind = 2;
+                    T.Text = Name + "\x1f" + Summary + "\x1f" + Detail + "\x1f";
+                    JsonFindString(Line, "timestamp", true, T.Time);
+                    if(!E.Text.empty())
+                    {
+                        // the text before it first
+                        if(E.Text.size() > 64 * 1024) { E.Text.resize(64 * 1024); }
+                        E.Time = T.Time;
+                        if(!Entries.empty() && Entries.back().Kind == 0 && Entries.back().Time == E.Time) { Entries.back().Text += "\n\n" + E.Text; }
+                        else { Entries.push_back(E); }
+                        E.Text.clear();
+                    }
+                    Pending[Id] = Entries.size();
+                    Entries.push_back(T);
+                }
+            }
+            else if(Line.find("\"type\":\"tool_result\"") != std::string::npos)
+            {
+                // --- results: each goes on the end of its tool's entry (its text, or its first text block) ---
+                for(size_t At = Line.find("\"tool_use_id\":\""); At != std::string::npos; At = Line.find("\"tool_use_id\":\"", At + 1))
+                {
+                    std::string Id, Out;
+                    JsonDecodeString(Line, At + 15, Id);
+                    auto P = Pending.find(Id);
+                    if(P == Pending.end() || P->second >= Entries.size()) { continue; }
+                    size_t Content = Line.find("\"content\":", At);
+                    if(Content == std::string::npos) { continue; }
+                    if(Content + 10 < Line.size() && Line[Content + 10] == '"') { JsonDecodeString(Line, Content + 11, Out); }
+                    else { size_t T = Line.find("\"text\":\"", Content); if(T != std::string::npos) { JsonDecodeString(Line, T + 8, Out); } }
+                    if(Out.size() > 16 * 1024) { Out.resize(16 * 1024); }
+                    Entries[P->second].Text += Out;
+                    Pending.erase(P);
+                }
+                continue;
             }
             if(E.Text.empty()) { continue; }
             if(E.Text.size() > 64 * 1024) { E.Text.resize(64 * 1024); }
             JsonFindString(Line, "timestamp", true, E.Time);
             // a message written in parts (one line per block) goes on in the same entry
-            if(!E.FromUser && !Entries.empty() && !Entries.back().FromUser && Entries.back().Time == E.Time)
+            if(E.Kind == 0 && !Entries.empty() && Entries.back().Kind == 0 && Entries.back().Time == E.Time)
             {
                 Entries.back().Text += "\n\n" + E.Text;
                 continue;
@@ -359,7 +436,7 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
     for(size_t I = First; I < Entries.size(); ++I)
     {
         const entry& E = Entries[I];
-        u8 FromUser = E.FromUser ? 1 : 0;
+        u8 FromUser = (u8)E.Kind;
         u32 Lens[2] = {(u32)E.Time.size(), (u32)E.Text.size()};
         Out.append((const char*)&FromUser, 1);
         Out.append((const char*)Lens, 8);

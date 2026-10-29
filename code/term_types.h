@@ -91,7 +91,8 @@ typedef struct TermScroll { u32 tab_id; s32 lines; } TermScroll;   // lines > 0 
 #define TermScroll_CopyAll (-0x7ffffffb)    // everything in it as text, to the clipboard
 
 // One message of a claude session's history (its transcript): who said it, when (ISO 8601, UTC), what.
-typedef struct TermHistoryEntry { b32 from_user; String time; String text; } TermHistoryEntry;
+// kind: 0 claude's text, 1 the user's prompt, 2 a tool claude used: text is its name, summary, detail and result, \x1f between
+typedef struct TermHistoryEntry { b32 from_user; u32 kind; String time; String text; } TermHistoryEntry;
 
 // A Claude Code session on disk (<claude dir>/projects/<folder>/<id>.jsonl). Strings live until the next frame.
 typedef struct TermSession {

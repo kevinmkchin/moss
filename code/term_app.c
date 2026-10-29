@@ -33,7 +33,7 @@ enum {
     Icon_Cloud = 0xE753, Icon_Back = 0xE72B, Icon_Forward = 0xE72A, Icon_Star = 0xE734, Icon_StarFilled = 0xE735,
     Icon_History = 0xE81C, Icon_Home = 0xE80F, Icon_Download = 0xE896, Icon_Document = 0xE8A5, Icon_Picture = 0xE8B9,
     Icon_Music = 0xEC4F, Icon_Video = 0xE714, Icon_Desktop = 0xE7F4, Icon_OpenFolder = 0xE838,
-    Icon_Refresh = 0xE72C, Icon_Globe = 0xE774, Icon_Copy = 0xE8C8,
+    Icon_Refresh = 0xE72C, Icon_Globe = 0xE774, Icon_Copy = 0xE8C8, Icon_ChevronDown = 0xE70D,
 };
 
 // --- commands --------------------------------------------------------------------------------------------------
@@ -253,7 +253,8 @@ typedef struct NamedRect { String name; Rect rect; } NamedRect;
 enum { App_MaxNamed = 512, App_MaxPanes = 64 };
 
 // The history view (a claude's transcript, searched): its messages wrapped to the pane, and the matches in it.
-enum { HistLine_Text = 0, HistLine_User, HistLine_Claude, HistLine_Blank, HistLine_Heading, HistLine_Code, HistLine_Table, HistLine_Rule };
+enum { HistLine_Text = 0, HistLine_User, HistLine_Claude, HistLine_Blank, HistLine_Heading, HistLine_Code, HistLine_Table, HistLine_Rule,
+       HistLine_Tool, HistLine_ToolBody };   // a tool claude used (a row that opens), a line of its detail or result
 enum { HistSpan_Bold = 1, HistSpan_Code = 2 };
 typedef struct HistSpan { s32 start, len; u32 style; } HistSpan;   // a bold or `code` run in a line's text
 typedef struct HistLine {
@@ -262,6 +263,10 @@ typedef struct HistLine {
     HistSpan *spans; s32 span_count;
     String marker; s32 indent;   // a list item: its marker (on its first line) and how far its lines are in
     s32 block; b32 first;     // Code: its block (App.hist_blocks), the block's first line; Table: the header row
+    b32 last;                 // Code: the block's last line
+    b32 user;                 // a line of the user's own prompt (its bubble)
+    s32 y, h;                 // where it is in the view (from its top) and how tall
+    u64 key;                  // Tool: which use it is (its row opens and closes it: App.hist_open)
     String *cells; s32 cell_count; s32 *widths;   // Table: the row's cells, its table's column widths
 } HistLine;
 typedef struct HistMatch { s32 line, start, len; } HistMatch;
@@ -454,6 +459,10 @@ struct App {
     s32 hist_copied;          // the block copied last (1-based), and when: "Copied" for a moment
     u64 hist_copied_us;
     b32 hist_at_end;          // the view was at its end: a fresh read stays at the end
+    s32 hist_total_h;         // the lines' height, all of them
+    u64 hist_open[128];       // the tools' rows open (their keys)
+    s32 hist_open_count;
+    b32 hist_dirty;           // a row opened or closed: built again
     // --- the reader (Ctrl+Shift+R): a claude tab's transcript as the history view, without a search; read again when
     //     a turn ends ---
     b32 reader_open;
@@ -1172,6 +1181,13 @@ static PaneTab *RequestTab(App *app, Frame *f, PaneNode *leaf, u32 kind, String 
 }
 
 static String FocusedCwd(App *app);
+
+// A tool's row in the reader: open (its index in App.hist_open), else -1.
+static s32 HistOpenIndex(App *app, u64 key)
+{
+    for (s32 i = 0; i < app->hist_open_count; i++) if (app->hist_open[i] == key) return i;
+    return -1;
+}
 
 // The sidebar's note on a session (sessions.txt): its index, -1 when it has none (add: a new, empty one).
 static s32 SessionMetaIndex(App *app, String id, b32 add)
@@ -4682,13 +4698,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             b32 searching = t && app->find_open && app->find_history && app->find_term == t->term_id;
             if (t && (searching || (app->reader_open && app->reader_term == t->term_id))) {
                 String q = searching ? TextEdit_String(&app->find_edit) : (String){0};
-                Font *mono = &in->fonts[Font_Mono];
+                // an article: one column (about 70 characters, centered), a serif to read, a sans for headings, a mono for code
+                Font *mono = &in->fonts[Font_Mono], *rfont = &in->fonts[Font_Read], *rbold = &in->fonts[Font_ReadBold], *rhead = &in->fonts[Font_ReadHead];
                 s32 view_h = Max(1, RectH(content));
-                s32 text_w = Max(R(10), pw - 2 * R(1.2));
+                s32 text_w = Max(R(10), Min(pw - 2 * R(3), R(64)));
+                s32 col_x = px0 + (pw - text_w) / 2;
+                s32 bubble = R(1.2);   // a prompt's bubble: its text this far in
                 s32 lh = R(1.55);
                 u64 qh = Hash_Bytes(q.data, (u64)q.count, 0x415 + (u64)app->find_case);
                 if (in->history_tab == t->term_id && in->history_version &&
-                    (in->history_version != app->hist_version || text_w != app->hist_width || qh != app->hist_query || app->hist_term != t->term_id)) {
+                    (in->history_version != app->hist_version || text_w != app->hist_width || qh != app->hist_query || app->hist_term != t->term_id || app->hist_dirty)) {
+                    app->hist_dirty = 0;
                     b32 fresh = in->history_version != app->hist_version || app->hist_term != t->term_id;
                     app->hist_version = in->history_version;
                     app->hist_term = t->term_id;
@@ -4700,17 +4720,75 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     memset(&app->hist_blocks, 0, sizeof(app->hist_blocks));
                     for (s64 i = 0; i < in->history_count; i++) {
                         const TermHistoryEntry *he = &in->history[i];
+                        if (he->kind == 2) {
+                            // --- a tool claude used: a row (its name, what it worked on); open, its detail (an edit as a
+                            //     diff) and its result, in mono, at most 400 lines ---
+                            String fields[4] = {0};
+                            String rest = he->text;
+                            for (s32 k = 0; k < 4; k++) {
+                                s64 sep = 0;
+                                while (sep < rest.count && rest.data[sep] != 0x1F) sep++;
+                                fields[k] = (String){ rest.data, sep };
+                                rest = sep < rest.count ? (String){ rest.data + sep + 1, rest.count - sep - 1 } : (String){0};
+                            }
+                            // a turn that starts with a tool: its "Claude" line first
+                            if (!app->hist_lines.count || app->hist_lines.data[app->hist_lines.count - 1].user) {
+                                HistLine *ch = Array_Push(&app->hist_arena, app->hist_lines);
+                                ch->kind = HistLine_Claude;
+                                String when = he->time.count >= 16 ? (String){ he->time.data, 16 } : he->time;
+                                ch->text = Str_PushFormat(&app->hist_arena, "Claude  %.*s", STR_ARG(when));
+                                for (s64 k = 0; k < ch->text.count; k++) if (ch->text.data[k] == 'T') ch->text.data[k] = ' ';
+                            }
+                            HistLine *tl = Array_Push(&app->hist_arena, app->hist_lines);
+                            tl->kind = HistLine_Tool;
+                            tl->marker = Str_PushCopy(&app->hist_arena, fields[0]);
+                            tl->text = Str_PushCopy(&app->hist_arena, fields[1]);
+                            tl->key = Hash_Bytes(he->text.data, (u64)Min(he->text.count, (s64)512), Hash_Bytes(he->time.data, (u64)he->time.count, 0x7001));
+                            tl->first = HistOpenIndex(app, tl->key) >= 0;
+                            s32 budget = 400;
+                            for (s32 part = 2; part < 4 && tl->first; part++) {
+                                String body = Str_PushCopy(&app->hist_arena, fields[part]);
+                                b32 first_of_part = 1;
+                                for (s64 at = 0; at < body.count && budget > 0;) {
+                                    s64 end = at;
+                                    while (end < body.count && body.data[end] != '\n') end++;
+                                    String bl = { body.data + at, end - at };
+                                    if (bl.count && bl.data[bl.count - 1] == '\r') bl.count--;
+                                    do {
+                                        s64 cut = bl.count ? Max((s64)1, Font_Fit(mono, bl, text_w - R(3))) : 0;
+                                        while (cut < bl.count && (bl.data[cut] & 0xC0) == 0x80) cut++;
+                                        HistLine *bline = Array_Push(&app->hist_arena, app->hist_lines);
+                                        bline->kind = HistLine_ToolBody;
+                                        bline->text = (String){ bl.data, cut };
+                                        bline->block = part;           // 2 the detail, 3 the result
+                                        bline->first = first_of_part;  // a result's first line: a rule over it
+                                        first_of_part = 0;
+                                        bl.data += cut;
+                                        bl.count -= cut;
+                                        budget--;
+                                    } while (bl.count && budget > 0);
+                                    at = end + 1;
+                                }
+                            }
+                            if (app->hist_lines.data[app->hist_lines.count - 1].kind == HistLine_ToolBody) app->hist_lines.data[app->hist_lines.count - 1].last = 1;
+                            continue;
+                        }
                         HistLine *hl = Array_Push(&app->hist_arena, app->hist_lines);
                         hl->kind = he->from_user ? HistLine_User : HistLine_Claude;
+                        u32 prev_kind = app->hist_lines.count > 1 ? app->hist_lines.data[app->hist_lines.count - 2].kind : HistLine_Blank;
                         String when = he->time.count >= 16 ? (String){ he->time.data, 16 } : he->time;
                         hl->text = Str_PushFormat(&app->hist_arena, "%s  %.*s", he->from_user ? "You" : "Claude", STR_ARG(when));
                         for (s64 k = 0; k < hl->text.count; k++) if (hl->text.data[k] == 'T') hl->text.data[k] = ' ';
+                        if (!he->from_user && (prev_kind == HistLine_Tool || prev_kind == HistLine_ToolBody)) hl->kind = HistLine_Blank;   // the same turn: no second "Claude"
                         String text = Str_PushCopy(&app->hist_arena, he->text);
+                        s64 msg_first = app->hist_lines.count;   // its lines (a prompt's are marked after)
+                        s32 msg_w = he->from_user ? text_w - 2 * bubble : text_w;
                         // --- its markdown, line by line: fenced code (a block, kept for its copy button), tables (cells
                         //     in columns), headings, rules, list items (a marker, their lines indented), paragraphs; bold
                         //     and `code` runs taken out of the text and kept as spans; each wrapped to the width ---
                         b32 in_code = 0;
                         s64 code_from = 0;
+                        String code_lang = {0};
                         for (s64 at = 0; at <= text.count;) {
                             s64 end = at;
                             while (end < text.count && text.data[end] != '\n') end++;
@@ -4721,8 +4799,13 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             while (trim.count && (trim.data[0] == ' ' || trim.data[0] == '\t')) { trim.data++; trim.count--; lead++; }
                             if (trim.count >= 3 && !memcmp(trim.data, "```", 3)) {
                                 // a fence: a block opens, or the open one closes (its text kept for the copy button)
-                                if (!in_code) { code_from = end + 1; in_code = 1; }
-                                else {
+                                if (!in_code) {
+                                    code_from = end + 1;
+                                    in_code = 1;
+                                    code_lang = (String){ trim.data + 3, trim.count - 3 };
+                                    while (code_lang.count && code_lang.data[code_lang.count - 1] == ' ') code_lang.count--;
+                                } else {
+                                    if (app->hist_lines.count && app->hist_lines.data[app->hist_lines.count - 1].kind == HistLine_Code) app->hist_lines.data[app->hist_lines.count - 1].last = 1;
                                     *Array_Push(&app->hist_arena, app->hist_blocks) = (String){ text.data + code_from, Max(0, at - 1 - code_from) };
                                     in_code = 0;
                                 }
@@ -4734,13 +4817,14 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                                 String rest = raw;
                                 b32 first_of_block = at == code_from;
                                 do {
-                                    s64 cut = rest.count ? Max((s64)1, Font_Fit(mono, rest, text_w - R(1.6))) : 0;
+                                    s64 cut = rest.count ? Max((s64)1, Font_Fit(mono, rest, msg_w - R(2.4))) : 0;
                                     while (cut < rest.count && (rest.data[cut] & 0xC0) == 0x80) cut++;
                                     HistLine *cl = Array_Push(&app->hist_arena, app->hist_lines);
                                     cl->kind = HistLine_Code;
                                     cl->text = (String){ rest.data, cut };
                                     cl->block = (s32)app->hist_blocks.count;
                                     cl->first = first_of_block;
+                                    if (first_of_block) cl->marker = code_lang;
                                     first_of_block = 0;
                                     rest.data += cut;
                                     rest.count -= cut;
@@ -4781,16 +4865,16 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                                         while (cell.count && cell.data[cell.count - 1] == ' ') cell.count--;
                                         if (e2 >= row.count && !cell.count) break;
                                         tl->cells[tl->cell_count] = cell;
-                                        widths[tl->cell_count] = Max(widths[tl->cell_count], Font_Measure(header ? bold : font, cell));
+                                        widths[tl->cell_count] = Max(widths[tl->cell_count], Font_Measure(header ? rbold : rfont, cell));
                                         tl->cell_count++;
                                         k = e2 + 1;
                                     }
                                     tcols = Max(tcols, tl->cell_count);
                                     header = 0;
                                 }
-                                s32 gap = R(1.2), total = 0;
+                                s32 gap = R(2.0), total = 0;
                                 for (s32 k = 0; k < tcols; k++) total += widths[k] + gap;
-                                if (total > text_w) for (s32 k = 0; k < tcols; k++) widths[k] = (s32)((s64)widths[k] * (text_w - tcols * gap) / Max(1, total - tcols * gap));
+                                if (total > msg_w) for (s32 k = 0; k < tcols; k++) widths[k] = (s32)((s64)widths[k] * (msg_w - tcols * gap) / Max(1, total - tcols * gap));
                                 at = tat;
                                 continue;
                             }
@@ -4835,11 +4919,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             }
                             if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
                             String para = { plain, pn };
-                            Font *pf = kind == HistLine_Heading ? bold : font;
+                            Font *pf = kind == HistLine_Heading ? rhead : rfont;
                             s32 line_from = 0;
                             while (line_from < para.count || (!para.count && !line_from)) {
                                 String rest = { para.data + line_from, para.count - line_from };
-                                s64 cut = Font_Fit(pf, rest, text_w - indent);
+                                s64 cut = Font_Fit(pf, rest, msg_w - indent);
                                 if (cut < rest.count) {
                                     s64 space = cut;
                                     while (space > 0 && rest.data[space - 1] != ' ') space--;
@@ -4861,13 +4945,37 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             }
                             at = end + 1;
                         }
-                        if (in_code) *Array_Push(&app->hist_arena, app->hist_blocks) = (String){ text.data + code_from, Max(0, text.count - code_from) };
-                        Array_Push(&app->hist_arena, app->hist_lines)->kind = HistLine_Blank;
+                        if (in_code) {
+                            *Array_Push(&app->hist_arena, app->hist_blocks) = (String){ text.data + code_from, Max(0, text.count - code_from) };
+                            if (app->hist_lines.data[app->hist_lines.count - 1].kind == HistLine_Code) app->hist_lines.data[app->hist_lines.count - 1].last = 1;
+                        }
+                        for (s64 k = msg_first; he->from_user && k < app->hist_lines.count; k++) app->hist_lines.data[k].user = 1;
+                        while (app->hist_lines.count > msg_first && app->hist_lines.data[app->hist_lines.count - 1].kind == HistLine_Blank) app->hist_lines.count--;
                     }
+                    // --- each line's place: its height by what it is, a gap before a message, a heading, a code block ---
+                    s32 y = 0;
+                    for (s64 li = 0; li < app->hist_lines.count; li++) {
+                        HistLine *hl = &app->hist_lines.data[li];
+                        s32 gap = 0, h = (s32)(rfont->line_h * 1.65f);
+                        if (hl->kind == HistLine_User || hl->kind == HistLine_Claude) { gap = li ? R(2.4) : 0; h = (s32)(small->line_h * 1.9f); }
+                        else if (hl->kind == HistLine_Heading) { gap = R(0.9); h = (s32)(rhead->line_h * 1.5f); }
+                        else if (hl->kind == HistLine_Code) { gap = hl->first ? R(0.6) + R(2.2) : 0; h = (s32)(mono->line_h * 1.55f); }
+                        else if (hl->kind == HistLine_Table) { gap = hl->first ? R(0.6) : 0; h = (s32)(rfont->line_h * 2.0f); }
+                        else if (hl->kind == HistLine_Blank) h = R(0.9);
+                        else if (hl->kind == HistLine_Rule) h = R(2.0);
+                        else if (hl->kind == HistLine_Tool) { gap = li && app->hist_lines.data[li - 1].kind != HistLine_Tool && app->hist_lines.data[li - 1].kind != HistLine_ToolBody ? R(0.6) : R(0.15); h = R(2.3); }
+                        else if (hl->kind == HistLine_ToolBody) { gap = hl->first && hl->block == 2 ? R(0.3) : 0; h = (s32)(mono->line_h * 1.4f); }
+                        if (hl->user && hl->kind != HistLine_User && li && !app->hist_lines.data[li - 1].user) gap += R(0.4);   // the bubble's top
+                        y += gap;
+                        hl->y = y;
+                        hl->h = h;
+                        y += h + ((hl->kind == HistLine_Code || hl->kind == HistLine_ToolBody) && hl->last ? R(0.9) : 0) + (hl->user && (li + 1 >= app->hist_lines.count || !app->hist_lines.data[li + 1].user) ? R(0.6) : 0);
+                    }
+                    app->hist_total_h = y;
                     for (s64 li = 0; q.count && li < app->hist_lines.count; li++) {
                         String lt = app->hist_lines.data[li].text;
                         u32 lk = app->hist_lines.data[li].kind;
-                        if (lk != HistLine_Text && lk != HistLine_Heading && lk != HistLine_Code) continue;
+                        if (lk != HistLine_Text && lk != HistLine_Heading && lk != HistLine_Code && lk != HistLine_Tool && lk != HistLine_ToolBody) continue;
                         for (s64 at = 0; at + q.count <= lt.count; at++) {
                             b32 same = 1;
                             for (s64 k = 0; k < q.count && same; k++) {
@@ -4889,11 +4997,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     app->hist_follow = 1;
                     if (fresh && !q.count && app->hist_at_end) app->hist_scroll = 1e9f;
                 }
-                f32 content_h = (f32)(app->hist_lines.count * lh + 2 * R(0.6));
+                f32 content_h = (f32)(app->hist_total_h + R(4));
                 s32 mc = (s32)app->hist_matches.count;
                 if (app->hist_follow) {
                     app->hist_follow = 0;
-                    if (app->hist_current >= 0 && app->hist_current < mc) app->hist_scroll = (f32)(app->hist_matches.data[app->hist_current].line * lh) - (f32)view_h / 2;
+                    if (app->hist_current >= 0 && app->hist_current < mc) app->hist_scroll = (f32)app->hist_lines.data[app->hist_matches.data[app->hist_current].line].y - (f32)view_h / 2;
                     else if (!q.count) app->hist_scroll = 1e9f;
                 }
                 UiSignal vs = Ui_Hit(ui, Ui_Id("History"), content);
@@ -4906,68 +5014,119 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     String msg = app->hist_term == t->term_id && in->history_version ? S("no history yet") : S("reading the history...");
                     Draw_TextIn(dl, font, R4(content.x0, content.y0 + R(4), content.x1, content.y0 + R(6)), c->dim, msg, 0.5f);
                 }
-                s32 first = Max(0, (s32)(app->hist_scroll / (f32)lh) - 1);
-                s32 last = Min((s32)app->hist_lines.count, first + view_h / lh + 3);
                 s32 mi = 0;
-                while (mi < mc && app->hist_matches.data[mi].line < first) mi++;
-                for (s32 li = first; li < last; li++) {
+                u32 shade = ColorMix(c->bg, c->text, 0.06f), edge = ColorMix(c->bg, c->text, 0.13f);
+                for (s32 li = 0; li < (s32)app->hist_lines.count; li++) {
                     const HistLine *hl = &app->hist_lines.data[li];
-                    s32 ly = content.y0 + R(0.6) + li * lh - (s32)app->hist_scroll;
-                    s32 lx = content.x0 + R(1.2);
+                    s32 ly = content.y0 + R(2) + hl->y - (s32)app->hist_scroll;
+                    s32 lx = col_x + (hl->user && hl->kind != HistLine_User ? bubble : 0);
+                    if (ly > content.y1) break;
+                    b32 seen = ly + hl->h + R(3) >= content.y0;
+                    Font *lf = hl->kind == HistLine_Heading ? rhead : hl->kind == HistLine_Code || hl->kind == HistLine_ToolBody || hl->kind == HistLine_Tool ? mono : rfont;
                     // the matches lit, the current one framed
                     s64 mark_count = 0;
                     for (s32 k = mi; k < mc && app->hist_matches.data[k].line == li; k++) mark_count += app->hist_matches.data[k].len;
-                    u32 *marks = mark_count ? Arena_PushArray(fa, u32, mark_count) : NULL;
+                    u32 *marks = mark_count && seen ? Arena_PushArray(fa, u32, mark_count) : NULL;
                     mark_count = 0;
                     for (; mi < mc && app->hist_matches.data[mi].line == li; mi++) {
+                        if (!seen) continue;
                         const HistMatch *m = &app->hist_matches.data[mi];
                         s64 cp = 0, bi = 0;
                         while (bi < m->start) { Utf8_Decode(hl->text, &bi); cp++; }
                         for (s64 e = m->start; e < m->start + m->len; cp++) { marks[mark_count++] = (u32)cp; Utf8_Decode(hl->text, &e); }
                         if (mi == app->hist_current) {
-                            s32 fx = Font_Measure(font, (String){ hl->text.data, m->start });
-                            s32 fw = Font_Measure(font, (String){ hl->text.data + m->start, m->len });
-                            Draw_RectEx(dl, R4(lx + fx - R(0.2), ly, lx + fx + fw + R(0.2), ly + lh), 0, c->accent, 1, radius_small, NULL, 0, 0, 0);
+                            s32 mox = hl->kind == HistLine_Code ? R(1.2) : hl->indent;
+                            s32 fx = Font_Measure(lf, (String){ hl->text.data, m->start });
+                            s32 fw = Font_Measure(lf, (String){ hl->text.data + m->start, m->len });
+                            Draw_RectEx(dl, R4(lx + mox + fx - R(0.2), ly, lx + mox + fx + fw + R(0.2), ly + hl->h), 0, c->accent, 1, radius_small, NULL, 0, 0, 0);
                         }
                     }
+                    if (!seen) continue;
+                    // a prompt's bubble: a soft shade behind its lines, from its "You" line's foot to its last line
+                    if (hl->user && hl->kind != HistLine_User) {
+                        b32 top = li && !app->hist_lines.data[li - 1].user ? 1 : app->hist_lines.data[li - 1].kind == HistLine_User;
+                        b32 bottom = li + 1 >= (s32)app->hist_lines.count || !app->hist_lines.data[li + 1].user;
+                        f32 rr[4] = { top ? radius_large : 0, top ? radius_large : 0, bottom ? radius_large : 0, bottom ? radius_large : 0 };
+                        Draw_RectEx(dl, R4(col_x, ly - (top ? R(0.6) : 0), col_x + text_w, ly + hl->h + (bottom ? R(0.6) : 0)), ColorAlpha(c->accent, 0.09f), 0, 0, 0, rr, 0, 0, 0);
+                    }
                     if (hl->kind == HistLine_Blank) continue;
-                    u32 code_bg = ColorMix(c->bg, c->text, 0.07f);
-                    if (hl->kind == HistLine_Rule) { Draw_Rect(dl, R4(lx, ly + lh / 2, lx + text_w, ly + lh / 2 + line_w), c->line, 0); continue; }
+                    if (hl->kind == HistLine_Rule) { Draw_Rect(dl, R4(lx, ly + hl->h / 2, lx + text_w, ly + hl->h / 2 + line_w), edge, 0); continue; }
+                    if (hl->kind == HistLine_User || hl->kind == HistLine_Claude) {
+                        Draw_Text(dl, small, lx, ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2, c->dim, hl->text);
+                        continue;
+                    }
+                    if (hl->kind == HistLine_Tool) {
+                        // a tool's row: a chevron, its name, what it worked on; a click opens it (its detail and result)
+                        Rect row = R4(lx - R(0.6), ly, lx + text_w, ly + hl->h);
+                        u64 rid = Ui_IdN(Ui_Id("ToolRow"), hl->key);
+                        UiSignal trs = Ui_Hit(ui, rid, row);
+                        Draw_Rect(dl, row, hl->first ? shade : HoverFill(app, rid, trs, c->hover), radius_small);
+                        Rect in_row = row;
+                        CutLeft(&in_row, R(0.6));
+                        Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.6)), c->dim, hl->first ? Icon_ChevronDown : Icon_ChevronRight);
+                        Draw_TextIn(dl, bold, CutLeft(&in_row, Min(Font_Measure(bold, hl->marker) + R(1.0), RectW(in_row))), c->text, hl->marker, 0);
+                        if (mark_count) Draw_TextMarked(dl, mono, in_row.x0, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, c->dim, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                        else Draw_TextIn(dl, mono, in_row, c->dim, hl->text, 0);
+                        Named(app, Str_PushFormat(fa, "tool %.*s %.*s", STR_ARG(hl->marker), STR_ARG(hl->text)), row);
+                        if (trs.clicked) {
+                            s32 oi = HistOpenIndex(app, hl->key);
+                            if (oi >= 0) app->hist_open[oi] = app->hist_open[--app->hist_open_count];
+                            else if (app->hist_open_count < (s32)ArrayCount(app->hist_open)) app->hist_open[app->hist_open_count++] = hl->key;
+                            app->hist_dirty = 1;
+                            out->wake_at_us = now;
+                        }
+                        continue;
+                    }
+                    if (hl->kind == HistLine_ToolBody) {
+                        // its detail (an edit's '+' lines green, '-' red) and its result, on a shade, a rule between
+                        f32 br[4] = { 0, 0, hl->last ? radius_medium : 0, hl->last ? radius_medium : 0 };
+                        Draw_RectEx(dl, R4(lx, ly, lx + text_w, ly + hl->h + (hl->last ? R(0.6) : 0)), shade, 0, 0, 0, br, 0, 0, 0);
+                        if (hl->first && hl->block == 3) Draw_Rect(dl, R4(lx, ly, lx + text_w, ly + line_w), edge, 0);
+                        u8 lead = hl->text.count ? hl->text.data[0] : 0;
+                        u32 col = hl->block == 2 && lead == '+' ? 0xFF000000u | tt->ansi[2] : hl->block == 2 && lead == '-' ? 0xFF000000u | tt->ansi[1] :
+                                  hl->block == 3 ? c->dim : c->text;
+                        Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, col, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                        continue;
+                    }
                     if (hl->kind == HistLine_Code) {
-                        // a code block's line on its shade, mono; its first line has the block's copy button
-                        Draw_Rect(dl, R4(lx, ly, lx + text_w, ly + lh), code_bg, 0);
-                        Draw_TextMarked(dl, mono, lx + R(0.8), ly + (lh - (s32)(mono->line_h + 0.5f)) / 2, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
-                        if (hl->first && hl->block < app->hist_blocks.count) {
-                            Rect cb = R4(lx + text_w - R(2.2), ly + R(0.1), lx + text_w - R(0.2), ly + lh - R(0.1));
-                            UiSignal ccs = IconButton(app, Ui_IdN(Ui_Id("CopyCode"), (u64)hl->block), cb, Icon_Copy, icons_small, c->dim, c->hover, radius_small,
-                                                     Str_PushFormat(fa, "copy code %d", hl->block + 1));
-                            if (ccs.clicked) { out->clipboard_set = 1; out->clipboard_text = app->hist_blocks.data[hl->block]; app->hist_copied = hl->block + 1; app->hist_copied_us = now; }
-                            if (app->hist_copied == hl->block + 1 && now - app->hist_copied_us < 1500000) {
-                                Draw_TextIn(dl, small, R4(cb.x0 - R(5), cb.y0, cb.x0 - R(0.3), cb.y1), c->accent, S("Copied"), 1);
-                                if (!out->wake_at_us || app->hist_copied_us + 1500000 < out->wake_at_us) out->wake_at_us = app->hist_copied_us + 1500000;
+                        // a code block: a rounded container, its header (the language, the copy button), the lines in mono
+                        s32 cw = text_w - (hl->user ? 2 * bubble : 0);
+                        if (hl->first) {
+                            Rect hr = R4(lx, ly - R(2.2), lx + cw, ly);
+                            f32 tr[4] = { radius_medium, radius_medium, 0, 0 };
+                            Draw_RectEx(dl, hr, edge, 0, 0, 0, tr, 0, 0, 0);
+                            Draw_TextIn(dl, small, R4(hr.x0 + R(1.2), hr.y0, hr.x1 - R(3), hr.y1), c->dim, hl->marker.count ? hl->marker : S("code"), 0);
+                            if (hl->block < app->hist_blocks.count) {
+                                Rect cb = R4(hr.x1 - R(2.4), hr.y0 + R(0.2), hr.x1 - R(0.4), hr.y1 - R(0.2));
+                                UiSignal ccs = IconButton(app, Ui_IdN(Ui_Id("CopyCode"), (u64)hl->block), cb, Icon_Copy, icons_small, c->dim, c->hover, radius_small,
+                                                          Str_PushFormat(fa, "copy code %d", hl->block + 1));
+                                if (ccs.clicked) { out->clipboard_set = 1; out->clipboard_text = app->hist_blocks.data[hl->block]; app->hist_copied = hl->block + 1; app->hist_copied_us = now; }
+                                if (app->hist_copied == hl->block + 1 && now - app->hist_copied_us < 1500000) {
+                                    Draw_TextIn(dl, small, R4(cb.x0 - R(5), cb.y0, cb.x0 - R(0.3), cb.y1), c->accent, S("Copied"), 1);
+                                    if (!out->wake_at_us || app->hist_copied_us + 1500000 < out->wake_at_us) out->wake_at_us = app->hist_copied_us + 1500000;
+                                }
                             }
                         }
+                        f32 br[4] = { 0, 0, hl->last ? radius_medium : 0, hl->last ? radius_medium : 0 };
+                        Draw_RectEx(dl, R4(lx, ly, lx + cw, ly + hl->h + (hl->last ? R(0.6) : 0)), shade, 0, 0, 0, br, 0, 0, 0);
+                        Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
                         continue;
                     }
                     if (hl->kind == HistLine_Table) {
-                        // cells in their columns, the header row bold and underlined
-                        s32 x = lx;
+                        // cells in their columns, padded; the header row bold on a shade; a hairline under each row
+                        s32 x = lx, row_w = 0;
+                        for (s32 k = 0; k < hl->cell_count; k++) row_w += hl->widths[k] + R(2.0);
+                        if (hl->first) Draw_Rect(dl, R4(lx, ly, lx + row_w, ly + hl->h), shade, radius_small);
                         for (s32 k = 0; k < hl->cell_count; k++) {
-                            Draw_TextIn(dl, hl->first ? bold : font, R4(x, ly, x + hl->widths[k], ly + lh), c->text, hl->cells[k], 0);
-                            x += hl->widths[k] + R(1.2);
+                            Draw_TextIn(dl, hl->first ? rbold : rfont, R4(x + R(0.8), ly, x + R(0.8) + hl->widths[k], ly + hl->h), c->text, hl->cells[k], 0);
+                            x += hl->widths[k] + R(2.0);
                         }
-                        if (hl->first) Draw_Rect(dl, R4(lx, ly + lh - line_w, x - R(1.2), ly + lh), c->line, 0);
-                        continue;
-                    }
-                    if (hl->kind == HistLine_User || hl->kind == HistLine_Claude) {
-                        if (hl->kind == HistLine_User) Draw_Rect(dl, R4(lx - R(0.6), ly, lx + text_w, ly + lh), ColorAlpha(c->accent, 0.10f), radius_small);
-                        Draw_Text(dl, small, lx, ly + (lh - (s32)(small->line_h + 0.5f)) / 2, c->dim, hl->text);
+                        Draw_Rect(dl, R4(lx, ly + hl->h - line_w, lx + row_w, ly + hl->h), edge, 0);
                         continue;
                     }
                     // a paragraph's, heading's or list item's line: its marker, then its runs (bold, `code` on a shade)
-                    Font *lf = hl->kind == HistLine_Heading ? bold : font;
-                    s32 tx = lx + hl->indent, ty = ly + (lh - (s32)(lf->line_h + 0.5f)) / 2;
-                    if (hl->marker.count) Draw_Text(dl, font, tx - Font_Measure(font, hl->marker) - R(0.5), ty, c->dim, hl->marker);
+                    s32 tx = lx + hl->indent, ty = ly + (hl->h - (s32)(lf->line_h + 0.5f)) / 2;
+                    if (hl->marker.count) Draw_Text(dl, rfont, tx - Font_Measure(rfont, hl->marker) - R(0.6), ty, c->dim, hl->marker);
                     if (mark_count || !hl->span_count) { Draw_TextMarked(dl, lf, tx, ty, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]); continue; }
                     s32 at = 0;
                     for (s32 k = 0; k <= hl->span_count; k++) {
@@ -4978,10 +5137,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         String run = { hl->text.data + sp->start, sp->len };
                         if (sp->style & HistSpan_Code) {
                             s32 w = Font_Measure(mono, run);
-                            Draw_Rect(dl, R4(tx - R(0.15), ly + R(0.15), tx + w + R(0.15), ly + lh - R(0.15)), code_bg, radius_small);
-                            tx = Draw_Text(dl, mono, tx, ly + (lh - (s32)(mono->line_h + 0.5f)) / 2, c->text, run);
+                            Draw_Rect(dl, R4(tx - R(0.2), ly + R(0.35), tx + w + R(0.2), ly + hl->h - R(0.35)), shade, radius_small);
+                            tx = Draw_Text(dl, mono, tx, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, c->text, run);
                         } else {
-                            tx = Draw_Text(dl, bold, tx, ty, c->text, run);
+                            tx = Draw_Text(dl, hl->kind == HistLine_Heading ? rhead : rbold, tx, ty, c->text, run);
                         }
                         at = sp->start + sp->len;
                     }

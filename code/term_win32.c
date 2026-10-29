@@ -217,7 +217,11 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_UiBold], &p->atlas, ui, 9 * pt, 600);
     Font_Create(&p->fonts[Font_Icon], &p->atlas, icons, 9 * pt, 400);
     Font_Create(&p->fonts[Font_IconSmall], &p->atlas, icons, 7 * pt, 400);
-    Font_Create(&p->fonts[Font_Mono], &p->atlas, L"Cascadia Mono\0Consolas\0", 8.5f * pt, 400);   // code in the reader
+    // the reader: an article's type (a serif to read, a sans for headings, a mono for code)
+    Font_Create(&p->fonts[Font_Mono], &p->atlas, L"Cascadia Mono\0Consolas\0", 10 * pt, 400);
+    Font_Create(&p->fonts[Font_Read], &p->atlas, L"Georgia\0Cambria\0", 12 * pt, 400);
+    Font_Create(&p->fonts[Font_ReadBold], &p->atlas, L"Georgia\0Cambria\0", 12 * pt, 700);
+    Font_Create(&p->fonts[Font_ReadHead], &p->atlas, ui, 15 * pt, 600);
     p->fonts_dpi = p->dpi;
 }
 

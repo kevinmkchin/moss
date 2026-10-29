@@ -270,7 +270,8 @@ extern "C" b32 TermClient_Poll(TermClient* C)
                 At += 9;
                 if(At + (size_t)TimeLen + TextLen > C->History.size()) { break; }
                 TermHistoryEntry V = {};
-                V.from_user = FromUser;
+                V.from_user = FromUser == 1;
+                V.kind = FromUser;
                 V.time = String{(u8*)C->History.data() + At, (s64)TimeLen};
                 V.text = String{(u8*)C->History.data() + At + TimeLen, (s64)TextLen};
                 At += (size_t)TimeLen + TextLen;

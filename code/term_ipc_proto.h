@@ -31,7 +31,8 @@ enum msg_type
     MSG_LINK_GET,  // window -> server: u32 TabId, u32 LinkId (a cell's, Ctrl+clicked): the server answers with MSG_LINK
     MSG_LINK,      // server -> window: u32 TabId, then the link's URI (to open)
     MSG_HISTORY_GET, // window -> server: u32 TabId: its claude session's history (the transcript), answered with MSG_HISTORY
-    MSG_HISTORY,   // server -> window: u32 TabId, u32 Count, then Count x (u8 FromUser, u32 TimeLen, u32 TextLen, time, text),
+    MSG_HISTORY,   // server -> window: u32 TabId, u32 Count, then Count x (u8 Kind: 0 claude, 1 the user, 2 a tool's use (name,
+                   // summary, detail, result; \x1f between); u32 TimeLen, u32 TextLen, time, text),
                    // oldest first (no session: Count 0)
     MSG_ACCOUNT_OK, // window -> server: u32 TabId: its claude may go on with the account it changed to (TAB_ACCOUNT_HELD ends)
     MSG_SEARCH_SESSIONS, // window -> server: text to find in every session's transcript (UTF-8; empty = none): answered
@@ -63,7 +64,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 16
+#define TERM_PROTOCOL_VERSION 17
 
 struct msg_attach
 {
