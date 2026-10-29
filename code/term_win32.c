@@ -155,6 +155,16 @@ typedef struct Platform {
     String *dropped;              // dropped files, for the next frame
     s64 dropped_count;
 
+    b32 foreign_drag;             // another moss window's tab is dragged over this one (its WM_COPYDATA), at foreign_at
+    b32 foreign_drop;             // and dropped here, for the next frame
+    s32 foreign_at[2];            // the pointer, screen pixels
+    u32 foreign_tab;              // its server tab (0: a web tab)
+    u8 foreign_buf[1400];         // its label \0 web address
+    String foreign_label, foreign_url;
+    HWND drag_target;             // the moss window our dragged tab is over (told where the pointer is)
+    u64 torn_web;                 // a web tab whose page opened in another window, for the next frame (it goes here)
+    String open_web;              // `--web URL`: the first tab, a web page (a web tab torn off another window)
+
     Web *web;                     // web pages in tabs (WebView2), 0 without it or in headless runs
     AppWebState web_states[App_MaxWebs];
     AppWebPopup web_popups[8];
@@ -812,14 +822,19 @@ static void OpenLink(Platform *p, String link, String cwd)
 }
 
 // Starts another term window: `term --window NAME` (it shows the tabs the server says are that window's), at rect
-// when given.
-static void SpawnWindow(Platform *p, String name, const s32 *rect)
+// when given, its first tab a web page at web_url when given.
+static void SpawnWindow(Platform *p, String name, const s32 *rect, String web_url)
 {
-    WCHAR exe[MAX_PATH] = {0}, cmd[MAX_PATH + 160] = {0};
+    WCHAR exe[MAX_PATH] = {0}, cmd[MAX_PATH + 1400] = {0};
     GetModuleFileNameW(NULL, exe, MAX_PATH);
     WString wname = Utf8ToUtf16(&p->scratch, name);
     if (rect) swprintf_s(cmd, ArrayCount(cmd), L"\"%s\" --window %s --at %d,%d,%d,%d", exe, (const WCHAR *)wname.data, rect[0], rect[1], rect[2], rect[3]);
     else swprintf_s(cmd, ArrayCount(cmd), L"\"%s\" --window %s", exe, (const WCHAR *)wname.data);
+    if (web_url.count) {
+        WString wurl = Utf8ToUtf16(&p->scratch, (String){ web_url.data, Min(web_url.count, 1200) });
+        size_t at = wcslen(cmd);
+        swprintf_s(cmd + at, ArrayCount(cmd) - at, L" --web \"%s\"", (const WCHAR *)wurl.data);
+    }
     Logf(p->headless ? "headless" : "window", "open window %.*s", STR_ARG(name));
     if (p->headless) return;
     STARTUPINFOW si = { sizeof(si) };
@@ -831,6 +846,39 @@ static void SpawnWindow(Platform *p, String name, const s32 *rect)
     } else {
         Logf("window", "CreateProcess failed (%lu)", GetLastError());
     }
+}
+
+// Another moss window of this server instance at a screen point (its name in *name), else NULL.
+static HWND MossWindowAt(Platform *p, POINT pt, String *name)
+{
+    HWND w = GetAncestor(WindowFromPoint(pt), GA_ROOT);
+    ATOM atom = w && w != p->hwnd ? (ATOM)(uintptr_t)GetPropW(w, L"moss.id") : 0;
+    WCHAR id[160] = {0};
+    WCHAR *bar = atom && GlobalGetAtomNameW(atom, id, 160) ? wcschr(id, L'|') : NULL;
+    if (!bar || (size_t)(bar - id) != wcslen(p->instance) || wcsncmp(id, p->instance, (size_t)(bar - id)) != 0) return NULL;
+    if (name) *name = Utf16ToUtf8(&p->scratch, (WString){ (u16 *)(bar + 1), (s64)wcslen(bar + 1) });
+    return w;
+}
+
+// Tells another moss window about a tab of ours dragged over it (WM_COPYDATA 0x7E4E): kind 0 over it, 1 gone, 2 dropped;
+// the pointer (screen), the server tab (0: a web tab), label \0 web address. Its answer: 1 when it took a drop.
+static LRESULT SendDrag(Platform *p, HWND to, u32 kind, POINT pt, u32 tab, String label, String url)
+{
+    u8 buf[16 + sizeof(p->foreign_buf)] = {0};
+    u32 head[4] = { kind, (u32)pt.x, (u32)pt.y, tab };
+    memcpy(buf, head, sizeof(head));
+    s64 n = sizeof(head);
+    s64 label_n = Min(label.count, 200), url_n = Min(url.count, (s64)sizeof(p->foreign_buf) - 202);
+    while (label_n < label.count && label_n && (label.data[label_n] & 0xC0) == 0x80) label_n--;   // whole characters
+    memcpy(buf + n, label.data, (size_t)label_n);
+    n += label_n;
+    buf[n++] = 0;
+    memcpy(buf + n, url.data, (size_t)url_n);
+    n += url_n;
+    COPYDATASTRUCT cd = { 0x7E4E, (DWORD)n, buf };
+    DWORD_PTR result = 0;
+    SendMessageTimeoutW(to, WM_COPYDATA, (WPARAM)p->hwnd, (LPARAM)&cd, SMTO_ABORTIFHUNG, 500, &result);
+    return (LRESULT)result;
 }
 
 // The background image behind the terminals: any image Windows reads, scaled down to fit 4K, on the GPU. An empty path
@@ -1001,6 +1049,24 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     fi->webs = p->web_states;
     fi->web_popup_count = Web_Popups(p->web, &p->scratch, p->web_popups, (s32)ArrayCount(p->web_popups));
     fi->web_popups = p->web_popups;
+    fi->web_torn_off = p->torn_web;
+    p->torn_web = 0;
+    fi->open_web = p->open_web;
+    // --- another window's tab dragged over this one: the mouse is where that window says (it has the mouse). A drag
+    //     whose window went away ends with the button ---
+    if (p->foreign_drag && !p->test_window && GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON) >= 0) p->foreign_drag = 0;
+    if ((p->foreign_drag || p->foreign_drop) && p->hwnd) {
+        POINT fp = { p->foreign_at[0], p->foreign_at[1] };
+        ScreenToClient(p->hwnd, &fp);
+        fi->input.mouse[0] = fp.x;
+        fi->input.mouse[1] = fp.y;
+    }
+    fi->foreign_drag = p->foreign_drag;
+    fi->foreign_drop = p->foreign_drop;
+    fi->foreign_tab = p->foreign_tab;
+    fi->foreign_label = p->foreign_label;
+    fi->foreign_url = p->foreign_url;
+    p->foreign_drop = 0;
     // --- the debug overlay's numbers ---
     Debug_RecentWork(120, &fi->debug.work_ms_avg, &fi->debug.work_ms_max);
     fi->debug.frames_drawn = p->frames_drawn;
@@ -1231,27 +1297,20 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         DwmSetWindowAttribute(p->hwnd, 38, &type, sizeof(type));                    // DWMWA_SYSTEMBACKDROP_TYPE
         Logf("window", "backdrop %d (%s)", p->backdrop, p->dark ? "dark" : "light");
     }
-    // --- a tab leaves this window: into the term window under the mouse (same server), else a new window there ---
-    if (out.tear_off_tab && p->client) {
+    // --- a tab leaves this window: into the moss window under the mouse (same server; told where it was dropped), else
+    //     a new window there. A web tab's page opens there again (it reloads) and its tab here goes ---
+    POINT drag_pt = {0};
+    if (!p->headless) GetCursorPos(&drag_pt);
+    if (p->test_window) { drag_pt.x = p->posted_mouse[0]; drag_pt.y = p->posted_mouse[1]; ClientToScreen(p->hwnd, &drag_pt); }
+    if ((out.tear_off_tab || out.tear_off_web) && p->client) {
         String to = {0};
-        HWND target = NULL;
-        POINT pt = {0};
-        if (!p->headless) GetCursorPos(&pt);
-        if (p->test_window) { pt.x = p->posted_mouse[0]; pt.y = p->posted_mouse[1]; ClientToScreen(p->hwnd, &pt); }
-        if (out.tear_off_drop && !p->headless) {
-            HWND w = GetAncestor(WindowFromPoint(pt), GA_ROOT);
-            ATOM atom = w && w != p->hwnd ? (ATOM)(uintptr_t)GetPropW(w, L"moss.id") : 0;
-            WCHAR id[160] = {0};
-            WCHAR *bar = atom && GlobalGetAtomNameW(atom, id, 160) ? wcschr(id, L'|') : NULL;
-            if (bar && (size_t)(bar - id) == wcslen(p->instance) && wcsncmp(id, p->instance, (size_t)(bar - id)) == 0) {
-                target = w;
-                to = Utf16ToUtf8(&p->scratch, (WString){ (u16 *)(bar + 1), (s64)wcslen(bar + 1) });
-            }
-        }
+        HWND target = out.tear_off_drop && !p->headless ? MossWindowAt(p, drag_pt, &to) : NULL;
         if (target) {
-            Logf("window", "tab %u to the window %.*s", out.tear_off_tab, STR_ARG(to));
-            TermClient_SetOwner(p->client, out.tear_off_tab, to);
-            SetForegroundWindow(target);
+            Logf("window", "tab %u%s to the window %.*s", out.tear_off_tab, out.tear_off_web ? " (web)" : "", STR_ARG(to));
+            b32 took = SendDrag(p, target, 2, drag_pt, out.tear_off_tab, (String){0}, out.tear_off_url) != 0;
+            if (out.tear_off_tab) TermClient_SetOwner(p->client, out.tear_off_tab, to);
+            if (out.tear_off_web && took) p->torn_web = out.tear_off_web;
+            if (!p->test_window) SetForegroundWindow(target);   // test windows never take the foreground
         } else if (!out.tear_off_last) {
             // a new window the size of this one, its first tab under the mouse (from a drag), else just below this one
             p->tear_offs++;
@@ -1265,11 +1324,19 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
             RECT wr = {0};
             if (p->hwnd) GetWindowRect(p->hwnd, &wr);
             s32 rect[4] = { wr.left + MulDiv(40, (int)p->dpi, 96), wr.top + MulDiv(40, (int)p->dpi, 96), wr.right - wr.left, wr.bottom - wr.top };
-            if (out.tear_off_drop) { rect[0] = pt.x - MulDiv(80, (int)p->dpi, 96); rect[1] = pt.y - MulDiv(16, (int)p->dpi, 96); }
-            TermClient_SetOwner(p->client, out.tear_off_tab, to);
-            SpawnWindow(p, to, rect);
+            if (out.tear_off_drop) { rect[0] = drag_pt.x - MulDiv(80, (int)p->dpi, 96); rect[1] = drag_pt.y - MulDiv(16, (int)p->dpi, 96); }
+            if (out.tear_off_tab) TermClient_SetOwner(p->client, out.tear_off_tab, to);
+            SpawnWindow(p, to, rect, out.tear_off_web ? (out.tear_off_url.count ? out.tear_off_url : S("about:blank")) : (String){0});
+            if (out.tear_off_web) p->torn_web = out.tear_off_web;
         }
     }
+    // --- our tab dragged over another moss window: it shows where the tab would land (told again on each move, and
+    //     when the pointer leaves it) ---
+    HWND drag_over = out.drag_out && !p->headless ? MossWindowAt(p, drag_pt, NULL) : NULL;
+    if (p->drag_target && p->drag_target != drag_over) SendDrag(p, p->drag_target, 1, drag_pt, 0, (String){0}, (String){0});
+    if (drag_over) SendDrag(p, drag_over, 0, drag_pt, 0, out.drag_out_label, (String){0});
+    p->drag_target = drag_over;
+    if (out.open_web_taken) p->open_web = (String){0};
     for (s64 i = 0; i < out.open_window_count; i++) {
         // the main window's start: windows that own tabs and aren't open (each holds its mutex while it is)
         WString w = Utf8ToUtf16(&p->scratch, out.open_windows[i]);
@@ -1277,7 +1344,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         swprintf_s(mutex, 128, L"Local\\moss-window-%s", (const WCHAR *)w.data);
         HANDLE open = OpenMutexW(SYNCHRONIZE, FALSE, mutex);
         if (open) { CloseHandle(open); continue; }
-        SpawnWindow(p, out.open_windows[i], NULL);
+        SpawnWindow(p, out.open_windows[i], NULL, (String){0});
     }
     if (out.open_taken) p->open_request = 0;
     if (out.start_with_windows) {
@@ -1574,6 +1641,28 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
             p->wake_frame = p->frame;
             if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
+            return TRUE;
+        }
+        if (cd && cd->dwData == 0x7E4E && cd->cbData >= 16 && cd->cbData <= 16 + sizeof(p->foreign_buf)) {
+            // another moss window's tab dragged over this one (SendDrag): kind, the pointer, its server tab, label \0 url
+            u32 head[4] = {0};
+            memcpy(head, cd->lpData, sizeof(head));
+            p->foreign_drag = head[0] == 0;
+            p->foreign_at[0] = (s32)head[1];
+            p->foreign_at[1] = (s32)head[2];
+            if (head[0] != 1) {
+                s64 n = (s64)cd->cbData - 16, zero = 0;
+                memcpy(p->foreign_buf, (const u8 *)cd->lpData + 16, (size_t)n);
+                while (zero < n && p->foreign_buf[zero]) zero++;
+                p->foreign_tab = head[3];
+                p->foreign_label = (String){ p->foreign_buf, zero };
+                p->foreign_url = zero < n ? (String){ p->foreign_buf + zero + 1, n - zero - 1 } : (String){0};
+            }
+            if (head[0] == 2) {
+                p->foreign_drop = 1;
+                Logf("window", "a tab dropped here from another window (%s)", head[3] ? "server tab" : "web");
+            }
+            p->wake_frame = p->frame;
             return TRUE;
         }
         break;
@@ -2306,7 +2395,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     b32 headless = 0, test = 0;
     const WCHAR *probe_url = NULL, *probe_png = NULL;
-    const WCHAR *script = NULL, *session = NULL, *replay = NULL, *instance_name = NULL, *window_name = NULL, *at = NULL, *open_dir = NULL;
+    const WCHAR *script = NULL, *session = NULL, *replay = NULL, *instance_name = NULL, *window_name = NULL, *at = NULL, *open_dir = NULL, *web_url = NULL;
     WCHAR open_command[1024] = {0};   // `term -- command line`: a tab running it
     s32 size_w = 1280, size_h = 800, dpi_arg = 96;
     if (argc >= 2 && wcscmp(argv[1], L"view") == 0) {
@@ -2344,6 +2433,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
             break;
         }
         else if (wcscmp(argv[i], L"--at") == 0 && i + 1 < argc) at = argv[++i];
+        else if (wcscmp(argv[i], L"--web") == 0 && i + 1 < argc) web_url = argv[++i];
         else if (wcscmp(argv[i], L"--vt-replay") == 0 && i + 1 < argc) replay = argv[++i];
         else if (wcscmp(argv[i], L"--web-probe") == 0 && i + 2 < argc) { probe_url = argv[++i]; probe_png = argv[++i]; }
         else if (wcscmp(argv[i], L"--size") == 0 && i + 1 < argc) swscanf_s(argv[++i], L"%dx%d", &size_w, &size_h);
@@ -2431,6 +2521,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     InitializeCriticalSection(&p->image_lock);
     GetEnvironmentVariableW(L"MOSS_INSTANCE", p->instance, 64);
     if (window_name) p->window_name = Utf16ToUtf8(&p->arena, (WString){ (u16 *)window_name, (s64)wcslen(window_name) });
+    if (web_url) p->open_web = Utf16ToUtf8(&p->arena, (WString){ (u16 *)web_url, (s64)wcslen(web_url) });
     p->start_at = at && swscanf_s(at, L"%d,%d,%d,%d", &p->start_rect[0], &p->start_rect[1], &p->start_rect[2], &p->start_rect[3]) == 4;
     p->focused = 1;
     InitKeyTable(p);

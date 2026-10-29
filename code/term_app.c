@@ -333,6 +333,16 @@ typedef struct Viewer {
     struct Viewer *free_next;
 } Viewer;
 
+// Where a dragged tab lands: into a strip before a tab (0: at its end), into a pane, or a new pane beside a node
+// (0: the window's edge, across the root's split).
+typedef struct TabDrop {
+    u64 node_id, before_id;
+    b32 strip;
+    b32 into;                   // join the node's pane as a tab
+    b32 vertical;               // the new pane beside (else above / below)
+    b32 after;                  // right of / below the node
+} TabDrop;
+
 struct App {
     Arena arena;
     Arena frame_arena;
@@ -386,6 +396,8 @@ struct App {
 
     // --- interaction ---
     u64 tab_drag_id;          // the PaneTab picked up out of its strip (0 = none)
+    u32 arrive_tab;           // a server tab dropped here from another window, on its way: it lands at arrive_drop
+    TabDrop arrive_drop;
     s32 grab_offset;
     u32 snap_until_frame;
     Selection sel;
@@ -1843,6 +1855,10 @@ static const AppWebState *FindWebState(const AppFrameInput *in, u64 id)
     return NULL;
 }
 
+// A web page's zoom steps (Chrome's); PaneTab.web_zoom counts from 100%.
+static const f32 g_WebZooms[] = { 0.25f, 0.33f, 0.5f, 0.67f, 0.75f, 0.8f, 0.9f, 1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f };
+enum { WebZoom_Base = 7 };
+
 // The address row's text, as where the page goes: an address (https:// added when it has no scheme), else a search.
 static void WebGo(PaneTab *t, String text)
 {
@@ -1898,6 +1914,45 @@ static PaneTab *FindPaneTab(Panes *panes, u64 id)
         for (PaneTab *t = n->first_tab; t; t = t->next) if (t->id == id) return t;
     }
     return NULL;
+}
+
+// Moves a tab of the panes to where a drop put it, and selects it. Nodes are found again by id: taking the tab out may
+// fold the tree.
+static void DropTabAt(App *app, PaneTab *t, TabDrop d)
+{
+    Panes *panes = &app->panes;
+    if (d.strip) {
+        PaneTab *before = FindPaneTab(panes, d.before_id);
+        if (t->node->id != d.node_id || before != t) {
+            Panes_DetachTab(panes, t);
+            PaneNode *dest = NULL;
+            for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) if (n->id == d.node_id) dest = n;
+            if (!dest) dest = panes->root;
+            while (dest->first_child) dest = dest->first_child;
+            Panes_InsertTab(t, dest, before && before->node == dest ? before : NULL);
+        }
+    } else {
+        Panes_DetachTab(panes, t);
+        PaneNode *node = NULL;
+        for (PaneNode *n = panes->root; n && d.node_id; n = Panes_NextNode(n)) if (n->id == d.node_id) node = n;
+        if (d.into && node) {
+            Panes_InsertTab(t, node, NULL);
+        } else {
+            // the window's edges: into the root group when it splits the same way, else around it
+            if (!d.node_id) {
+                node = panes->root;
+                if (node->first_child && node->vertical == d.vertical) {
+                    node = node->first_child;
+                    if (d.after) while (node->next) node = node->next;
+                }
+            }
+            if (!node) node = panes->root;
+            PaneNode *nn = Panes_InsertSibling(panes, node, d.vertical, d.after);
+            Panes_InsertTab(t, nn, NULL);
+            t->created_frame = app->ui.frame;
+        }
+    }
+    Panes_Select(panes, t);
 }
 
 static void CloseTab(App *app, Frame *f, PaneTab *t, b32 confirmed)
@@ -1973,6 +2028,11 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
     case Cmd_NextPane: if (t) Panes_Select(&app->panes, Panes_Neighbor(&app->panes, t, 1)); break;
     case Cmd_EvenPanes: Panes_EvenChildren(app->panes.root, 1); Panes_ComputeRects(app->panes.root); break;
     case Cmd_ZoomIn: case Cmd_ZoomOut: case Cmd_ZoomReset:
+        if (t && t->web) {
+            // a web tab's page zooms instead of the terminals' text
+            t->web_zoom = cmd == Cmd_ZoomReset ? 0 : Clamp(t->web_zoom + (cmd == Cmd_ZoomIn ? 1 : -1), -WebZoom_Base, (s32)ArrayCount(g_WebZooms) - 1 - WebZoom_Base);
+            break;
+        }
         app->term_font_pt = cmd == Cmd_ZoomReset ? 12 : Clamp(app->term_font_pt + (cmd == Cmd_ZoomIn ? 1 : -1), 6, 72);
         SetSetting(f->out, S("font_size"), Str_PushFormat(f->fa, "%g", (double)app->term_font_pt));
         break;
@@ -2090,7 +2150,11 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         else { app->sidebar_open = 1; app->side_focus = 1; app->side_reveal = 1; }
         break;
     case Cmd_TearOff:
-        if (t && t->term_id) { f->out->tear_off_tab = t->term_id; f->out->tear_off_last = Panes_TabCount(&app->panes) == 1; }
+        if (t && (t->term_id || t->web)) {
+            f->out->tear_off_tab = t->term_id;
+            if (t->web) { f->out->tear_off_web = t->id; f->out->tear_off_url = (String){ t->web_url, t->web_url_len }; }
+            f->out->tear_off_last = Panes_TabCount(&app->panes) == 1;
+        }
         break;
     case Cmd_RenameTab:
         if (t) {
@@ -2350,6 +2414,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         t->created_frame = ui->frame;
         if (!panes->selected) Panes_Select(panes, t);
         app->had_tabs = 1;
+        if (st->id == app->arrive_tab) { DropTabAt(app, t, app->arrive_drop); app->arrive_tab = 0; }   // dropped here from another window
     }
     // the main window, once it has the tab list: the other windows that have tabs (torn off before a restart)
     if (!app->windows_opened && app->tabs_seen && !app->window_name.count) {
@@ -2450,6 +2515,13 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         RequestTab(app, &f, ft ? ft->node : panes->root, TermNew_Shell, in->open_cwd);
         out->open_taken = 1;
         app->first_requested = 1;
+    }
+    // --- a web tab torn off another window: this new window's first tab ---
+    if (in->open_web.count) {
+        PaneNode *leaf = panes->root;
+        while (leaf->first_child) leaf = leaf->first_child;
+        NewWebTab(app, leaf, NULL, Str_Equal(in->open_web, S("about:blank")) ? (String){0} : in->open_web, 0);
+        out->open_web_taken = 1;
     }
     // --- the very first tab: nothing at the server, nothing on the way ---
     if (in->connected && app->tabs_seen && !in->tab_count && !Panes_TabCount(panes) && !app->first_requested && !in->open_request) {
@@ -3217,14 +3289,15 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     u64 strip_drop_node = 0, strip_drop_before = 0;
     PaneTab *drag_tab = FindPaneTab(panes, app->tab_drag_id);
     b32 drag_outside = mouse_x < 0 || mouse_y < 0 || mouse_x >= in->client_w || mouse_y >= in->client_h;
-    if (app->tab_drag_id) {
+    b32 foreign = in->foreign_drag || in->foreign_drop;   // another window's tab: the same buttons, no tab of ours lifted
+    if (app->tab_drag_id || foreign) {
         s32 mx = mouse_x, my = mouse_y;
         b32 in_strip = 0;
         PaneNode *strip_target = NULL;
-        for (PaneNode *n = panes->root; n && drag_tab && !drag_outside && !in_strip; n = Panes_NextNode(n)) {
+        for (PaneNode *n = panes->root; n && (drag_tab || foreign) && !drag_outside && !in_strip; n = Panes_NextNode(n)) {
             if (!n->first_tab || mx < n->px[0] || mx >= n->px[2] || my < n->px[1] || my >= n->px[1] + caption_h) continue;
             in_strip = 1;
-            b32 own = drag_tab->node == n, none = 0;
+            b32 own = drag_tab && drag_tab->node == n, none = 0;
             PaneTab *before = NULL;
             for (PaneTab *x = n->first_tab; x && !before && !none; x = x->next) {
                 if (x == drag_tab && mx >= x->strip_x[0] && mx < x->strip_x[1]) none = own;
@@ -3246,8 +3319,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         for (PaneNode *n = panes->root; n && !drag_outside; n = Panes_NextNode(n)) {
             if (!n->first_child && mx >= n->px[0] && mx < n->px[2] && my >= n->px[1] && my < n->px[3]) leaf = n;
         }
-#define ALONE(n) ((n) && !(n)->first_child && (n)->first_tab == drag_tab && !drag_tab->next)
-        if (drag_tab && !drag_outside && !only_tab) {
+#define ALONE(n) ((n) && drag_tab && !(n)->first_child && (n)->first_tab == drag_tab && !drag_tab->next)
+        if ((drag_tab || foreign) && !drag_outside && !only_tab) {
             f32 top = (f32)caption_h, W = (f32)area_w, H = (f32)area_h;
             // --- the window's edges: a pane the whole window wide (or high) at that side, across the root's split ---
             for (s32 k = 0; k < 4; k++) {
@@ -3350,50 +3423,36 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         if (chosen >= 0) { strip_target = NULL; strip_drop = 0; }
         for (s32 i = 0; i < button_count; i++) Named(app, Str_FromCStr(buttons[i].name), buttons[i].r);
 
+        TabDrop drop = {0};
+        if (strip_target) { drop.strip = 1; drop.node_id = strip_drop_node; drop.before_id = strip_drop_before; }
+        if (chosen >= 0) { drop.node_id = buttons[chosen].node_id; drop.into = buttons[chosen].into; drop.vertical = buttons[chosen].vertical; drop.after = buttons[chosen].after; }
+        b32 drop_spot = strip_target || chosen >= 0;
+        if (drag_tab && drag_outside && ui->dragging && in->input.button[Mouse_Left].down) {
+            out->drag_out = 1;
+            out->drag_out_label = PaneTabLabel(app, drag_tab);
+        }
+        if (in->foreign_drop) {
+            // --- another window's tab dropped here: a server tab lands at the spot once the server hands it over (it may
+            //     have already), a web tab's page opens here again ---
+            PaneTab *t = in->foreign_tab ? Panes_FindTerm(panes, in->foreign_tab) : NULL;
+            if (!in->foreign_tab) {
+                PaneNode *web_leaf = panes->selected ? panes->selected->node : panes->root;
+                while (web_leaf->first_child) web_leaf = web_leaf->first_child;
+                t = NewWebTab(app, web_leaf, panes->selected, Str_Equal(in->foreign_url, S("about:blank")) ? (String){0} : in->foreign_url, 0);
+            }
+            if (t && drop_spot) DropTabAt(app, t, drop);
+            else if (drop_spot) { app->arrive_tab = in->foreign_tab; app->arrive_drop = drop; }
+        }
         if (in->input.button[Mouse_Left].released || !in->input.button[Mouse_Left].down || !drag_tab) {
-            if (drag_tab && in->input.button[Mouse_Left].released && drag_outside && drag_tab->term_id) {
+            if (drag_tab && in->input.button[Mouse_Left].released && drag_outside && (drag_tab->term_id || drag_tab->web)) {
                 // --- dropped outside the window: into the window there, else a new one ---
                 out->tear_off_tab = drag_tab->term_id;
+                if (drag_tab->web) { out->tear_off_web = drag_tab->id; out->tear_off_url = (String){ drag_tab->web_url, drag_tab->web_url_len }; }
                 out->tear_off_drop = 1;
                 out->tear_off_last = Panes_TabCount(panes) == 1;
             }
-            if (drag_tab && in->input.button[Mouse_Left].released && (strip_target || chosen >= 0)) {
-                // --- the drop: into a strip at its marker, into a pane, or a new pane beside a node ---
-                if (strip_target) {
-                    PaneTab *before = FindPaneTab(panes, strip_drop_before);
-                    if (strip_target != drag_tab->node || before != drag_tab) {
-                        Panes_DetachTab(panes, drag_tab);
-                        PaneNode *dest = NULL;   // the detach may have folded the tree: found again
-                        for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) if (n->id == strip_drop_node) dest = n;
-                        if (!dest) dest = panes->root;
-                        while (dest->first_child) dest = dest->first_child;
-                        Panes_InsertTab(drag_tab, dest, before && before->node == dest ? before : NULL);
-                        Panes_Select(panes, drag_tab);
-                    }
-                } else {
-                    DropButton b = buttons[chosen];
-                    Panes_DetachTab(panes, drag_tab);
-                    PaneNode *node = NULL;
-                    for (PaneNode *n = panes->root; n && b.node_id; n = Panes_NextNode(n)) if (n->id == b.node_id) node = n;
-                    if (b.into && node) {
-                        Panes_InsertTab(drag_tab, node, NULL);
-                    } else {
-                        // the window's edges: into the root group when it splits the same way, else around it
-                        if (!b.node_id) {
-                            node = panes->root;
-                            if (node->first_child && node->vertical == b.vertical) {
-                                node = node->first_child;
-                                if (b.after) while (node->next) node = node->next;
-                            }
-                        }
-                        if (!node) node = panes->root;
-                        PaneNode *nn = Panes_InsertSibling(panes, node, b.vertical, b.after);
-                        Panes_InsertTab(drag_tab, nn, NULL);
-                        drag_tab->created_frame = ui->frame;
-                    }
-                    Panes_Select(panes, drag_tab);
-                }
-            }
+            // --- the drop: into a strip at its marker, into a pane, or a new pane beside a node ---
+            if (drag_tab && in->input.button[Mouse_Left].released && drop_spot) DropTabAt(app, drag_tab, drop);
             app->tab_drag_id = 0;
             drag_tab = NULL;
         }
@@ -3672,6 +3731,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             AppWeb *aw = &out->webs[out->web_count++];
             aw->id = o->id;
             aw->popup = o->web_popup;
+            aw->zoom = g_WebZooms[WebZoom_Base + o->web_zoom];
             b32 in_front = o == panes->selected && !o->hidden && in->foreground;
             if (in_front) o->web_needs = 0;
             const AppWebState *ws = FindWebState(in, o->id);
@@ -3689,6 +3749,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
         }
     }
+    if (in->web_torn_off && FindPaneTab(panes, in->web_torn_off)) web_closed = FindPaneTab(panes, in->web_torn_off);   // its page opened in another window
     if (web_closed) {
         // gone from the list this frame too: its page closes
         for (s32 i = 0; i < out->web_count; i++) if (out->webs[i].id == web_closed->id) out->webs[i] = out->webs[--out->web_count];
@@ -4037,6 +4098,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (bs.clicked && can_back) t->web_step = -1;
             if (fs.clicked && can_forward) t->web_step = 1;
             if (rs.clicked) t->web_reload = 1;
+            if (t->web_zoom) {
+                // --- the page's zoom when it isn't 100%: a click puts it back ---
+                String zoom = Str_PushFormat(fa, "%d%%", RoundS32(g_WebZooms[WebZoom_Base + t->web_zoom] * 100));
+                Rect zr = RectCenter(CutRight(&bar, Font_Measure(small, zoom) + R(1.6)), Font_Measure(small, zoom) + R(1.2), R(2.0));
+                CutRight(&bar, R(0.4));
+                UiSignal zs = Ui_Hit(ui, Ui_IdN(Ui_Id("WebZoom"), n->id), zr);
+                Draw_Rect(dl, zr, zs.hovered ? c->hover : ColorMix(c->bg, c->text, 0.06f), radius_small);
+                Draw_TextIn(dl, small, zr, c->dim, zoom, 0.5f);
+                Ui_Tooltip(ui, Ui_IdN(Ui_Id("WebZoom"), n->id), S("Back to 100%   Ctrl+0"));
+                Named(app, Str_PushFormat(fa, "web zoom %d", pane_index), zr);
+                if (zs.clicked) t->web_zoom = 0;
+            }
             Rect ar = RectCenter(bar, RectW(bar), R(2.0));
             b32 editing = app->web_edit_tab == t->id;
             Draw_RectEx(dl, ar, ColorMix(c->bg, c->text, 0.06f), editing ? c->accent : c->line, 1, radius_small, NULL, 0, 0, 0);
@@ -4059,6 +4132,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             UiSignal ps = Ui_Hit(ui, Ui_IdN(Ui_Id("Web"), n->id), body);
             if (ps.pressed && t != panes->selected) Panes_Select(panes, t);
+            if (ps.hovered && in->input.wheel[1] && (in->input.modifiers & Mod_Ctrl) && !modal) {
+                // Ctrl+wheel zooms the page (the platform keeps it from the page)
+                t->web_zoom = Clamp(t->web_zoom + (in->input.wheel[1] > 0 ? 1 : -1), -WebZoom_Base, (s32)ArrayCount(g_WebZooms) - 1 - WebZoom_Base);
+            }
             for (s32 i = 0; i < out->web_count; i++) {
                 if (out->webs[i].id != t->id) continue;
                 out->webs[i].rect = body;
@@ -5089,7 +5166,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     }
 
     // --- the tab drag: its preview under the buttons, the buttons, the tab by the pointer ---
-    if (drag_tab && !drag_outside) {
+    if ((drag_tab || in->foreign_drag) && !drag_outside) {
         u32 bg = c->bg, fg = c->text, accent = c->accent;
         u32 button_bg = ColorMix(bg, 0xFF000000u, 0.28f), button_edge = ColorMix(bg, fg, 0.35f);
         u32 cell_bg = ColorMix(bg, 0xFF000000u, 0.15f), cell_edge = ColorMix(bg, fg, 0.3f);
@@ -5131,7 +5208,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             (f32)line_w, Max(1.0f, radius_large - (f32)cell_pad), NULL, 0, 0, 0);
             }
         }
-        if (ui->dragging) {
+        if (ui->dragging || in->foreign_drag) {
             // --- by the pointer: the tab dragged, and what a drop does ---
             Rect card = R4(mouse_x + R(0.25), mouse_y + R(0.75), mouse_x + R(0.25) + R(13), mouse_y + R(0.75) + R(4.2));
             PopupBox(app, card, radius_medium);
@@ -5140,7 +5217,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             f32 radii[4] = { radius_medium, radius_medium, 0, 0 };
             Draw_RectEx(dl, name_r, c->bg, 0, 0, 0, radii, 0, 0, 0);
             CutLeft(&name_r, R(0.7));
-            Draw_TextIn(dl, font, name_r, c->text, PaneTabLabel(app, drag_tab), 0);
+            Draw_TextIn(dl, font, name_r, c->text, drag_tab ? PaneTabLabel(app, drag_tab) : in->foreign_label, 0);
             Draw_TextIn(dl, font, top, c->dim, S("Move"), 0.5f);
         }
     }
