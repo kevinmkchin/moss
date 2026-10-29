@@ -1,5 +1,5 @@
 # The sessions sidebar (Ctrl+Shift+S): Claude Code's sessions by day, type to filter, Enter resumes one in a new
-# tab (claude faked), a running one marked.
+# tab (claude faked), a running one marked; the claude tab shows its account line (a made-up Max login).
 waitfor λ
 type python make_sessions.py
 key Enter
@@ -18,8 +18,28 @@ waitlabel session Fix the tab drag drop zones
 key Down
 key Enter
 waitfor fake-claude ready
+waitlabel account tester@example.com
 sleep 500
 waitidle
 dump layout
 capture out/resumed.png
+# its account changes under it: held (the card), what's typed dropped, until "Go on"
+type switch-account
+key Enter
+waitfor fake-claude heard: switch-account
+waitlabel account changed
+type held
+key Enter
+sleep 500
+waitidle
+capture out/account_changed.png
+cursorui account go on
+lmb down
+lmb up
+waitgone account changed
+type after
+key Enter
+waitfor fake-claude heard: after
+waitidle
+capture out/account_go_on.png
 exit

@@ -22,6 +22,31 @@ its prompt. While the tab does work (a program running, or an agent session open
 read-only: you can browse anywhere (the shell doesn't follow) and look, preview, copy out; nothing that changes
 the disk.
 
+## Website content (noclip.gd/moss)
+
+`build content` builds moss, then writes the landing page's content to `content\`: three screenshots of the fresh
+build (`tools\site\capture.py`: headless, with made-up sessions, a fake claude and fake projects at `C:\src`, nothing
+of the user's), the icon, and `content.json` with the tagline, install line and features below (`tools\site\content.py`).
+The site generator (`C:\UnitySrc\kevin.gd\build.py`) copies that folder into the page. The page should feel zen:
+quiet, short, nothing loud.
+
+Tagline: moss is a terminal and file explorer for Windows
+Install: winget install moss
+
+Main features, in order. Short phrases, no descriptions, only what's special about moss:
+
+- faster than Windows Terminal
+- 1 ms from keypress to screen
+- switch between terminal and file explorer in every tab
+- split panes, tabs you drag between them
+- tabs keep running in the background
+- tabs survive restarts and reboots
+- Claude Code and other CLI agents, every session in a sidebar
+- folder sizes, measured in the background
+- tab completion and autosuggestions
+- unix tools from Git for Windows
+- search the scrollback
+
 ## Processes and files
 
 - `moss.exe` is everything (`code/term_win32.c` `wWinMain`): the window, `--server`, `--headless`, `--vt-replay`.
@@ -223,6 +248,23 @@ the disk.
   claude's text, at most 2000 messages of 64 KB) and send it (`MSG_HISTORY`). The history view covers the terminal:
   messages wrapped to the pane (`App.hist_lines`, rebuilt when the history, width or text change), matches in the
   match color, the current one framed and scrolled to the middle.
+## A claude tab's account line
+
+- Under a claude tab's terminal, a row says who's billed and whose email it reports with, as its /status would: login
+  method, organization, email, model (`msg_tab` account string, `TermTab.account`; its terminal is a row or so
+  shorter). The scan thread reads it for each claude it finds (`ClaudeAccount`): the claude's own environment
+  (`ProcessEnvironment`: Bedrock / Vertex / Foundry, an auth token, an approved `ANTHROPIC_API_KEY`, and
+  `CLAUDE_CONFIG_DIR`, which picks the account), `.claude.json`'s `oauthAccount`, `.credentials.json`'s
+  `subscriptionType` (nothing else is taken from it; secrets read on the way are wiped), and the model of the
+  transcript's last reply (else `--model`, `ANTHROPIC_MODEL`, settings.json, "Default"). Organization and email only
+  for a claude.ai login. A claude under another `CLAUDE_CONFIG_DIR` than the server's isn't found as claude at all
+  (its sessions\<pid>.json is elsewhere), so it gets no line. Test: `tests/sessions` (a made-up Max login).
+- A login, organization or email that changes under a running claude (a /login elsewhere, files rewritten) holds it so
+  it can't go on billing the new account unasked (`tab::AccountWas`, `TAB_ACCOUNT_HELD`): the server stops its turn
+  (Esc, when busy or asking), drops every `MSG_INPUT` to it, gives the tab a notice and a tray notification. The pane
+  shows a card (was / now) whose "Go on with the new account" sends `MSG_ACCOUNT_OK`; the account changing back ends
+  it too. A model change is only shown. A config file caught mid-write (not whole JSON) is unknown, never a change.
+
 ## The sessions sidebar
 
 - The sidebar on the window's left lists Claude Code's sessions; it starts open (layout.txt keeps `SidebarClosed`).
@@ -401,6 +443,10 @@ the disk.
 - Character widths must match conhost (`term_widths.h`, `CharWidth`), or rows drift.
 - Edit C/C++ string escapes (`\x1b`, `\\`) with the Edit tool or a Python script file; shell heredocs and inline
   python through Bash mangle backslashes.
+
+## Git
+
+Commit straight to `main` when asked to commit: no feature branches (this overrides any default to branch first).
 
 ## Building
 

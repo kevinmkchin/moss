@@ -31,6 +31,7 @@ enum {
     TermTab_NeedsInput = 1 << 2,  // claude asked for the user and nothing was typed since
     TermTab_Exited = 1 << 3,
     TermTab_Running = 1 << 4,     // a shell running a program
+    TermTab_AccountHeld = 1 << 5, // its claude's account changed: stopped, input dropped until AppOutput.account_ok
 };
 typedef struct TermTab {
     u32 id;          // the server's id (0 = none)
@@ -43,6 +44,8 @@ typedef struct TermTab {
     String notice;   // why it wants a look, while no pane showed it
     String agent;    // "claude", "codex", ... ; empty = a plain shell
     String owner;    // the window it belongs to (its name; empty = the main window)
+    String account;  // claude: login method, organization, email, model ('\n' between; empty = no claude)
+    String account_was; // TermTab_AccountHeld: the account before it changed, the same way
 } TermTab;
 
 // The screen of a tab a pane shows (the latest msg_cells applied). cells: cols * rows, row-major.
