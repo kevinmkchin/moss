@@ -301,6 +301,7 @@ typedef struct Chat {
     u32 pending_at;
     u64 sent_us;
     u64 changed_us;           // when a reply last changed them (more may follow)
+    u64 ended_us;             // when its claude's turn last ended
     // --- laid out: the lines' text in arena (each message's from where built_at says, so a message and those after it
     //     are built again alone), the lists in lists_arena, the matches in match_arena ---
     Arena arena, lists_arena, match_arena;
@@ -3094,13 +3095,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         const TermGrid *vg = FindGrid(in, vt->term_id);
         b32 busy = (st && (st->flags & TermTab_Busy)) || ClaudeWorking(vg, ClaudePromptBox(vg));
         if (cv->pending_len && now > cv->sent_us + 20000000) { cv->pending_len = 0; ChatRebuild(cv, cv->msgs.count); }   // never came: let it go
-        b32 polling = busy || cv->pending_len || now < cv->sent_us + 4000000 || now < cv->changed_us + 4000000;   // a turn may end before it's seen busy
-        if ((!cv->asked_us || (cv->busy && !busy) || (polling && now >= cv->asked_us + 400000)) && out->history_ask_count < (s32)ArrayCount(out->history_asks)) {
+        // every 400 ms while a turn runs, 4 s after a send, a change or the turn's end (its last reply can land in the
+        // transcript a moment after claude's screen says it's done); else every 5 s, for anything missed
+        if (cv->busy && !busy) cv->ended_us = now;
+        b32 polling = busy || cv->pending_len || now < cv->sent_us + 4000000 || now < cv->changed_us + 4000000 || now < cv->ended_us + 4000000;
+        u64 every = polling ? 400000 : 5000000;
+        if ((!cv->asked_us || now >= cv->asked_us + every) && out->history_ask_count < (s32)ArrayCount(out->history_asks)) {
             out->history_asks[out->history_ask_count++] = (TermHistoryAsk){ vt->term_id, cv->stable, cv->version };
             cv->asked_us = now;
         }
         cv->busy = busy;
-        if (polling && (!out->wake_at_us || cv->asked_us + 400000 < out->wake_at_us)) out->wake_at_us = cv->asked_us + 400000;
+        if (!out->wake_at_us || cv->asked_us + every < out->wake_at_us) out->wake_at_us = cv->asked_us + every;
     }
     // --- Enter for a prompt typed a moment ago: on its own, as the key, so claude takes it as sending ---
     for (s32 k = 0; k < (s32)ArrayCount(app->enters); k++) {

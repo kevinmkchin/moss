@@ -280,7 +280,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   ◐◓◑◒ spinner and claude's own status line (the row over its box, its mark dropped; else "Working…") above the box, a
   stop button. The wheel scrolls anywhere over the view (rows and code blocks take the hover).
 - Live: the window asks for the history (`AppOutput.history_asks`: tab, from, have) when it shows, every 400 ms while
-  a turn runs or 4 s after a send or a change, and once when the turn ends. The server keeps each tab's transcript read
+  a turn runs or 4 s after a send, a change or the turn's end (its last reply can land in the transcript a moment
+  after claude's screen says it's done), else every 5 s. The server keeps each tab's transcript read
   so far (`history_cache` in term_sessions.cpp: `ReadHistoryMore` reads only what was written since, the first time
   the last 16 MB; another session or a shorter file starts over; versions count server-wide from the clock) and
   answers `MSG_HISTORY` with the messages from `from` on, or nothing if unchanged (protocol 18; 19: kinds 3 and 4). `Stable`: the messages
