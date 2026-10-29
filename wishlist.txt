@@ -5,11 +5,6 @@ File browser preview
 - It shows markdown (rendered), images, and text.
 - Arrow keys (or the like) cycle through the folder's entries while the preview is open.
 
-Web browser
-- A browser in a pane. It need not have every feature of the newest browsers (Chrome and the like), only enough
-  for the web apps that matter: Slack, Spotify, x.com, GitHub, reddit.com.
-- Stretch goal: youtube.com.
-
 Claude tabs as comfortable as Claude Desktop (keep Claude Code's own TUI; moss adds around it)
 (Done: the composer, the reader, clean copy, the clickable account line, full-text search with rename / pin / archive.)
 Next:

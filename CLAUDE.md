@@ -166,6 +166,9 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - Ctrl+Shift+Z (`zoom_pane`) shows the focused pane over the whole area (`App.zoom_node`; its strip gets a "back"
   button); the other panes wait behind it, watched at their own sizes. Focusing another pane, or the pane going,
   ends it.
+- A strip with more tabs than fit at their narrowest scrolls, as Sublime's does (`PaneNode.strip_scroll`): the wheel
+  over it (either way), a reorder drag held near an end; a tab newly shown is scrolled into view (`strip_seen`), the
+  new tab button stays at the end, the ends fade where tabs are scrolled away, and tabs scrolled out take no clicks.
 - "Rename tab" (palette) or a double-click on a tab edits its name in the strip (Enter keeps, Esc drops, empty =
   the server's name again): `PaneTab.title`, kept in layout.txt (`Title`), used by the strip, the window title,
   the palette and layout dumps.
@@ -509,6 +512,12 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   page can't move between processes (every moss window is one), so a video starts over. A new window gets it with
   `--web URL` (`AppFrameInput.open_web`); the tab here goes once it's there (`AppFrameInput.web_torn_off`). A window with
   only web tabs owns nothing at the server, so tray Quit doesn't bring it back.
+- History: every page a web tab goes to (`WebVisit`, `App.web_hist`: url, title, visits, last visit; 300, newest first)
+  is kept in `%LOCALAPPDATA%\moss\web-history.txt` (`<last visit, s since 1601> <visits> <url>\t<title>`; headless and
+  test runs: none; written at once for a visit, a title change within 10 s). While the address is edited, up to 8 of
+  them show under it (`web_sugg`, drawn after the panes): those with the typed text in the address or title, ranked by
+  visits over age, 8x for an address starting with it; nothing typed yet (the page's own address) shows the most
+  visited. Up / Down pick one, Enter or a click goes there, Shift+Delete takes it out of the history.
 - Data (logins, cookies) in `%LOCALAPPDATA%\moss\web`; test and instance runs in `%TEMP%\moss-web-<instance>`.
 - Headless runs have no pages (the page's rect stays black; `tests/session` keeps a web tab across a restart).
   `moss --web-probe URL OUT.png` loads one in a window no one sees and logs what the engine can do there (Widevine,

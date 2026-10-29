@@ -72,6 +72,7 @@ typedef struct AppInit {
     s32 place_count;            // the known folders, for the go-to box's Places
     AppPlace places[8];
     String paths_text;          // paths.txt: `recent <path>` (newest first) and `bookmark <path>` lines
+    String web_history_text;    // web-history.txt: `<last visit, s> <visits> <url>\t<title>` lines, newest first
 } AppInit;
 
 typedef struct AppFrameInput {
@@ -220,6 +221,7 @@ typedef struct AppOutput {
     u32 link_tab, link_id;      // an OSC 8 link Ctrl+clicked: the server sends its URI to open (TermClient_TakeLink)
     String session_text;        // non-empty: save the layout
     String paths_text;          // non-empty: save paths.txt (recent folders, bookmarks)
+    String web_history_text;    // non-empty: save web-history.txt (pages web tabs went to)
     b32 set_window_placement;   // the saved window place (first frame after a restored layout)
     s32 placement_rect[4];      // x, y, w, h
     b32 placement_maximized;

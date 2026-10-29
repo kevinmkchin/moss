@@ -266,6 +266,10 @@ typedef struct HistLine {
 } HistLine;
 typedef struct HistMatch { s32 line, start, len; } HistMatch;
 
+// A page in the web history (web-history.txt): where, its title, how often and when last (seconds since 1601).
+typedef struct WebVisit { u8 url[512]; s32 url_len; u8 title[128]; s32 title_len; u32 visits; s64 last; } WebVisit;
+enum { App_MaxWebVisits = 300, App_MaxWebSuggest = 8 };
+
 // A tab's other face: its folder listed. Listings come from the platform's lister (term_files.h), a folder watched
 // while shown is listed again when it changes.
 typedef struct Browser {
@@ -508,6 +512,14 @@ struct App {
     u8 bookmark[32][520];     // folders bookmarked (Ctrl+D, the path bar's star), in the order they were added
     s32 bookmark_len[32], bookmark_count;
     b32 paths_dirty;          // save paths.txt
+    WebVisit web_hist[App_MaxWebVisits];   // newest first
+    s32 web_hist_count;
+    u8 web_hist_dirty;        // save web-history.txt: 2 a visit (now), 1 only a title (within 10 s)
+    u64 web_hist_saved_us;
+    s32 web_sugg[App_MaxWebSuggest];   // the address row's suggestions (web_hist indices), as drawn last frame
+    s32 web_sugg_count;
+    s32 web_pick;             // the one picked with the arrows (1-based; 0: the typed text)
+    b32 web_sugg_hover;       // the mouse was over them (a press there doesn't end the edit)
     s32 setting_editing;      // the Setting_* + 1 whose text is being edited in its row
     TextEdit setting_edit;
     u64 confirm_tab;          // PaneTab id waiting for "close anyway"
@@ -1033,6 +1045,29 @@ App *App_Create(const AppInit *init)
             memcpy(app->bookmark[app->bookmark_count], path.data, (size_t)path.count);
             app->bookmark_len[app->bookmark_count++] = (s32)path.count;
         }
+    }
+    for (s64 at = 0; at < init->web_history_text.count && app->web_hist_count < App_MaxWebVisits;) {
+        // web-history.txt: `<last visit> <visits> <url>\t<title>`
+        s64 end = at;
+        while (end < init->web_history_text.count && init->web_history_text.data[end] != '\n') end++;
+        String line = { init->web_history_text.data + at, end - at };
+        at = end + 1;
+        if (line.count && line.data[line.count - 1] == '\r') line.count--;
+        long long last = 0;
+        unsigned visits = 0;
+        int head = 0;
+        char head_buf[64] = {0};
+        memcpy(head_buf, line.data, (size_t)Min(line.count, 63));
+        if (sscanf_s(head_buf, "%lld %u %n", &last, &visits, &head) < 2 || head <= 0) continue;
+        String rest = { line.data + head, line.count - head };
+        s64 tab = 0;
+        while (tab < rest.count && rest.data[tab] != '\t') tab++;
+        WebVisit *v = &app->web_hist[app->web_hist_count];
+        v->url_len = (s32)CopyInto(v->url, sizeof(v->url), (String){ rest.data, tab }).count;
+        v->title_len = tab < rest.count ? (s32)CopyInto(v->title, sizeof(v->title), (String){ rest.data + tab + 1, rest.count - tab - 1 }).count : 0;
+        v->visits = visits;
+        v->last = last;
+        if (v->url_len) app->web_hist_count++;
     }
     app->theme_shown = app->term_theme;   // the first frame shows it at once
 
@@ -1893,6 +1928,7 @@ static void StartWebEdit(App *app, const AppFrameInput *in, PaneTab *t)
     String url = ws && ws->url.count ? ws->url : (String){ t->web_url, t->web_url_len };
     TextEdit_Set(&app->web_edit, Str_Equal(url, S("about:blank")) ? (String){0} : url);
     app->web_edit_tab = t->id;
+    app->web_pick = 0;
 }
 
 // A web tab in `leaf` (after `after`, else at the end), shown and focused; its page goes to `url` (empty: none yet).
@@ -2750,10 +2786,32 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (consumed[i]) continue;
             consumed[i] = 1;
             if (!events[i].down) continue;
-            if (events[i].key == Key_Enter || events[i].key == Key_KeypadEnter) { WebGo(web_editing, TextEdit_String(&app->web_edit)); app->web_edit_tab = 0; }
-            if (events[i].key == Key_Escape) app->web_edit_tab = 0;
+            u32 key = events[i].key;
+            u8 mods = events[i].modifiers & (Mod_Ctrl | Mod_Alt | Mod_Shift);
+            s32 picked = app->web_pick > 0 && app->web_pick <= app->web_sugg_count ? app->web_sugg[app->web_pick - 1] : -1;
+            if (key == Key_Enter || key == Key_KeypadEnter) {
+                // the suggestion picked, else the typed text
+                WebGo(web_editing, picked >= 0 ? (String){ app->web_hist[picked].url, app->web_hist[picked].url_len } : TextEdit_String(&app->web_edit));
+                app->web_edit_tab = 0;
+            } else if (key == Key_Escape) {
+                app->web_edit_tab = 0;
+            } else if (key == Key_Up || key == Key_Down) {
+                // the suggestions: Down from the text to the first, Up back to the text
+                ui->consumed[i] = 1;
+                app->web_pick = Clamp(app->web_pick + (key == Key_Down ? 1 : -1), 0, app->web_sugg_count);
+            } else if (key == Key_Delete && mods == Mod_Shift && picked >= 0) {
+                // Shift+Delete: the picked page out of the history
+                ui->consumed[i] = 1;
+                memmove(&app->web_hist[picked], &app->web_hist[picked + 1], sizeof(WebVisit) * (size_t)(app->web_hist_count - picked - 1));
+                app->web_hist_count--;
+                app->web_hist_dirty = 2;
+                app->web_sugg_count = 0;
+                app->web_pick = 0;
+            } else if (key) {
+                app->web_pick = 0;   // typing: the text again
+            }
         }
-        if (in->input.button[Mouse_Left].pressed && ui->hot != Ui_Id("WebAddress")) app->web_edit_tab = 0;
+        if (in->input.button[Mouse_Left].pressed && ui->hot != Ui_Id("WebAddress") && !app->web_sugg_hover) app->web_edit_tab = 0;
     }
 
     // --- the find bar: a click in the pane gives the keyboard back to the terminal, one on the bar takes it; while it
@@ -3724,6 +3782,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     //     Their address and title follow the page; one that closed itself goes; a notification while it isn't in front
     //     goes to the tray and puts a dot on its tab until it's shown ---
     b32 web_shown = 0;
+    PaneTab *web_sugg_tab = NULL;   // the web tab whose address is edited, and where its suggestions go (under it)
+    Rect web_sugg_at = {0};
     PaneTab *web_closed = NULL;
     for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
         for (PaneTab *o = n->first_tab; o; o = o->next) {
@@ -3737,6 +3797,30 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             const AppWebState *ws = FindWebState(in, o->id);
             if (!ws) continue;
             o->web_title_len = (s32)CopyInto(o->web_title, sizeof(o->web_title), ws->title).count;
+            if (ws->url.count && !Str_Equal(ws->url, S("about:blank")) && ws->url.count < (s64)sizeof(app->web_hist[0].url)) {
+                // --- the web history: a page the tab moved to (or one not in it yet) is a visit, first in the list; its
+                //     title follows the page ---
+                s32 k = 0;
+                while (k < app->web_hist_count && !Str_Equal((String){ app->web_hist[k].url, app->web_hist[k].url_len }, ws->url)) k++;
+                if (k == app->web_hist_count || !Str_Equal(ws->url, (String){ o->web_url, o->web_url_len })) {
+                    b32 is_new = k == app->web_hist_count;
+                    WebVisit v = is_new ? (WebVisit){0} : app->web_hist[k];
+                    if (is_new) k = Min(app->web_hist_count, App_MaxWebVisits - 1);   // full: the oldest goes
+                    memmove(&app->web_hist[1], &app->web_hist[0], sizeof(WebVisit) * (size_t)k);
+                    v.url_len = (s32)CopyInto(v.url, sizeof(v.url), ws->url).count;
+                    v.visits++;
+                    v.last = (s64)(in->wall_time / 10000000ull);
+                    app->web_hist[0] = v;
+                    app->web_hist_count = Min(app->web_hist_count + is_new, App_MaxWebVisits);
+                    app->web_hist_dirty = 2;
+                    k = 0;
+                }
+                WebVisit *v = &app->web_hist[k];
+                if (ws->title.count && !Str_Equal(ws->title, (String){ v->title, v->title_len })) {
+                    v->title_len = (s32)CopyInto(v->title, sizeof(v->title), ws->title).count;
+                    app->web_hist_dirty = Max(app->web_hist_dirty, 1);
+                }
+            }
             if (ws->url.count) o->web_url_len = (s32)CopyInto(o->web_url, sizeof(o->web_url), ws->url).count;
             if (ws->close_requested) web_closed = o;
             if (ws->notices != o->web_notices_seen) {
@@ -3837,8 +3921,27 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s32 tab_w = Clamp(avail / Max(1, tab_count), R(9), R(16));
             f32 r_tab = (radius_medium + radius_large) * 0.5f;
             s32 fs = Max(1, RoundS32(radius_medium) - R(0.2));   // the concave corners' size
-            Draw_PushClip(dl, R4(row.x0 - fs, strip.y0, row.x1, strip.y1));
-            s32 x = row.x0, gap_px = 0, index = 0;
+            // --- more tabs than fit at their narrowest: the strip scrolls (the wheel over it, a reorder drag near its
+            //     ends), the new tab button stays at its end, and a newly shown tab is scrolled into view ---
+            Rect tabs_r = R4(row.x0, row.y0, row.x1 - button_w - R(0.4), row.y1);
+            s32 tab_step = tab_w + tab_gap;
+            s32 tabs_total = tab_count * tab_step + (strip_drop && strip_drop_node == n->id ? tab_step : 0);
+            b32 overflow = tabs_total > RectW(tabs_r) + (at_top ? R(5) : 0);   // a little over goes into the window's drag room
+            if (overflow && !modal && (in->input.wheel[0] || in->input.wheel[1]) && RectHas(strip, mouse_x, mouse_y)) {
+                n->strip_scroll += (in->input.wheel[0] - in->input.wheel[1]) * tab_step / 240;
+            }
+            PaneTab *strip_shown = Panes_VisibleTab(n);
+            if (strip_shown && strip_shown->id != n->strip_seen) {
+                n->strip_seen = strip_shown->id;
+                s32 k = 0;
+                for (PaneTab *o = n->first_tab; o && o != strip_shown; o = o->next) k++;
+                if (k * tab_step < n->strip_scroll) n->strip_scroll = k * tab_step;
+                if (k * tab_step + tab_w > n->strip_scroll + RectW(tabs_r)) n->strip_scroll = k * tab_step + tab_w - RectW(tabs_r);
+            }
+            n->strip_scroll = overflow ? Clamp(n->strip_scroll, 0, tabs_total - RectW(tabs_r)) : 0;
+            b32 reordering = 0;   // a tab of this strip dragged along it
+            Draw_PushClip(dl, R4(row.x0 - (n->strip_scroll ? 0 : fs), strip.y0, overflow ? tabs_r.x1 : row.x1, strip.y1));
+            s32 x = row.x0 - n->strip_scroll, gap_px = 0, index = 0;
             for (PaneTab *o = n->first_tab;; o = o->next, index++) {
                 // --- the drop gap before this tab, or after the last one ---
                 if (strip_drop && strip_drop_node == n->id && strip_drop_before == (o ? o->id : 0)) {
@@ -3856,8 +3959,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 u64 tid = Ui_IdN(Ui_Id("Tab"), o->id), cid = Ui_IdN(Ui_Id("TabClose"), o->id);
                 Rect tr = R4(x, row.y0, x + tab_w, strip.y1);
                 Rect close = RectCenter(R4(tr.x1 - R(2.4), tr.y0, tr.x1 - R(0.4), tr.y1), R(2.0), Min(R(2.0), RectH(tr) - R(0.4)));
-                UiSignal ts = Ui_Hit(ui, tid, tr);
-                UiSignal cs = Ui_Hit(ui, cid, close);
+                UiSignal ts = Ui_Hit(ui, tid, overflow ? RectAnd(tr, tabs_r) : tr);   // scrolled out of the strip: not there
+                UiSignal cs = Ui_Hit(ui, cid, overflow ? RectAnd(close, tabs_r) : close);
                 b32 hovered = ts.hovered || cs.hovered || cs.held;
                 o->strip_x[0] = tr.x0 - gap_px;
                 o->strip_x[1] = tr.x1 - gap_px;
@@ -3949,6 +4052,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     if (abs(mouse_y - ui->press_y) > caption_h) { ui->dragging = 1; app->tab_drag_id = o->id; }
                     if (ui->dragging && !app->tab_drag_id) {
                         // reorder: o goes where the mouse is among the others (their places last frame)
+                        reordering = 1;
                         s32 to = 0, k = 0;
                         for (PaneTab *xo = n->first_tab; xo; xo = xo->next, k++) {
                             if (xo != o && mouse_x > (xo->strip_x[0] + xo->strip_x[1]) / 2) to = k + (k < index ? 1 : 0);
@@ -3967,7 +4071,26 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 x = tr.x1 + tab_gap;
             }
             Draw_PopClip(dl);
-            // --- the new tab button ---
+            if (overflow) {
+                // the ends fade where more tabs are scrolled away; a reorder drag held near an end scrolls that way
+                s32 fade_w = R(2.4), steps = 8;
+                for (s32 side = 0; side < 2; side++) {
+                    if (side == 0 ? n->strip_scroll <= 0 : n->strip_scroll >= tabs_total - RectW(tabs_r)) continue;
+                    for (s32 k = 0; k < steps; k++) {
+                        s32 a = k * fade_w / steps, b = (k + 1) * fade_w / steps;
+                        Rect fr = side == 0 ? R4(tabs_r.x0 + a, row.y0, tabs_r.x0 + b, strip.y1 - line_w) : R4(tabs_r.x1 - b, row.y0, tabs_r.x1 - a, strip.y1 - line_w);
+                        Draw_Rect(dl, fr, ColorAlpha(c->caption, 1.0f - (f32)k / (f32)steps), 0);
+                    }
+                }
+                if (reordering) {
+                    s32 edge = R(2.5), speed = R(0.8);
+                    if (mouse_x < tabs_r.x0 + edge) n->strip_scroll -= speed;
+                    if (mouse_x > tabs_r.x1 - edge) n->strip_scroll += speed;
+                    if (mouse_x < tabs_r.x0 + edge || mouse_x > tabs_r.x1 - edge) ui->animating = 1;
+                }
+            }
+            // --- the new tab button: after the tabs, at the strip's end while they scroll ---
+            if (overflow) x = tabs_r.x1;
             Rect nb = R4(x, row.y0 + R(0.1), x + button_w, row.y0 + R(0.1) + button_w);
             UiSignal ns = IconButton(app, Ui_IdN(Ui_Id("NewTab"), n->id), nb, Icon_Add, icons_small, c->dim, c->hover, radius_medium,
                                      Str_PushFormat(fa, "new tab %d", pane_index));
@@ -4115,6 +4238,45 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Draw_RectEx(dl, ar, ColorMix(c->bg, c->text, 0.06f), editing ? c->accent : c->line, 1, radius_small, NULL, 0, 0, 0);
             if (editing) {
                 Ui_TextEdit(ui, Ui_Id("WebAddress"), &app->web_edit, RectShrink(ar, R(0.4)), font, 1, S("Address or search"), c->text, c->dim, c->selection);
+                // --- the history's pages that match the typed text (in the address or the title; nothing typed: all),
+                //     the most visited and recent first, an address starting with it before the rest. Drawn after the
+                //     panes (over the ones below) ---
+                String q = TextEdit_String(&app->web_edit);
+                String shown_url = { t->web_url, t->web_url_len };
+                b32 untouched = Str_Equal(q, shown_url);   // the page's own address, not typed yet: the most visited
+                f32 scores[App_MaxWebSuggest] = {0};
+                s64 now_s = (s64)(in->wall_time / 10000000ull);
+                app->web_sugg_count = 0;
+                for (s32 k = 0; k < app->web_hist_count; k++) {
+                    WebVisit *v = &app->web_hist[k];
+                    String url = { v->url, v->url_len }, title = { v->title, v->title_len };
+                    String bare = url;   // no scheme, no www.
+                    for (s64 x = 0; x + 3 <= bare.count; x++) if (!memcmp(bare.data + x, "://", 3)) { bare.data += x + 3; bare.count -= x + 3; break; }
+                    if (bare.count > 4 && !memcmp(bare.data, "www.", 4)) { bare.data += 4; bare.count -= 4; }
+                    b32 starts = 0;
+                    if (q.count && !untouched) {
+                        b32 in_url = 0, in_title = 0;
+                        for (s64 x = 0; x + q.count <= url.count && !in_url; x++) in_url = Str_EqualNoCase((String){ url.data + x, q.count }, q);
+                        for (s64 x = 0; x + q.count <= title.count && !in_title; x++) in_title = Str_EqualNoCase((String){ title.data + x, q.count }, q);
+                        if (!in_url && !in_title) continue;
+                        starts = (q.count <= bare.count && Str_EqualNoCase((String){ bare.data, q.count }, q)) ||
+                                 (q.count <= url.count && Str_EqualNoCase((String){ url.data, q.count }, q));
+                    }
+                    f32 days = (f32)Max((s64)0, now_s - v->last) / 86400.0f;
+                    f32 score = (1.0f + (f32)v->visits) / (1.0f + days / 7.0f) * (starts ? 8.0f : 1.0f);
+                    s32 at = app->web_sugg_count;
+                    while (at > 0 && scores[at - 1] < score) at--;
+                    if (at >= App_MaxWebSuggest) continue;
+                    s32 keep = Min(app->web_sugg_count, App_MaxWebSuggest - 1);
+                    memmove(&app->web_sugg[at + 1], &app->web_sugg[at], sizeof(s32) * (size_t)(keep - at));
+                    memmove(&scores[at + 1], &scores[at], sizeof(f32) * (size_t)(keep - at));
+                    app->web_sugg[at] = k;
+                    scores[at] = score;
+                    app->web_sugg_count = keep + 1;
+                }
+                app->web_pick = Min(app->web_pick, app->web_sugg_count);
+                web_sugg_tab = t;
+                web_sugg_at = R4(ar.x0, ar.y1 + R(0.3), ar.x1, ar.y1 + R(0.3));
             } else {
                 UiSignal as = Ui_Hit(ui, Ui_IdN(Ui_Id("WebBar"), n->id), ar);
                 if (as.hovered) ui->cursor = Cursor_IBeam;
@@ -5047,6 +5209,45 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
 
     c = &app->c;
     if (close_later) CloseTab(app, &f, close_later, 0);
+
+    // --- the address row's suggestions, under it, over the page: a click (or Up / Down, Enter) goes there ---
+    app->web_sugg_hover = 0;
+    if (web_sugg_tab && app->web_sugg_count && app->web_edit_tab == web_sugg_tab->id) {
+        s32 row_h = R(2.4), pad = R(0.4);
+        Rect box = web_sugg_at;
+        box.y1 = box.y0 + 2 * pad + app->web_sugg_count * row_h;
+        box.y1 = Min(box.y1, in->client_h - R(0.5));
+        UiSignal bs = Ui_Hit(ui, Ui_Id("WebSuggest"), box);
+        PopupBox(app, box, radius_medium);
+        Rect rows_r = RectShrink(box, pad);
+        for (s32 k = 0; k < app->web_sugg_count && RectH(rows_r) >= row_h; k++) {
+            WebVisit *v = &app->web_hist[app->web_sugg[k]];
+            String url = { v->url, v->url_len }, title = { v->title, v->title_len };
+            Rect row = CutTop(&rows_r, row_h);
+            u64 row_id = Ui_IdN(Ui_Id("WebSuggestRow"), (u64)k);
+            UiSignal rs = Ui_Hit(ui, row_id, row);
+            if (k + 1 == app->web_pick) Draw_Rect(dl, row, c->selection, radius_small);
+            else Draw_Rect(dl, row, HoverFill(app, row_id, rs, c->hover), radius_small);
+            Rect in_row = row;
+            CutLeft(&in_row, R(0.6));
+            CutRight(&in_row, R(0.6));
+            Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.8)), c->dim, Icon_Globe);
+            String name = title.count ? title : url;
+            s32 name_w = Min(Font_Measure(font, name), RectW(in_row) * 3 / 5);
+            Draw_TextIn(dl, font, CutLeft(&in_row, name_w), c->text, name, 0);
+            if (title.count) {
+                CutLeft(&in_row, R(1));
+                Draw_TextIn(dl, small, in_row, c->dim, url, 0);
+            }
+            Named(app, Str_PushFormat(fa, "web suggestion %d", k + 1), row);
+            if (rs.clicked) {
+                WebGo(web_sugg_tab, url);
+                app->web_edit_tab = 0;
+            }
+        }
+        app->web_sugg_hover = bs.hovered || ui->hot == Ui_Id("WebSuggest");
+        for (s32 k = 0; k < app->web_sugg_count; k++) app->web_sugg_hover |= ui->hot == Ui_IdN(Ui_Id("WebSuggestRow"), (u64)k);
+    }
 
     // --- web pages: where they go this frame (asked in the address row or by its keys), the see-through frame over
     //     them, and the keyboard for the focused one while nothing of moss's wants it ---
@@ -6098,6 +6299,22 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     out->scrolls = f.scrolls.data;
     out->file_request_count = f.file_requests.count;
     out->file_requests = f.file_requests.data;
+    if (app->web_hist_dirty && !app->headless && (app->web_hist_dirty == 2 || now - app->web_hist_saved_us >= 10000000)) {
+        // --- the web history changed: web-history.txt again (a title only, at most every 10 s) ---
+        app->web_hist_dirty = 0;
+        app->web_hist_saved_us = now;
+        s64 cap = 64 + (s64)app->web_hist_count * (512 + 128 + 48), n = 0;
+        u8 *text = Arena_PushArray(fa, u8, cap);
+        for (s32 i = 0; i < app->web_hist_count; i++) {
+            const WebVisit *v = &app->web_hist[i];
+            n += snprintf((char *)text + n, (size_t)(cap - n), "%lld %u %.*s\t", (long long)v->last, v->visits, v->url_len, (const char *)v->url);
+            for (s32 k = 0; k < v->title_len; k++) text[n++] = v->title[k] == '\n' || v->title[k] == '\r' || v->title[k] == '\t' ? ' ' : v->title[k];
+            text[n++] = '\n';
+        }
+        out->web_history_text = n ? (String){ text, n } : S("\n");
+    } else if (app->web_hist_dirty && !app->headless && (!out->wake_at_us || app->web_hist_saved_us + 10000000 < out->wake_at_us)) {
+        out->wake_at_us = app->web_hist_saved_us + 10000000;
+    }
     if (app->paths_dirty) {
         // --- recents and bookmarks changed: paths.txt again ---
         app->paths_dirty = 0;

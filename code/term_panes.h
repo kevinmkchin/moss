@@ -55,6 +55,8 @@ struct PaneNode {
     f32 px[4];                  // where it goes, window pixels
     f32 anim_px[4];             // where it's drawn (animated towards px)
     b32 anim_ready;
+    s32 strip_scroll;           // its tab strip scrolled this far (pixels) while its tabs don't fit
+    u64 strip_seen;             // the shown tab the strip last scrolled into view
 };
 
 typedef struct Panes {
