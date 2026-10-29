@@ -10,11 +10,16 @@ Web browser
   for the web apps that matter: Slack, Spotify, x.com, GitHub, reddit.com.
 - Stretch goal: youtube.com.
 
-Claude tabs as comfortable as Claude Desktop (keep Claude Code's own TUI; moss adds around it)
-(Done: the composer, the reader, clean copy, the clickable account line, full-text search with rename / pin / archive.)
+Claude tabs as comfortable as Claude Desktop (Claude Code runs underneath; its TUI shows for questions and menus)
+(Done: the conversation view as the default (the reader with a prompt box, live as a turn runs), the composer, clean
+copy, the clickable account line, full-text search with rename / pin / archive.)
 Next:
+- Questions and permission prompts answered in the conversation itself (buttons for claude's choices) instead of
+  dropping to its terminal; /commands with a picker (/model, /resume) the same way.
+- Select and copy any text in the conversation (only code blocks have a copy button now).
+- Claude's reply as it's written (the transcript has a message once it's whole; the TUI shows it streaming).
 - The context as a share of the model's window (needs the window size per model), tokens per turn.
-- File names and paths in claude's replies (terminal or reader, with or without :line) are clickable: a small menu of
+- File names and paths in claude's replies (terminal or conversation, with or without :line) are clickable: a small menu of
   what to do with that file: view it (in the tab's picture view / a read-only text view, at that line), a quick diff
   of it (its changes this session or against git), open it in the editor, show it in the files face, copy its path.
 - Jump between your own prompts in a claude tab (Ctrl+Shift+Up/Down, like shell commands), an outline of them.

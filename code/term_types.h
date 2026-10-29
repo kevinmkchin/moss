@@ -93,6 +93,11 @@ typedef struct TermScroll { u32 tab_id; s32 lines; } TermScroll;   // lines > 0 
 // One message of a claude session's history (its transcript): who said it, when (ISO 8601, UTC), what.
 // kind: 0 claude's text, 1 the user's prompt, 2 a tool claude used: text is its name, summary, detail and result, \x1f between
 typedef struct TermHistoryEntry { b32 from_user; u32 kind; String time; String text; } TermHistoryEntry;
+// A claude's history asked for (AppOutput.history_asks): from message `from` on, unless nothing changed since version
+// `have` (0: none yet). The reply: messages from `from` on replace what the app has from there (a `from` that isn't
+// where it asked: it starts over there); those before `stable` won't change (ask from there next).
+typedef struct TermHistoryAsk { u32 tab, from, have; } TermHistoryAsk;
+typedef struct TermHistoryReply { u32 tab, version, from, stable; s64 count; const TermHistoryEntry *entries; } TermHistoryReply;
 
 // A Claude Code session on disk (<claude dir>/projects/<folder>/<id>.jsonl). Strings live until the next frame.
 typedef struct TermSession {

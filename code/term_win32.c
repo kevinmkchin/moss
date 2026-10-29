@@ -222,6 +222,7 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_Read], &p->atlas, L"Georgia\0Cambria\0", 12 * pt, 400);
     Font_Create(&p->fonts[Font_ReadBold], &p->atlas, L"Georgia\0Cambria\0", 12 * pt, 700);
     Font_Create(&p->fonts[Font_ReadHead], &p->atlas, ui, 15 * pt, 600);
+    Font_Create(&p->fonts[Font_ReadSans], &p->atlas, ui, 11 * pt, 400);   // the user's prompts and the prompt box
     p->fonts_dpi = p->dpi;
 }
 
@@ -917,6 +918,7 @@ static void ReadSettings(Platform *p, AppInit *init, b32 headless)
         init->ligatures = Str_EqualNoCase(Term_ReadSetting(&p->arena, "ligatures"), S("on"));
         init->copy_on_select_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "copy_on_select"), S("off"));
         init->dim_unfocused_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "dim_unfocused"), S("off"));
+        init->claude_chat_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "claude_chat"), S("off"));
         init->paste_warning_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
         init->win32_input_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "win32_input"), S("off"));
         String backdrop = Term_ReadSetting(&p->arena, "backdrop");

@@ -30,10 +30,13 @@ enum msg_type
                     // then u16s: where matches are, as a share of all the lines (0..65535; one per place, at most 512)
     MSG_LINK_GET,  // window -> server: u32 TabId, u32 LinkId (a cell's, Ctrl+clicked): the server answers with MSG_LINK
     MSG_LINK,      // server -> window: u32 TabId, then the link's URI (to open)
-    MSG_HISTORY_GET, // window -> server: u32 TabId: its claude session's history (the transcript), answered with MSG_HISTORY
-    MSG_HISTORY,   // server -> window: u32 TabId, u32 Count, then Count x (u8 Kind: 0 claude, 1 the user, 2 a tool's use (name,
-                   // summary, detail, result; \x1f between); u32 TimeLen, u32 TextLen, time, text),
-                   // oldest first (no session: Count 0)
+    MSG_HISTORY_GET, // window -> server: u32 TabId, u32 From, u32 Have: its claude session's history (the transcript) from
+                     // message From on, answered with MSG_HISTORY unless nothing changed since version Have (0: none yet)
+    MSG_HISTORY,   // server -> window: u32 TabId, u32 Version, u32 From, u32 Stable, u32 Count, then Count x (u8 Kind: 0
+                   // claude, 1 the user, 2 a tool's use (name, summary, detail, result; \x1f between); u32 TimeLen,
+                   // u32 TextLen, time, text), oldest first: messages From.. replace what the window has from From on
+                   // (From isn't where it asked: start over there). Stable: the messages before it won't change, ask
+                   // from there next (no session: Count 0)
     MSG_ACCOUNT_OK, // window -> server: u32 TabId: its claude may go on with the account it changed to (TAB_ACCOUNT_HELD ends)
     MSG_SEARCH_SESSIONS, // window -> server: text to find in every session's transcript (UTF-8; empty = none): answered
                    // with MSG_SESSION_HITS; a newer one stops the one running
@@ -64,7 +67,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 17
+#define TERM_PROTOCOL_VERSION 18
 
 struct msg_attach
 {

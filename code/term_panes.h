@@ -26,6 +26,7 @@ typedef struct PaneTab {
     struct Browser *browser;    // the browser's state (term_app.c), made when first opened
     String browse_path;         // the browser's folder, kept by the session
     b32 viewing;                // shows a picture over its shell or browser (its viewer)
+    b32 chat_flip;              // a claude tab flipped (Ctrl+Shift+R): its terminal, or its conversation when that's off
     struct Viewer *viewer;      // the picture view's state (term_app.c)
     u8 title[64];               // the name the user gave it; empty = the server's
     s32 title_len;

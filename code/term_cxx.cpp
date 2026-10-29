@@ -27,6 +27,7 @@
 #include <math.h>
 #include <algorithm>
 #include <map>
+#include <set>
 
 extern "C" {
 #include "term_core.h"

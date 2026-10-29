@@ -491,14 +491,13 @@ static DWORD WINAPI SessionsScanThread(void* Param)
     return 0;
 }
 
-// A claude session's history read on its own thread (transcripts can be tens of megabytes): SessionId in,
-// Reply (MSG_HISTORY's payload) out, then Done and the loop's Wake.
+// A claude's history read on its own thread (transcripts can be tens of megabytes): its tab's cache goes on from where
+// it was (ReadHistoryMore), then Done and the loop's Wake. The loop leaves the cache alone meanwhile.
 struct history_read
 {
-    u32 TabId;
+    history_cache* Cache;
     std::wstring ConfigDir; // the claude's config folder (tab::ConfigDir, else the server's)
     std::string SessionId;
-    std::string Reply;
     HANDLE Wake;
     volatile LONG Done;
 };
@@ -507,7 +506,7 @@ static DWORD WINAPI HistoryReadThread(void* Param)
 {
     Debug_NameThread("history read");
     history_read* H = (history_read*)Param;
-    H->Reply = ReadHistory(H->TabId, H->ConfigDir, H->SessionId);
+    ReadHistoryMore(*H->Cache, H->ConfigDir, H->SessionId);
     InterlockedExchange(&H->Done, 1);
     SetEvent(H->Wake);
     return 0;
@@ -551,6 +550,16 @@ static DWORD WINAPI SessionsSearchThread(void* Param)
             Lower = Got;
             for(char& C : Lower) { if(C >= 'A' && C <= 'Z') { C += 32; } }
             size_t At = Lower.find(Want);
+            while(At != std::string::npos)
+            {
+                // only what was said: not the conversation sent to the API again, nor files and listings attached to it
+                static const char Attached[] = "\"attachment\":{";
+                size_t Ls = At ? Got.rfind('\n', At - 1) : std::string::npos;
+                Ls = Ls == std::string::npos ? 0 : Ls + 1;
+                if(Got.compare(Ls, 20, "{\"type\":\"api-request") && std::search(Got.begin() + (s64)Ls, Got.begin() + (s64)At, Attached, Attached + 14) == Got.begin() + (s64)At) { break; }
+                size_t Le = Got.find('\n', At);
+                At = Le == std::string::npos ? Le : Lower.find(Want, Le);
+            }
             if(At != std::string::npos)
             {
                 // the text around it, JSON's escapes and quotes as spaces, cut on whole characters
@@ -1675,7 +1684,10 @@ static int ServerMain()
     sessions_search* SessionsSearch = 0;   // a search running on its own thread
     std::string SearchNext;                 // asked for while one ran: started once it stops
     bool32 SearchWaiting = false;
-    history_read* HistoryRead = 0;
+    history_read* HistoryRead = 0;   // one at a time
+    struct history_want { client* C; u32 Tab, From, Have; bool32 Read; };   // a window's MSG_HISTORY_GET (Read: its read is done)
+    std::vector<history_want> HistoryWants;
+    std::map<u32, history_cache*> HistoryCaches;   // the claude tabs asked about
     u64 SessionsScanMs = 0;
     std::string TrayTip;
     std::string Payload;
@@ -2058,20 +2070,17 @@ static int ServerMain()
                         T->RuleOkPid = T->ClaudePid;
                     }
                 }
-                else if(Type == MSG_HISTORY_GET && Payload.size() >= 4 && !HistoryRead)
+                else if(Type == MSG_HISTORY_GET && Payload.size() >= 12)
                 {
-                    // --- a claude's history: read on its own thread, sent when it's done ---
-                    u32 Id = 0;
-                    memcpy(&Id, Payload.data(), 4);
-                    tab* T = FindTab(Server, Id);
-                    HistoryRead = new history_read();
-                    HistoryRead->TabId = Id;
-                    HistoryRead->SessionId = T ? T->SessionId : std::string();
-                    HistoryRead->ConfigDir = T && !T->ConfigDir.empty() ? Utf8ToWide(T->ConfigDir) : ClaudeConfigDir();
-                    HistoryRead->Wake = Wake;
-                    HANDLE Thread = CreateThread(0, 0, HistoryReadThread, HistoryRead, 0, 0);
-                    if(Thread) { CloseHandle(Thread); }
-                    else { delete HistoryRead; HistoryRead = 0; }
+                    // --- a claude's history: answered below once read up to date; a newer ask for the same tab replaces one
+                    //     still waiting ---
+                    history_want W = {&C, 0, 0, 0, false};
+                    memcpy(&W.Tab, Payload.data(), 4);
+                    memcpy(&W.From, Payload.data() + 4, 4);
+                    memcpy(&W.Have, Payload.data() + 8, 4);
+                    bool32 Replaced = false;
+                    for(history_want& O : HistoryWants) { if(O.C == &C && O.Tab == W.Tab && !Replaced) { O.From = W.From; O.Have = W.Have; Replaced = true; } }
+                    if(!Replaced) { HistoryWants.push_back(W); }
                 }
                 else if(Type == MSG_FIND && Payload.size() >= 8)
                 {
@@ -2487,15 +2496,65 @@ static int ServerMain()
             else { delete Scan; Scan = 0; }
         }
 
-        // --- a claude's history, read: to the windows ---
-        if(HistoryRead && HistoryRead->Done)
+        // --- claudes' histories asked for: a tab's cache read on (its own thread) when its transcript grew, then the messages
+        //     from where the window asked, unless nothing changed since what it has; the last 2000 at most. Caches of tabs
+        //     gone or not asked about in 5 minutes go ---
+        if(HistoryRead && HistoryRead->Done) { delete HistoryRead; HistoryRead = 0; }
+        while(!HistoryRead && !HistoryWants.empty())
         {
-            for(client* C : Clients)
+            history_want& W = HistoryWants.front();
+            tab* T = FindTab(Server, W.Tab);
+            history_cache*& Cache = HistoryCaches[W.Tab];
+            if(!Cache) { Cache = new history_cache(); }
+            Cache->UsedMs = NowMs;
+            std::string SessionId = T ? T->SessionId : std::string();
+            bool32 Fresh = W.Read;
+            if(!Fresh && Cache->Version && SessionId == Cache->SessionId && !Cache->Path.empty())
             {
-                if(C->Attached && !IpcSendString(C->Conn, MSG_HISTORY, HistoryRead->Reply)) { IpcClose(C->Conn); C->Attached = false; }
+                // its size from an open handle: the folder's entry lags while claude keeps the file open
+                HANDLE File = CreateFileW(Cache->Path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+                LARGE_INTEGER Size = {};
+                if(File != INVALID_HANDLE_VALUE) { Fresh = GetFileSizeEx(File, &Size) && (u64)Size.QuadPart == Cache->Seen; CloseHandle(File); }
             }
-            delete HistoryRead;
-            HistoryRead = 0;
+            if(!Fresh)
+            {
+                W.Read = true;
+                HistoryRead = new history_read();
+                HistoryRead->Cache = Cache;
+                HistoryRead->SessionId = SessionId;
+                HistoryRead->ConfigDir = T && !T->ConfigDir.empty() ? Utf8ToWide(T->ConfigDir) : ClaudeConfigDir();
+                HistoryRead->Wake = Wake;
+                HANDLE Thread = CreateThread(0, 0, HistoryReadThread, HistoryRead, 0, 0);
+                if(Thread) { CloseHandle(Thread); break; }
+                delete HistoryRead;
+                HistoryRead = 0;
+            }
+            history_want Done = W;
+            HistoryWants.erase(HistoryWants.begin());
+            if(Done.Have == Cache->Version || std::find(Clients.begin(), Clients.end(), Done.C) == Clients.end() || !Done.C->Attached) { continue; }
+            u32 Total = (u32)Cache->Entries.size();
+            u32 From = Done.Have < Cache->ResetVersion ? 0 : std::min(Done.From, Total);
+            if(Total - From > 2000) { From = Total - 2000; }
+            u32 Stable = Total ? Total - 1 : 0;   // the last message may go on; a tool waits for its result
+            for(const auto& P : Cache->Pending) { Stable = std::min(Stable, (u32)P.second); }
+            u32 Head[5] = {Done.Tab, Cache->Version, From, Stable, Total - From};
+            std::string Out((const char*)Head, sizeof(Head));
+            for(u32 I = From; I < Total; ++I)
+            {
+                const history_entry& E = Cache->Entries[I];
+                u8 Kind = (u8)E.Kind;
+                u32 Lens[2] = {(u32)E.Time.size(), (u32)E.Text.size()};
+                Out.append((const char*)&Kind, 1);
+                Out.append((const char*)Lens, 8);
+                Out += E.Time;
+                Out += E.Text;
+            }
+            if(!IpcSendString(Done.C->Conn, MSG_HISTORY, Out)) { IpcClose(Done.C->Conn); Done.C->Attached = false; }
+        }
+        for(auto It = HistoryCaches.begin(); !HistoryRead && It != HistoryCaches.end();)
+        {
+            if(!FindTab(Server, It->first) || NowMs - It->second->UsedMs > 300000) { delete It->second; It = HistoryCaches.erase(It); }
+            else { ++It; }
         }
 
         // --- a search of the transcripts: its hits to the windows (unless a newer one is waiting), then the next ---

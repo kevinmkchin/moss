@@ -1,6 +1,7 @@
-# Claude tabs made comfortable: the composer (a multi-line prompt, sent with Ctrl+Enter), the reader (markdown, a code
-# block's copy button), the account line (the model picker, the mode, the context), the sidebar's full-text search and
-# its menu (pin, rename, archive). Claude is faked; its sessions are made up (make.py).
+# Claude tabs made comfortable: the composer (a multi-line prompt, sent with Ctrl+Enter), a claude tab's conversation
+# (markdown, a code block's copy button, the tools it used; its prompt box: a prompt sent, the turn coming in as it
+# runs; a question shows the terminal), the account line (the model picker, the mode, the context), the sidebar's
+# full-text search and its menu (pin, rename, archive). Claude is faked; its sessions are made up (make.py).
 waitfor λ
 type python make.py
 key Enter
@@ -24,6 +25,8 @@ lmb down
 lmb up
 waitfor fake-claude ready
 waitlabel claude model
+waitlabel chat prompt
+waitlabel copy code 1
 sleep 3500
 waitidle
 capture out/account_line.png
@@ -38,8 +41,7 @@ cursorui palette model sonnet
 lmb down
 lmb up
 waitfor heard: /model sonnet
-# --- the reader: markdown, a code block copied ---
-key Ctrl+Shift+R
+# --- the conversation: markdown, a code block copied ---
 waitlabel copy code 1
 sleep 500
 waitidle
@@ -60,7 +62,38 @@ cursorui copy code 1
 lmb down
 lmb up
 sleep 300
-key Escape
+# --- a prompt from the box: it shows at once, claude's status line while the turn runs, its tool and reply come in ---
+type Make the parser faster
+key Enter
+waitlabel chat status
+waitlabel chat stop
+sleep 300
+waitidle
+capture out/chat_busy_varies.png
+waitlabel tool Bash echo turn 1
+waitfor You said Make the parser faster
+waitgone chat status
+sleep 1200
+waitidle
+capture out/chat_turn.png
+# --- a question: the terminal shows until it's answered there ---
+type ask
+key Enter
+waitgone chat prompt
+sleep 300
+waitidle
+capture out/asking.png
+type 1
+key Enter
+waitlabel chat prompt
+# --- Ctrl+Shift+R: its terminal, and back ---
+key Ctrl+Shift+R
+waitgone chat prompt
+sleep 300
+waitidle
+capture out/terminal.png
+key Ctrl+Shift+R
+waitlabel chat prompt
 # --- the sidebar: a word only in a later message, found by the full-text search ---
 key Ctrl+Shift+S
 type zebracorn

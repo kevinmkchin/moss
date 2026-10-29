@@ -10,7 +10,7 @@
 #include "term_types.h"
 
 // The UI's fonts, made by the platform for the window's DPI (term_font.cpp): Segoe UI, Segoe Fluent Icons.
-enum { Font_Ui = 0, Font_UiSmall = 1, Font_UiBold = 2, Font_Icon = 3, Font_IconSmall = 4, Font_Mono = 5, Font_Read = 6, Font_ReadBold = 7, Font_ReadHead = 8, Font_Count = 9 };
+enum { Font_Ui = 0, Font_UiSmall = 1, Font_UiBold = 2, Font_Icon = 3, Font_IconSmall = 4, Font_Mono = 5, Font_Read = 6, Font_ReadBold = 7, Font_ReadHead = 8, Font_ReadSans = 9, Font_Count = 10 };
 
 typedef struct AppPlace { String name, path; } AppPlace;
 // A picture for the image viewer, decoded (scaled down to fit 4K) and on the GPU; failed: it couldn't be read.
@@ -62,6 +62,7 @@ typedef struct AppInit {
     b32 ligatures;              // settings.txt `ligatures = on`
     b32 copy_on_select_off;     // settings.txt `copy_on_select = off`
     b32 dim_unfocused_off;      // settings.txt `dim_unfocused = off`: the panes not in focus aren't darkened
+    b32 claude_chat_off;        // settings.txt `claude_chat = off`: claude tabs show their terminal, not their conversation
     b32 paste_warning_off;      // settings.txt `paste_warning = off`
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
     b32 explorer_menu;          // Explorer has "Open in moss" (registered for this user)
@@ -107,10 +108,8 @@ typedef struct AppFrameInput {
     s32 find_count, find_index;
     s64 find_mark_count;        // where the matches are, as a share of the lines (0..65535)
     const u16 *find_marks;
-    u32 history_tab;            // the last claude history read (after AppOutput.history_get): its tab, a count up per read
-    u32 history_version;
-    s64 history_count;
-    const TermHistoryEntry *history;
+    s64 history_reply_count;    // claudes' histories that came since the last frame (AppOutput.history_asks), in order
+    const TermHistoryReply *history_replies;
     s64 mono_font_count;        // the installed monospace font families, sorted (after AppOutput.want_fonts)
     const String *mono_fonts;
     u64 background;             // the background image's texture (settings.txt `background_image`; 0 = none), its size and file
@@ -180,7 +179,8 @@ typedef struct AppOutput {
     // --- server requests (frame arena; term_client.cpp sends them) ---
     b32 term_watch_changed;     // send the watch list
     s64 term_watch_count; TermWatch *term_watches;
-    u32 history_get;            // read this tab's claude history (AppFrameInput.history_*)
+    TermHistoryAsk history_asks[8];   // claudes' histories to read (AppFrameInput.history_replies)
+    s32 history_ask_count;
     u32 account_ok;             // this tab's claude may go on with the account it uses (TermTab_AccountHeld)
     String add_account;         // non-empty: make a Claude account of that name (its config folder, accounts.txt)
     String account_theme_name;  // non-empty: this account's theme in accounts.txt becomes account_theme (empty: none)

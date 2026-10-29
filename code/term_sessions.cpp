@@ -292,38 +292,78 @@ static std::wstring SessionFilePath(const std::wstring& ConfigDir, const std::st
     return Found;
 }
 
-// A claude session's history as MSG_HISTORY's payload: what the user typed and what claude wrote (its text, not
-// its tool calls), oldest first, from the transcript's last 16 MB; at most the last 2000 messages, 64 KB each.
-static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const std::string& SessionId)
+// A claude's transcript as read so far (MSG_HISTORY_GET): what the user typed, what claude wrote and each tool it used
+// (with its result), oldest first; 64 KB a message at most. Each read takes only what was written since (a turn under
+// way is read again and again), the first one the last 16 MB.
+struct history_entry { u32 Kind; std::string Time, Text; };   // Kind: 0 claude, 1 the user, 2 a tool used
+struct history_cache
 {
-    struct entry { bool32 FromUser; u32 Kind; std::string Time, Text; };   // Kind: 0 claude, 1 the user, 2 a tool used
+    std::string SessionId;
+    std::wstring Path;        // its transcript ("" while there's none)
+    u64 Offset;               // read up to here (whole lines)
+    u64 Seen;                 // the file's size at the last read
+    std::vector<history_entry> Entries;
     std::map<std::string, size_t> Pending;   // the tools used whose result hasn't come yet: their entry
-    std::vector<entry> Entries;
-    std::wstring Path = SessionFilePath(ConfigDir, SessionId);
-    HANDLE File = Path.empty() ? INVALID_HANDLE_VALUE :
-                  CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+    std::set<std::string> ToolIds;           // the tools used so far (claude writes some twice)
+    u32 Version;              // the last change's (counted server-wide, so never the same twice)
+    u32 ResetVersion;         // when it last started over (another session, a shorter file)
+    u64 UsedMs;               // asked for last (unused ones go)
+};
+
+static volatile LONG g_HistoryVersion;
+
+// What was written to SessionId's transcript since the last read; another session or a shorter file starts over.
+static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, const std::string& SessionId)
+{
+    // versions start from the clock, so a window's from before a server restart isn't taken for one of this server's
+    if(!g_HistoryVersion) { InterlockedCompareExchange(&g_HistoryVersion, (LONG)(GetTickCount() & 0x0FFFFFFF) + 1, 0); }
+    bool32 Reset = SessionId != C.SessionId;
+    if(Reset || C.Path.empty())
+    {
+        std::wstring Path = SessionFilePath(ConfigDir, SessionId);
+        Reset |= Path != C.Path;
+        C.Path = Path;
+    }
+    HANDLE File = C.Path.empty() ? INVALID_HANDLE_VALUE :
+                  CreateFileW(C.Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+    LARGE_INTEGER Size = {};
+    if(File != INVALID_HANDLE_VALUE) { GetFileSizeEx(File, &Size); }
+    if((u64)Size.QuadPart < C.Offset || !C.Version) { Reset = true; }
+    if(Reset)
+    {
+        C.SessionId = SessionId;
+        C.Offset = C.Seen = 0;
+        C.Entries.clear();
+        C.Pending.clear();
+        C.ToolIds.clear();
+        C.Version = C.ResetVersion = (u32)InterlockedIncrement(&g_HistoryVersion);
+    }
+    bool32 Changed = false;
     if(File != INVALID_HANDLE_VALUE)
     {
-        LARGE_INTEGER Size = {};
-        GetFileSizeEx(File, &Size);
         const u64 Most = 16ull * 1024 * 1024;
-        u64 Start = (u64)Size.QuadPart > Most ? (u64)Size.QuadPart - Most : 0;
+        bool32 First = !C.Offset;   // the first read may start in the middle of a line
+        u64 Start = C.Offset ? C.Offset : (u64)Size.QuadPart > Most ? (u64)Size.QuadPart - Most : 0;
         std::string Buf = ReadFileRange(File, Start, (u32)((u64)Size.QuadPart - Start));
         CloseHandle(File);
+        C.Seen = (u64)Size.QuadPart;
+        // whole lines only: a line being written is read next time
+        size_t Whole = Buf.rfind('\n');
+        Whole = Whole == std::string::npos ? 0 : Whole + 1;
+        C.Offset = Start + Whole;
         size_t LineStart = 0;
-        if(Start > 0) { LineStart = Buf.find('\n') + 1; } // the first line is cut
-        while(LineStart < Buf.size())
+        if(First && Start > 0) { LineStart = Buf.find('\n') + 1; } // the first line is cut
+        while(LineStart < Whole)
         {
             size_t LineEnd = Buf.find('\n', LineStart);
-            if(LineEnd == std::string::npos) { LineEnd = Buf.size(); }
             std::string Line = Buf.substr(LineStart, LineEnd - LineStart);
             LineStart = LineEnd + 1;
             if(Line.find("\"isSidechain\":true") != std::string::npos || Line.find("\"isMeta\":true") != std::string::npos) { continue; }
-            entry E = {};
+            if(!Line.compare(0, 20, "{\"type\":\"api-request")) { continue; }   // what was sent to the API: the conversation again
+            history_entry E = {};
             if(Line.find("\"role\":\"user\",\"content\":\"") != std::string::npos)
             {
                 // a prompt as typed (tool results are arrays of blocks, not a string)
-                E.FromUser = true;
                 E.Kind = 1;
                 size_t At = Line.find("\"role\":\"user\",\"content\":\"");
                 JsonDecodeString(Line, At + 25, E.Text);
@@ -350,16 +390,17 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
                     std::string Head = Line.substr(At, Input - At);
                     JsonFindString(Head, "id", false, Id);
                     JsonFindString(Head, "name", false, Name);
+                    if(!Id.empty() && !C.ToolIds.insert(Id).second) { continue; }   // written twice
                     size_t End = Input + 8;
                     s32 Depth = 0;
                     bool32 InString = false;
                     for(; End < Line.size(); ++End)
                     {
-                        char C = Line[End];
-                        if(InString) { if(C == '\\') { End++; } else if(C == '"') { InString = false; } continue; }
-                        if(C == '"') { InString = true; }
-                        else if(C == '{') { Depth++; }
-                        else if(C == '}' && --Depth == 0) { End++; break; }
+                        char Ch = Line[End];
+                        if(InString) { if(Ch == '\\') { End++; } else if(Ch == '"') { InString = false; } continue; }
+                        if(Ch == '"') { InString = true; }
+                        else if(Ch == '{') { Depth++; }
+                        else if(Ch == '}' && --Depth == 0) { End++; break; }
                     }
                     std::string In = Line.substr(Input + 8, End - Input - 8);
                     std::string Summary, Detail, A, B;
@@ -381,7 +422,7 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
                             JsonFindString(In, "prompt", false, A)) { Summary = A.substr(0, A.find('\n')); }
                     if(Detail.empty()) { Detail = In.size() > 4096 ? In.substr(0, 4096) : In; }
                     if(Detail.size() > 32 * 1024) { Detail.resize(32 * 1024); }
-                    entry T = {};
+                    history_entry T = {};
                     T.Kind = 2;
                     T.Text = Name + "\x1f" + Summary + "\x1f" + Detail + "\x1f";
                     JsonFindString(Line, "timestamp", true, T.Time);
@@ -390,12 +431,14 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
                         // the text before it first
                         if(E.Text.size() > 64 * 1024) { E.Text.resize(64 * 1024); }
                         E.Time = T.Time;
-                        if(!Entries.empty() && Entries.back().Kind == 0 && Entries.back().Time == E.Time) { Entries.back().Text += "\n\n" + E.Text; }
-                        else { Entries.push_back(E); }
+                        if(!C.Entries.empty() && C.Entries.back().Kind == 0 && C.Entries.back().Time == E.Time) { C.Entries.back().Text += "\n\n" + E.Text; }
+                        else { C.Entries.push_back(E); }
+                        Changed = true;
                         E.Text.clear();
                     }
-                    Pending[Id] = Entries.size();
-                    Entries.push_back(T);
+                    C.Pending[Id] = C.Entries.size();
+                    C.Entries.push_back(T);
+                    Changed = true;
                 }
             }
             else if(Line.find("\"type\":\"tool_result\"") != std::string::npos)
@@ -405,15 +448,16 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
                 {
                     std::string Id, Out;
                     JsonDecodeString(Line, At + 15, Id);
-                    auto P = Pending.find(Id);
-                    if(P == Pending.end() || P->second >= Entries.size()) { continue; }
+                    auto P = C.Pending.find(Id);
+                    if(P == C.Pending.end() || P->second >= C.Entries.size()) { continue; }
                     size_t Content = Line.find("\"content\":", At);
                     if(Content == std::string::npos) { continue; }
                     if(Content + 10 < Line.size() && Line[Content + 10] == '"') { JsonDecodeString(Line, Content + 11, Out); }
                     else { size_t T = Line.find("\"text\":\"", Content); if(T != std::string::npos) { JsonDecodeString(Line, T + 8, Out); } }
                     if(Out.size() > 16 * 1024) { Out.resize(16 * 1024); }
-                    Entries[P->second].Text += Out;
-                    Pending.erase(P);
+                    C.Entries[P->second].Text += Out;
+                    Changed = true;
+                    C.Pending.erase(P);
                 }
                 continue;
             }
@@ -421,27 +465,15 @@ static std::string ReadHistory(u32 TabId, const std::wstring& ConfigDir, const s
             if(E.Text.size() > 64 * 1024) { E.Text.resize(64 * 1024); }
             JsonFindString(Line, "timestamp", true, E.Time);
             // a message written in parts (one line per block) goes on in the same entry
-            if(E.Kind == 0 && !Entries.empty() && Entries.back().Kind == 0 && Entries.back().Time == E.Time)
+            if(E.Kind == 0 && !C.Entries.empty() && C.Entries.back().Kind == 0 && C.Entries.back().Time == E.Time)
             {
-                Entries.back().Text += "\n\n" + E.Text;
+                C.Entries.back().Text += "\n\n" + E.Text;
+                Changed = true;
                 continue;
             }
-            Entries.push_back(E);
+            C.Entries.push_back(E);
+            Changed = true;
         }
     }
-    size_t First = Entries.size() > 2000 ? Entries.size() - 2000 : 0;
-    std::string Out((const char*)&TabId, 4);
-    u32 Count = (u32)(Entries.size() - First);
-    Out.append((const char*)&Count, 4);
-    for(size_t I = First; I < Entries.size(); ++I)
-    {
-        const entry& E = Entries[I];
-        u8 FromUser = (u8)E.Kind;
-        u32 Lens[2] = {(u32)E.Time.size(), (u32)E.Text.size()};
-        Out.append((const char*)&FromUser, 1);
-        Out.append((const char*)Lens, 8);
-        Out += E.Time;
-        Out += E.Text;
-    }
-    return Out;
+    if(Changed) { C.Version = (u32)InterlockedIncrement(&g_HistoryVersion); }
 }

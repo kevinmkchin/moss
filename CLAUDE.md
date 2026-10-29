@@ -254,7 +254,31 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   claude's text, at most 2000 messages of 64 KB) and send it (`MSG_HISTORY`). The history view covers the terminal:
   messages wrapped to the pane (`App.hist_lines`, rebuilt when the history, width or text change), matches in the
   match color, the current one framed and scrolled to the middle.
-## Claude tabs made comfortable: the composer, the reader, clean copy
+## Claude tabs made comfortable: the conversation, the composer, clean copy
+
+- A claude tab shows its conversation (`Chat`, one per claude tab shown lately, `App.chats[8]`): the transcript as an
+  article above a prompt box, not claude's TUI. Settings "Claude tabs as a conversation" (`claude_chat = off`) turns
+  that the other way; Ctrl+Shift+R (`reader`) flips one tab (`PaneTab.chat_flip`). Only while claude sits at its own
+  prompt box (`ClaudePromptBox`: a rule, the `❯` line (a no-break space after it), a rule, within the bottom 4 rows
+  written): a question, a permission, a menu (/model) or the start shows the terminal, and the conversation comes back
+  once it's answered there.
+- Its box (`Chat.draft`, a `Ui_TextArea` in `Font_ReadSans`, Segoe UI 11 pt): Enter sends (`ChatSend`: as typed, or a
+  bracketed paste when it has lines, then `\r`), Shift+Enter is a new line, Esc stops a turn (win32-input-mode's Esc key
+  when asked), Shift+Tab claude's mode, PgUp/PgDn and Ctrl+Home/End scroll, Ctrl+V a picture's path, files dropped and
+  Ctrl+Shift+V pastes go in. The prompt shows at once (`Chat.pending`) until the transcript has it (20 s at most; never
+  for /commands). While a turn runs: claude's own status line (the row over its box) above the box, a stop button.
+- Live: the window asks for the history (`AppOutput.history_asks`: tab, from, have) when it shows, every 400 ms while
+  a turn runs or 4 s after a send or a change, and once when the turn ends. The server keeps each tab's transcript read
+  so far (`history_cache` in term_sessions.cpp: `ReadHistoryMore` reads only what was written since, the first time
+  the last 16 MB; another session or a shorter file starts over; versions count server-wide from the clock) and
+  answers `MSG_HISTORY` with the messages from `from` on, or nothing if unchanged (protocol 18). `Stable`: the messages
+  before it won't change (the last may go on, a tool waits for its result). Its size comes from an open handle (the
+  folder entry lags while claude keeps the file open). Lines starting `{"type":"api-request` (Claude Code 2.1's copies
+  of what it sent) are skipped, a tool id written twice counts once.
+- The app keeps the messages (`Chat.msgs`, text in `msg_arena`; a reply replaces from its `from` on) and builds lines
+  only from the first message that changed (`ChatRebuild`, `Chat.built_at`: each message's first line, block and text
+  position; reused line slots are zeroed); a width change builds all (a 100 MB transcript's last 16 MB: 20 ms, once).
+  A view at its end stays there as lines come (`at_end`, `scroll_seen`) until scrolled up.
 
 - The composer (Ctrl+Shift+I, `compose`; any terminal tab): a panel over the bottom of the pane with a real text box
   (`Ui_TextArea` in term_ui.c: wrapped lines, Up/Down, mouse, a double click's word, undo in bursts, 16 KB; laid out
@@ -263,21 +287,19 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   saved as `%TEMP%\moss-paste\paste-<time>.png` (`SaveClipboardImage`, `AppOutput.save_clipboard_image` ->
   `AppFrameInput.pasted_image`) and its path inserted (claude reads pictures by path); files dropped on the pane go in
   as paths. While open on the focused tab it takes every key the commands leave.
-- The reader (Ctrl+Shift+R, `reader`; a claude tab): the history view without a search. The transcript is read when it
-  opens and again when a turn ends (`TermTab_Busy` going off; never on a timer); built into lines once per read or width
-  change: headings, **bold** and `code` runs (`HistSpan`), list items (marker, indented lines), fenced code (`Font_Mono`:
-  Cascadia Mono, else Consolas; a shade; the block's copy button, `App.hist_blocks`), tables (columns as wide as their
-  widest cell, narrowed together to fit), rules. A fresh read stays at the end only when the view was there. It takes
-  the keys while its tab is focused (Esc back, arrows, pages, Home/End); Ctrl+F searches it.
+- Its markdown: headings, **bold** and `code` runs (`HistSpan`), list items (marker, indented lines), fenced code
+  (`Font_Mono`: Cascadia Mono, else Consolas; a shade; the block's copy button, `Chat.blocks`), tables (columns as wide
+  as their widest cell, narrowed together to fit), rules. Ctrl+F searches it (a claude tab whose terminal shows gets the
+  conversation while searching).
 - It reads like an article: one centered column (about 70 characters, `R(64)` at most), Georgia 12 pt to read
-  (`Font_Read`, `Font_ReadBold`), Segoe UI 15 pt semibold headings (`Font_ReadHead`), Cascadia Mono 10 pt code; each line
-  has its own height and place (`HistLine.y/h`, worked out once per build: gaps before a message, a heading, a block);
-  the user's prompts in a soft rounded bubble; code blocks in a container with a header (the fence's language, the
-  copy button); tables padded, the header row on a shade.
+  (`Font_Read`, `Font_ReadBold`), Segoe UI 15 pt semibold headings (`Font_ReadHead`), the user's prompts in Segoe UI
+  (`Font_ReadSans`) in a soft rounded bubble, Cascadia Mono 10 pt code; each line has its own height and place
+  (`HistLine.y/h`: gaps before a message, a heading, a block); headers in local time ("Today 14:03"); code blocks in a
+  container with a header (the fence's language, the copy button); tables padded, the header row on a shade.
 - The tools claude used are in it too: the history read keeps each `tool_use` (its name, a summary: the command, the
   file, the pattern, ...; its detail: the whole command, an edit as '-' / '+' lines, a file written) with its
-  `tool_result` (`MSG_HISTORY` entry kind 2, fields split by \x1f; protocol 17). Each is a row (a chevron, its name,
-  the summary in mono); a click opens it (`App.hist_open` by key, `hist_dirty` builds again): the detail (an edit's
+  `tool_result` (`MSG_HISTORY` entry kind 2, fields split by \x1f). Each is a row (a chevron, its name, the summary in
+  mono); a click opens it (`Chat.open` by key; its message is built again): the detail (an edit's
   lines green and red) and the output under a rule, at most 400 lines.
 - Copying from an agent's tab (a selection, copy on select; not a rectangle) is cleaned (`CleanAgentCopy`): claude's ●
   and ⎿ marks become spaces, the indent the lines share goes, a line wrapped near the screen's edge joins the next.
@@ -346,7 +368,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 
 - Full-text search: a filter of 3 characters or more, still for 250 ms (headless runs: 2 frames, their clock moves with
   frames), goes to the server (`MSG_SEARCH_SESSIONS`), which reads every account's transcripts on its own thread in
-  Windows' background mode, 4 MiB at a time, the first match in each (`SessionsSearchThread`; a newer search stops it;
+  Windows' background mode, 4 MiB at a time, the first match in each that was said (not in an `api-request` line or a
+  prompt's attachment: Claude Code 2.1 copies its system prompt and CLAUDE.md there) (`SessionsSearchThread`; a newer search stops it;
   logs "sessions search: N of M sessions, MB, ms"), and answers `MSG_SESSION_HITS` (each hit's id and the JSON string
   around the match). Hits join the filter's rows with their snippet in the accent.
 - The sidebar's own notes (`%LOCALAPPDATA%\moss\sessions.txt`: `name <id> = <name>`, `pin <id>`, `archive <id>`; headless
@@ -376,7 +399,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   open (`want_fonts`); `AppOutput.term_font` switches the cells' font. Server-read keys (`agents`, `notifications`,
   `vs_env`) take effect at their next read: the next scan, notice, or new tab.
 - Keys a zeroed setting means "on" for: `hidden_files = off`, `folder_sizes = off`, `notifications = off`, `vs_env = off`,
-  `dim_unfocused = off`. Ctrl+H in a browser writes `hidden_files` too.
+  `dim_unfocused = off`, `claude_chat = off`. Ctrl+H in a browser writes `hidden_files` too.
 - "Dim the panes not in focus" (on by default): with more than one pane showing, the others get a dark wash (a held
   claude's card stays bright above it).
 - "Reset to moss's defaults" asks first (`App.reset_confirm`), then `AppOutput.reset_settings`: settings.txt becomes the

@@ -44,9 +44,10 @@ struct TermClient
     u32 FindState[3];       // the last MSG_FIND_STATE: tab, count, index
     std::vector<u16> FindMarks; // and where its matches are
     std::string Link;       // a link's URI the server sent (MSG_LINK), to open
-    std::string History;    // the last MSG_HISTORY, kept whole: HistoryViews point into it
+    std::vector<std::string> Histories;     // MSG_HISTORY replies not given to the app yet (HistoryViews point into them)
     std::vector<TermHistoryEntry> HistoryViews;
-    u32 HistoryTab, HistoryVersion;
+    std::vector<TermHistoryReply> HistoryReplies;
+    size_t HistoriesGiven;  // how many the last fill gave the app (gone after its frame)
     u32 SentFocus;
     u64 BytesIn;
     u64 BytesOut;
@@ -253,31 +254,9 @@ extern "C" b32 TermClient_Poll(TermClient* C)
             C->Link = Payload.substr(4);
             Changed = true;
         }
-        else if(Type == MSG_HISTORY && Payload.size() >= 8)
+        else if(Type == MSG_HISTORY && Payload.size() >= 20)
         {
-            C->History = Payload;
-            C->HistoryViews.clear();
-            u32 Count = 0;
-            memcpy(&C->HistoryTab, C->History.data(), 4);
-            memcpy(&Count, C->History.data() + 4, 4);
-            size_t At = 8;
-            for(u32 I = 0; I < Count && At + 9 <= C->History.size(); ++I)
-            {
-                u8 FromUser = (u8)C->History[At];
-                u32 TimeLen = 0, TextLen = 0;
-                memcpy(&TimeLen, C->History.data() + At + 1, 4);
-                memcpy(&TextLen, C->History.data() + At + 5, 4);
-                At += 9;
-                if(At + (size_t)TimeLen + TextLen > C->History.size()) { break; }
-                TermHistoryEntry V = {};
-                V.from_user = FromUser == 1;
-                V.kind = FromUser;
-                V.time = String{(u8*)C->History.data() + At, (s64)TimeLen};
-                V.text = String{(u8*)C->History.data() + At + TimeLen, (s64)TextLen};
-                At += (size_t)TimeLen + TextLen;
-                C->HistoryViews.push_back(V);
-            }
-            C->HistoryVersion++;
+            C->Histories.push_back(Payload);   // read at the next fill
             Changed = true;
         }
         else if(Type == MSG_FIND_STATE && Payload.size() >= sizeof(C->FindState))
@@ -368,10 +347,39 @@ extern "C" void TermClient_Fill(TermClient* C, AppFrameInput* In)
     In->find_index = (s32)C->FindState[2];
     In->find_mark_count = (s64)C->FindMarks.size();
     In->find_marks = C->FindMarks.data();
-    In->history_tab = C->HistoryTab;
-    In->history_version = C->HistoryVersion;
-    In->history_count = (s64)C->HistoryViews.size();
-    In->history = C->HistoryViews.data();
+    // --- claudes' histories that came: their messages as views into the replies (kept until the frame is done) ---
+    C->HistoryViews.clear();
+    C->HistoryReplies.clear();
+    for(const std::string& H : C->Histories)
+    {
+        u32 Head[5] = {};
+        memcpy(Head, H.data(), sizeof(Head));
+        TermHistoryReply R = {Head[0], Head[1], Head[2], Head[3], 0, 0};
+        R.entries = (const TermHistoryEntry*)(uintptr_t)C->HistoryViews.size();   // an index until the views stop moving
+        size_t At = sizeof(Head);
+        for(u32 I = 0; I < Head[4] && At + 9 <= H.size(); ++I)
+        {
+            u8 Kind = (u8)H[At];
+            u32 TimeLen = 0, TextLen = 0;
+            memcpy(&TimeLen, H.data() + At + 1, 4);
+            memcpy(&TextLen, H.data() + At + 5, 4);
+            At += 9;
+            if(At + (size_t)TimeLen + TextLen > H.size()) { break; }
+            TermHistoryEntry V = {};
+            V.from_user = Kind == 1;
+            V.kind = Kind;
+            V.time = String{(u8*)H.data() + At, (s64)TimeLen};
+            V.text = String{(u8*)H.data() + At + TimeLen, (s64)TextLen};
+            At += (size_t)TimeLen + TextLen;
+            C->HistoryViews.push_back(V);
+            R.count++;
+        }
+        C->HistoryReplies.push_back(R);
+    }
+    for(TermHistoryReply& R : C->HistoryReplies) { R.entries = C->HistoryViews.data() + (uintptr_t)R.entries; }
+    C->HistoriesGiven = C->Histories.size();
+    In->history_reply_count = (s64)C->HistoryReplies.size();
+    In->history_replies = C->HistoryReplies.data();
     // --- tabs: views onto the strings of the last list ---
     C->TabViews.resize(C->Tabs.size());
     for(size_t I = 0; I < C->Tabs.size(); ++I)
@@ -501,10 +509,17 @@ extern "C" void TermClient_Apply(TermClient* C, const AppOutput* Out)
         P.append((const char*)Out->notify_body.data, (size_t)Out->notify_body.count);
         ClientSend(C, MSG_NOTIFY, P);
     }
-    if(Out->history_get)
+    for(s32 I = 0; I < Out->history_ask_count; ++I)
     {
-        ClientSend(C, MSG_HISTORY_GET, std::string((const char*)&Out->history_get, 4));
+        const TermHistoryAsk& A = Out->history_asks[I];
+        u32 P[3] = {A.tab, A.from, A.have};
+        ClientSend(C, MSG_HISTORY_GET, std::string((const char*)P, sizeof(P)));
     }
+    // the histories the app had this frame are done with
+    C->Histories.erase(C->Histories.begin(), C->Histories.begin() + (s64)std::min(C->HistoriesGiven, C->Histories.size()));
+    C->HistoriesGiven = 0;
+    C->HistoryViews.clear();
+    C->HistoryReplies.clear();
     if(Out->find_send)
     {
         u32 Head[2] = {Out->find_tab, Out->find_flags};
