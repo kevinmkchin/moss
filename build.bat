@@ -4,6 +4,7 @@ rem moss: builds build\moss.exe (window, server, headless runner) with MSVC. Run
 rem   build          optimized, internal checks on (asserts, logs next to the exe)
 rem   build debug    unoptimized
 rem   build release  optimized, no internal checks (logs in %LOCALAPPDATA%\term\logs)
+rem   build content  optimized, then the website's content\ (screenshots, text, icon); see CLAUDE.md
 
 where cl >nul 2>nul
 if not errorlevel 1 goto :build
@@ -61,6 +62,15 @@ if exist moss.exe move /y moss.exe moss.old-%RANDOM%.exe >nul
     term_c.obj term_cxx.obj moss.res ^
     kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib ole32.lib windowscodecs.lib shlwapi.lib d3d11.lib dxgi.lib ^
     d3dcompiler.lib d2d1.lib dwrite.lib dcomp.lib dwmapi.lib comdlg32.lib uuid.lib imm32.lib dbghelp.lib
+set ERR=%errorlevel%
+if not "%ERR%"=="0" goto :done
+if not "%1"=="content" goto :done
+
+rem --- build content: the website's screenshots of this build (headless, made-up sessions and files), its
+rem --- text and the icon, into content\ for the site generator (C:\UnitySrc\kevin.gd\build.py) ---
+python "%ROOT%tools\site\capture.py"
+if errorlevel 1 (set ERR=1& goto :done)
+python "%ROOT%tools\site\content.py"
 set ERR=%errorlevel%
 
 :done

@@ -22,6 +22,31 @@ its prompt. While the tab does work (a program running, or an agent session open
 read-only: you can browse anywhere (the shell doesn't follow) and look, preview, copy out; nothing that changes
 the disk.
 
+## Website content (noclip.gd/moss)
+
+`build content` builds moss, then writes the landing page's content to `content\`: three screenshots of the fresh
+build (`tools\site\capture.py`: headless, with made-up sessions, a fake claude and fake projects at `C:\src`, nothing
+of the user's), the icon, and `content.json` with the tagline, install line and features below (`tools\site\content.py`).
+The site generator (`C:\UnitySrc\kevin.gd\build.py`) copies that folder into the page. The page should feel zen:
+quiet, short, nothing loud.
+
+Tagline: moss is a terminal and file explorer for Windows
+Install: winget install moss
+
+Main features, in order. Short phrases, no descriptions, only what's special about moss:
+
+- faster than Windows Terminal
+- 1 ms from keypress to screen
+- switch between terminal and file explorer in every tab
+- split panes, tabs you drag between them
+- tabs keep running in the background
+- tabs survive restarts and reboots
+- Claude Code and other CLI agents, every session in a sidebar
+- folder sizes, measured in the background
+- tab completion and autosuggestions
+- unix tools from Git for Windows
+- search the scrollback
+
 ## Processes and files
 
 - `moss.exe` is everything (`code/term_win32.c` `wWinMain`): the window, `--server`, `--headless`, `--vt-replay`.
