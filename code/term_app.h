@@ -26,6 +26,7 @@ typedef struct AppWeb {
     String navigate;            // go there (frame arena), empty: stay
     s32 step;                   // -1 back, 1 forward
     b32 reload;
+    f32 zoom;                   // the page's zoom factor (0: 1)
     u32 popup;                  // made for this popup (AppWebPopup.id): the page that asked for it gets it as its new window
 } AppWeb;
 // A page's state. notices counts its notifications; the last one's title and body come with it.
@@ -129,6 +130,13 @@ typedef struct AppFrameInput {
     const AppWebState *webs;
     s32 web_popup_count;        // new windows pages asked for, oldest first, until a web tab is made for each
     const AppWebPopup *web_popups;
+    u64 web_torn_off;           // this web tab went to another window (its page opens there): it goes here
+    String open_web;            // a new window's first tab is this web page (`--web URL`); until AppOutput.open_web_taken
+    // --- a tab of another moss window dragged over this one, at the mouse: where it would land shows ---
+    b32 foreign_drag;
+    b32 foreign_drop;           // dropped here this frame: a server tab is on its way (foreign_tab), else a web page
+    u32 foreign_tab;
+    String foreign_label, foreign_url;
     // --- what the debug overlay shows (Ctrl+Alt+Shift+F12) ---
     struct {
         f32 work_ms_avg, work_ms_max;      // the last 120 frames' work
@@ -221,6 +229,11 @@ typedef struct AppOutput {
     u32 tear_off_tab;           // this tab goes to another window: the one under the mouse (tear_off_drop), else a new one
     b32 tear_off_drop;          // dragged out of the window: where the mouse is decides
     b32 tear_off_last;          // it's the window's only tab: only into another window
+    u64 tear_off_web;           // or this web tab goes (its page opens there, at tear_off_url): AppFrameInput.web_torn_off once it did
+    String tear_off_url;
+    b32 drag_out;               // a tab is dragged outside the window: the moss window under the mouse is told (drag_out_label)
+    String drag_out_label;
+    b32 open_web_taken;
     s64 open_window_count; String *open_windows;   // windows the main one opens at start: their tabs wait for them
     s32 ime_caret[4];           // the focused terminal's cursor cell (window px x, y, w, h): IME composition goes there
     s32 web_count;              // the web pages there are (closed when no longer listed)

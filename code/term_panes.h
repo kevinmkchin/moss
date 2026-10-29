@@ -42,6 +42,7 @@ typedef struct PaneTab {
     s32 web_title_len;
     u32 web_notices_seen;       // the page's notifications counted so far (AppWebState.notices)
     b32 web_needs;              // it notified while not in front: a dot on its tab until shown
+    s32 web_zoom;               // the page's zoom, in steps from 100% (g_WebZooms)
 } PaneTab;
 
 struct PaneNode {

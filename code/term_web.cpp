@@ -47,6 +47,7 @@ struct web_page
     std::string Url, Title;
     bool32 CanBack, CanForward, Loading, CloseRequested;
     bool32 Visible;                // WebView2 shows it (hidden only once a frame covering it is on screen)
+    double Zoom;                   // the zoom factor set on it (0: none yet)
     bool32 CloseLater;             // no longer listed: closed once a frame covering it is on screen
     HCURSOR Cursor;
     u32 Popup;                     // made for this popup (web_popup): its opener gets this page as the new window
@@ -117,6 +118,10 @@ static void WebStartPage(Web* W, web_page* P)
             EventRegistrationToken Token = {};
 
             ICoreWebView2* V = P->View;
+            // moss zooms the page (Ctrl+=/-/0, Ctrl+wheel: the app's), not WebView2 on its own
+            ICoreWebView2Settings* Settings = 0;
+            V->get_Settings(&Settings);
+            if(Settings) { Settings->put_IsZoomControlEnabled(FALSE); Settings->Release(); }
             // --- a popup's page: it is the window its opener asked for (before it navigates anywhere) ---
             bool Opened = false;
             for(size_t I = 0; I < W->Popups.size(); ++I)
@@ -201,8 +206,9 @@ static void WebStartPage(Web* W, web_page* P)
                 bool Ctrl = GetKeyState(VK_CONTROL) < 0, Shift = GetKeyState(VK_SHIFT) < 0, Alt = GetKeyState(VK_MENU) < 0;
                 bool Modifier = Vk == VK_CONTROL || Vk == VK_SHIFT || Vk == VK_MENU || Vk == VK_LWIN || Vk == VK_RWIN;
                 bool Arrow = Vk == VK_LEFT || Vk == VK_RIGHT || Vk == VK_UP || Vk == VK_DOWN;
+                bool Zoom = Vk == VK_OEM_PLUS || Vk == VK_OEM_MINUS || Vk == '0' || Vk == VK_ADD || Vk == VK_SUBTRACT || Vk == VK_NUMPAD0;
                 bool Mine = !Modifier && ((Ctrl && Shift) || (Alt && !Ctrl && Arrow) || (Ctrl && Vk == VK_TAB) ||
-                                          (Ctrl && !Alt && (Vk == VK_OEM_COMMA || Vk == 'L')) || Vk == VK_F11);
+                                          (Ctrl && !Alt && (Vk == VK_OEM_COMMA || Vk == 'L' || Zoom)) || Vk == VK_F11);
                 if(!Mine) { return S_OK; }
                 A->put_Handled(TRUE);
                 UINT Msg = Kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN ? WM_KEYDOWN : Kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP ? WM_KEYUP :
@@ -301,6 +307,8 @@ extern "C" void Web_Update(Web* W, const AppWeb* Webs, s32 Count, u64 Focus)
         if(P->View && A->step < 0) { P->View->GoBack(); }
         if(P->View && A->step > 0) { P->View->GoForward(); }
         if(P->View && A->reload) { P->View->Reload(); }
+        double Zoom = A->zoom > 0 ? A->zoom : 1.0;
+        if(P->Controller && Zoom != P->Zoom) { P->Controller->put_ZoomFactor(Zoom); P->Zoom = Zoom; }
     }
     for(web_page* P : W->Pages)
     {
@@ -458,6 +466,7 @@ extern "C" b32 Web_Mouse(Web* W, u32 Msg, u64 WParam, s64 LParam)
     case WM_MOUSEHWHEEL: Kind = COREWEBVIEW2_MOUSE_EVENT_KIND_HORIZONTAL_WHEEL; Data = (UINT32)(s32)GET_WHEEL_DELTA_WPARAM(WParam); break;
     default: return 0;
     }
+    if((Kind == COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL) && (GET_KEYSTATE_WPARAM(WParam) & MK_CONTROL)) { return 0; }   // Ctrl+wheel: the app zooms the page
     u32 Buttons = (u32)GET_KEYSTATE_WPARAM(WParam) & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON | MK_XBUTTON1 | MK_XBUTTON2);
     bool Down = Msg == WM_LBUTTONDOWN || Msg == WM_RBUTTONDOWN || Msg == WM_MBUTTONDOWN || Msg == WM_XBUTTONDOWN ||
                 Msg == WM_LBUTTONDBLCLK || Msg == WM_RBUTTONDBLCLK || Msg == WM_MBUTTONDBLCLK;

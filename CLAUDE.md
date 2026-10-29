@@ -94,6 +94,12 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   the same. A window the user closes hands its tabs back to the main window and deletes its layout; one closed by
   tray Quit or logoff keeps them, and the main window reopens it at its next start (`open_windows`: owners with
   no window holding the mutex). Tests: `tests/windows` (three headless runs on one named server).
+- Dragging a tab across to another moss window: while the pointer is outside its window, the dragging window tells the
+  one under it where the pointer is (`SendDrag`: WM_COPYDATA 0x7E4E, over / gone / dropped, its label; `AppOutput.drag_out`),
+  and that window draws its own drop buttons and strip gap for it (`AppFrameInput.foreign_*`: the same code as a tab of
+  its own, no tab lifted). A drop lands where it was dropped: a server tab once the server hands it over (`App.arrive_tab`,
+  `DropTabAt`), a web tab's page opens there again. Test windows torn off a test window stay test windows (`--at`), so
+  two can be driven with posted messages.
 - The window keeps its layout in `%LOCALAPPDATA%\moss\layout.txt` (`Session_Write`/`Session_Read` in
   `term_panes.c`: "term-layout 1", a `window` line, then a `split`/`pane` line per node with its depth and a `tab`
   line per tab; a file it can't read is ignored and the window starts with one pane): pane tabs
@@ -465,6 +471,13 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   (another tab, the window behind) goes to the tray (`AppOutput.notify_title/body` -> `MSG_NOTIFY` -> the server's
   `TrayNotify`; settings `notifications = off`: none) and puts a dot on the tab until it's shown. Other permissions
   (camera, microphone, ...) are WebView2's own prompt for now.
+- Zoom: Ctrl+= / Ctrl+- / Ctrl+0 (the text size commands, on a web tab) and Ctrl+wheel over the page step its zoom
+  (`PaneTab.web_zoom`, Chrome's steps `g_WebZooms`; `AppWeb.zoom` -> put_ZoomFactor); WebView2's own zoom is off. Not
+  kept in the layout. A chip in the address row shows it when it isn't 100% (a click puts it back).
+- Torn off (a drag out of the window, "Move tab to a new window") a web tab's page loads again in the other window: a
+  page can't move between processes (every moss window is one), so a video starts over. A new window gets it with
+  `--web URL` (`AppFrameInput.open_web`); the tab here goes once it's there (`AppFrameInput.web_torn_off`). A window with
+  only web tabs owns nothing at the server, so tray Quit doesn't bring it back.
 - Data (logins, cookies) in `%LOCALAPPDATA%\moss\web`; test and instance runs in `%TEMP%\moss-web-<instance>`.
 - Headless runs have no pages (the page's rect stays black; `tests/session` keeps a web tab across a restart).
   `moss --web-probe URL OUT.png` loads one in a window no one sees and logs what the engine can do there (Widevine,
