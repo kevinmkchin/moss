@@ -46,6 +46,8 @@ struct web_page
     std::wstring Pending;          // navigate there once the page is made
     std::string Url, Title;
     bool32 CanBack, CanForward, Loading, CloseRequested;
+    bool32 Visible;                // WebView2 shows it (hidden only once a frame covering it is on screen)
+    bool32 CloseLater;             // no longer listed: closed once a frame covering it is on screen
     HCURSOR Cursor;
     u32 Popup;                     // made for this popup (web_popup): its opener gets this page as the new window
     u32 Notices;                   // notifications so far, the last one's title and body
@@ -83,13 +85,16 @@ struct Web
 
 static void WebWake(Web* W) { PostMessageW(W->Window, W->Wake, 0, 0); }
 
+// A shown page at its place, at once. Hiding waits for Web_Presented: the frame on screen until then has a
+// see-through hole where the page is.
 static void WebPlace(Web* W, web_page* P)
 {
-    if(!P->Controller) { return; }
+    if(!P->Controller || !P->Shown) { return; }
     P->Controller->put_Bounds(P->Bounds);
     P->Visual->SetOffsetX((float)P->Bounds.left);
     P->Visual->SetOffsetY((float)P->Bounds.top);
-    P->Controller->put_IsVisible(P->Shown);
+    P->Controller->put_IsVisible(TRUE);
+    P->Visible = 1;
 }
 
 // --- a page: its composition controller, then its events ---
@@ -213,6 +218,7 @@ static void WebStartPage(Web* W, web_page* P)
                 if(W->MouseIn == P && P->Cursor) { SetCursor(P->Cursor); }
                 return S_OK; }), &Token);
 
+            Controller->put_IsVisible(FALSE);
             WebPlace(W, P);
             W->G->Comp->Commit();
             if(!P->Pending.empty() && !Opened) { V->Navigate(P->Pending.c_str()); }
@@ -302,9 +308,8 @@ extern "C" void Web_Update(Web* W, const AppWeb* Webs, s32 Count, u64 Focus)
         for(s32 I = 0; I < Count; ++I) { Listed = Listed || Webs[I].id == P->Id; }
         if(Listed || P->Closed) { continue; }
         P->Closed = 1;
+        P->CloseLater = 1;
         if(W->MouseIn == P) { W->MouseIn = 0; }
-        if(P->Controller) { P->Controller->Close(); Changed = true; }
-        if(P->Visual) { W->G->Root->RemoveVisual(P->Visual); }
         Logf("web", "page %llu closed", P->Id);
     }
     // a popup whose opener is gone gets no window
@@ -321,8 +326,10 @@ extern "C" void Web_Update(Web* W, const AppWeb* Webs, s32 Count, u64 Focus)
     }
     if(Changed) { W->G->Comp->Commit(); }
 
-    // --- the keyboard: to the page the app says, only while the window is in front ---
-    if(GetForegroundWindow() == W->Window)
+    // --- the keyboard: to the page the app says, only while the window is in front, and not while a press of moss's
+    //     own is held (a tab picked up: moving the focus would take the mouse from the drag) ---
+    bool MossPress = !W->Pressed && (GetKeyState(VK_LBUTTON) < 0 || GetKeyState(VK_RBUTTON) < 0 || GetKeyState(VK_MBUTTON) < 0);
+    if(GetForegroundWindow() == W->Window && !MossPress)
     {
         web_page* Want = 0;
         web_page* Has = 0;
@@ -335,6 +342,30 @@ extern "C" void Web_Update(Web* W, const AppWeb* Webs, s32 Count, u64 Focus)
         if(Want && Want != Has) { Want->Controller->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC); }
         if(!Want && Has) { SetFocus(W->Window); }
     }
+}
+
+// A frame is on screen: pages it covers now (no longer shown, or closed) go.
+extern "C" void Web_Presented(Web* W)
+{
+    bool Changed = false;
+    for(size_t I = 0; W && I < W->Pages.size(); ++I)
+    {
+        web_page* P = W->Pages[I];
+        if(P->CloseLater)
+        {
+            P->CloseLater = 0;
+            if(P->Controller) { P->Controller->Close(); }
+            if(P->Visual) { W->G->Root->RemoveVisual(P->Visual); }
+            Changed = true;
+        }
+        else if(P->Visible && !P->Shown && P->Controller)
+        {
+            P->Controller->put_IsVisible(FALSE);
+            P->Visible = 0;
+            Changed = true;
+        }
+    }
+    if(Changed) { W->G->Comp->Commit(); }
 }
 
 // The pages' state for the app.
@@ -392,7 +423,11 @@ extern "C" b32 Web_Mouse(Web* W, u32 Msg, u64 WParam, s64 LParam)
     POINT Pt = {GET_X_LPARAM(LParam), GET_Y_LPARAM(LParam)};
     if(Msg == WM_MOUSEWHEEL || Msg == WM_MOUSEHWHEEL) { ScreenToClient(W->Window, &Pt); }
     web_page* P = W->Pressed ? W->MouseIn : 0;
-    if(!P && Msg != WM_MOUSELEAVE)
+    // a press that began on moss's own (a tab dragged over a page, a splitter) stays moss's until it's let go: a page
+    // seeing a held button would take the mouse
+    bool MossPress = !W->Pressed && (GET_KEYSTATE_WPARAM(WParam) & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) &&
+                     (Msg == WM_MOUSEMOVE || Msg == WM_LBUTTONUP || Msg == WM_RBUTTONUP || Msg == WM_MBUTTONUP);
+    if(!P && Msg != WM_MOUSELEAVE && !MossPress)
     {
         for(web_page* Q : W->Pages) { if(!Q->Closed && Q->Comp && Q->Shown && Q->Mouse && PtInRect(&Q->Bounds, Pt)) { P = Q; } }
     }
@@ -441,7 +476,7 @@ extern "C" void Web_Destroy(Web* W)
     if(!W) { return; }
     for(web_page* P : W->Pages)
     {
-        if(P->Controller && !P->Closed) { P->Controller->Close(); }
+        if(P->Controller && (!P->Closed || P->CloseLater)) { P->Controller->Close(); }
         if(P->View) { P->View->Release(); }
         if(P->Controller) { P->Controller->Release(); }
         if(P->Comp) { P->Comp->Release(); }

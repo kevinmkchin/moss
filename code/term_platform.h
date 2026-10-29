@@ -85,6 +85,7 @@ void  TermCells_Destroy(TermCells *t);
 typedef struct Web Web;
 Web *Web_Create(void *hwnd, Gpu *g, u32 wake_message, const wchar_t *data_folder);   // NULL: no WebView2 loader
 void Web_Update(Web *w, const AppWeb *webs, s32 count, u64 focus);   // the app's pages: made, placed, navigated, closed
+void Web_Presented(Web *w);                                          // after a present: pages it covers are hidden / closed
 s32  Web_Fill(Web *w, Arena *arena, AppWebState *out, s32 max);      // their state
 s32  Web_Popups(Web *w, Arena *arena, AppWebPopup *out, s32 max);    // new windows they asked for, waiting for tabs
 b32  Web_HasFocus(Web *w);                                           // a page has the keyboard

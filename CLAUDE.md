@@ -405,11 +405,16 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   page's rect and clears to see-through while one is shown, so moss's popups go over it. The app lists every web tab in
   `AppOutput.webs` (rect, shown, mouse over it, navigate / back / forward / reload, the popup it's for) and `web_focus`;
   the platform makes, places and closes pages (`Web_Update`) and hands their url, title, history, loading,
-  notifications and close requests back (`AppFrameInput.webs`). The tab's name is the page's title.
+  notifications and close requests back (`AppFrameInput.webs`). The tab's name is the page's title. A page is shown at
+  once but hidden or closed only after a present (`Web_Presented`): the frame on screen until then has a see-through hole
+  where the page was (switching to a shell tab flashed the windows behind).
 - Mouse: the window passes its mouse messages to the page the app says is under the mouse (`Web_Mouse`,
   SendMouseInput; the wheel and side buttons go only to the page), the page's cursor shows. A press goes to the page only
   while the window is in front: a page that takes the keyboard brings its window forward (a test window's posted clicks
-  did). Keyboard: the page has it (MoveFocus, only while the window is in front); moss's keys come back from it
+  did). A press that began on moss's own (a tab picked up, a splitter) stays moss's until let go: the page never sees
+  the held button, the keyboard doesn't move to a page meanwhile, a page's keyboard counts as the window's (else the
+  platform lets go of held buttons), and the keyboard going to a page keeps the window's mouse capture.
+  Keyboard: the page has it (MoveFocus, only while the window is in front); moss's keys come back from it
   (AcceleratorKeyPressed: Ctrl+Shift+any, Alt+arrows, Ctrl+Tab, Ctrl+, Ctrl+L, F11), posted to the window as key
   messages. Ctrl+L / F6 edit the address (Enter goes: https:// added, else a Google search), F5 reloads.
 - New windows (window.open, target=_blank: sign-in popups) are held (NewWindowRequested, deferred) until the app makes a
