@@ -102,6 +102,7 @@ typedef struct TermSession {
     u64 modified;     // its transcript's last write (FILETIME, UTC)
     String config_dir; // its account's config folder (empty = the default account's)
 } TermSession;
+typedef struct TermSessionHit { String id, snippet; } TermSessionHit;   // a session whose transcript has the text searched
 
 // The terminal colours of a theme (0xRRGGBB): what cells with default and palette colours look like.
 typedef struct TermPalette {

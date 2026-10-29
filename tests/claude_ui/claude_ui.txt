@@ -1,0 +1,101 @@
+# Claude tabs made comfortable: the composer (a multi-line prompt, sent with Ctrl+Enter), the reader (markdown, a code
+# block's copy button), the account line (the model picker, the mode, the context), the sidebar's full-text search and
+# its menu (pin, rename, archive). Claude is faked; its sessions are made up (make.py).
+waitfor λ
+type python make.py
+key Enter
+waitfor made
+# --- the composer, on the shell: two lines, sent as two commands ---
+key Ctrl+Shift+I
+waitlabel composer
+type echo comp^osed-one
+key Enter
+type echo comp^osed-two
+sleep 300
+waitidle
+capture out/composer.png
+key Ctrl+Enter
+waitfor composed-two
+waitgone composer
+# --- a claude session from the sidebar: its account line (context, mode, model) ---
+waitlabel session Show me the plan
+cursorui session Show me the plan
+lmb down
+lmb up
+waitfor fake-claude ready
+waitlabel claude model
+sleep 3500
+waitidle
+capture out/account_line.png
+# the model picker types /model
+cursorui claude model
+lmb down
+lmb up
+waitlabel palette model sonnet
+sleep 400
+waitidle
+cursorui palette model sonnet
+lmb down
+lmb up
+waitfor heard: /model sonnet
+# --- the reader: markdown, a code block copied ---
+key Ctrl+Shift+R
+waitlabel copy code 1
+sleep 500
+waitidle
+capture out/reader.png
+cursorui copy code 1
+lmb down
+lmb up
+sleep 300
+key Escape
+# --- the sidebar: a word only in a later message, found by the full-text search ---
+key Ctrl+Shift+S
+type zebracorn
+waitgone session Show me the plan
+waitlabel session Tidy the enclosure list
+sleep 500
+waitidle
+capture out/search.png
+key Escape
+key Escape
+# --- its menu: pin, rename, archive ---
+cursorui session Rename the build step
+rmb down
+rmb up
+waitlabel session menu Pin to the top
+sleep 300
+waitidle
+cursorui session menu Pin to the top
+lmb down
+lmb up
+sleep 300
+waitidle
+cursorui session Rename the build step
+rmb down
+rmb up
+waitlabel session menu Rename
+sleep 300
+waitidle
+cursorui session menu Rename
+lmb down
+lmb up
+type The build step
+key Enter
+sleep 300
+waitidle
+waitlabel session Tidy the enclosure list
+cursorui session Tidy the enclosure list
+rmb down
+rmb up
+waitlabel session menu Archive
+sleep 300
+waitidle
+cursorui session menu Archive
+lmb down
+lmb up
+waitgone session Tidy the enclosure list
+sleep 300
+waitidle
+capture out/sidebar_menu.png
+exit

@@ -106,6 +106,27 @@ b32      Ui_TextEdit(Ui *ui, u64 id, TextEdit *e, Rect r, Font *font, b32 focuse
 static inline String TextEdit_String(TextEdit *e) { String s = { e->buffer, e->count }; return s; }
 void     TextEdit_Set(TextEdit *e, String s);   // all of it selected
 
+// Edited text of many lines (the prompt composer): buffer, caret, selection, the first line shown, and undo (the text
+// as it was before each burst of editing, the newest last).
+#define TextArea_Max 16384
+#define TextArea_Undos 8
+typedef struct TextArea {
+    s32 count, cursor, mark;
+    s32 top;
+    u8 buffer[TextArea_Max];
+    u8 undo[TextArea_Undos][TextArea_Max];
+    s32 undo_count[TextArea_Undos], undo_cursor[TextArea_Undos];
+    s32 undo_len;
+    u64 undo_us;              // the last edit (a pause starts a new burst)
+} TextArea;
+// A many-line edit in r, its lines wrapped to the width. While `focused` it takes the keys TextEdit does, and Enter (a
+// new line), Up / Down, Ctrl+Home / End, Ctrl+Z (undo), the wheel scrolls; Ctrl+Enter is left for the caller. Returns 1
+// when the text changed. Draws the text, selection and caret.
+b32      Ui_TextArea(Ui *ui, u64 id, TextArea *e, Rect r, Font *font, b32 focused, String hint, u32 color, u32 hint_color, u32 selection_color);
+s32      TextArea_Lines(Ui *ui, TextArea *e, Font *font, s32 width);   // how many lines it wraps to in width px
+void     TextArea_Insert(TextArea *e, String s);                       // at the caret, over the selection (undoable)
+static inline String TextArea_String(TextArea *e) { String s = { e->buffer, e->count }; return s; }
+
 #ifdef __cplusplus
 }
 #endif

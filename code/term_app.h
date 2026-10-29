@@ -10,7 +10,7 @@
 #include "term_types.h"
 
 // The UI's fonts, made by the platform for the window's DPI (term_font.cpp): Segoe UI, Segoe Fluent Icons.
-enum { Font_Ui = 0, Font_UiSmall = 1, Font_UiBold = 2, Font_Icon = 3, Font_IconSmall = 4, Font_Count = 5 };
+enum { Font_Ui = 0, Font_UiSmall = 1, Font_UiBold = 2, Font_Icon = 3, Font_IconSmall = 4, Font_Mono = 5, Font_Count = 6 };
 
 typedef struct AppPlace { String name, path; } AppPlace;
 // A picture for the image viewer, decoded (scaled down to fit 4K) and on the GPU; failed: it couldn't be read.
@@ -93,8 +93,13 @@ typedef struct AppFrameInput {
     s32 cell_w, cell_h;         // terminal cell size in pixels at this DPI and font size
     b32 tabs_received;          // the server has sent its tab list since the window connected
     String clipboard_text;      // only when the app asked for it last frame (AppOutput.read_clipboard)
+    String pasted_image;        // the clipboard's picture saved as a PNG (AppOutput.save_clipboard_image): its path
     s64 session_count;          // Claude Code's sessions, newest first (while AppOutput.want_sessions)
     const TermSession *sessions;
+    String session_hits_text;   // the last search of every transcript (AppOutput.session_search): its text, and its hits
+    s64 session_hit_count;
+    const TermSessionHit *session_hits;
+    String sessions_meta_text;  // sessions.txt (names, pins, archived), at start
     b32 open_request;           // a tab asked for from outside (term -d DIR [-- command]); until AppOutput.open_taken
     String open_cwd, open_command;
     u32 find_tab;               // the last find result: its tab, the matches in its scrollback and screen, the current one (1-based)
@@ -179,6 +184,8 @@ typedef struct AppOutput {
     u32 focus_tab;              // the tab with the keyboard focus (0 = none); sent when it changes
     f32 term_font_px;           // the terminal font size in pixels the cells should use (the platform makes the glyphs again on change)
     b32 want_sessions;          // the sessions list is on screen: the server keeps it current
+    b32 session_search_set;     String session_search;   // find this in every transcript (empty: stop)
+    String sessions_meta_text;  // non-empty: save sessions.txt (the sidebar's names, pins, archived)
     b32 want_fonts;             // list the monospace fonts (AppFrameInput.mono_fonts), once
     b32 find_send;              // the find bar's text (empty: off) for find_tab, and a step (FIND_* flags)
     u32 find_tab, find_flags;
@@ -197,6 +204,7 @@ typedef struct AppOutput {
 
     // --- other side effects ---
     b32 read_clipboard;         // put the clipboard text in the next frame's input
+    b32 save_clipboard_image;   // the clipboard's picture, when it has one and no text, as a PNG (AppFrameInput.pasted_image)
     b32 clipboard_set;          String clipboard_text;
     String open_url;            // ShellExecute an http(s) link
     String open_path;           // a path Ctrl+clicked in a terminal (maybe with :line:col), relative to open_path_cwd

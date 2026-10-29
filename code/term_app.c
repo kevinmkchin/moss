@@ -33,7 +33,7 @@ enum {
     Icon_Cloud = 0xE753, Icon_Back = 0xE72B, Icon_Forward = 0xE72A, Icon_Star = 0xE734, Icon_StarFilled = 0xE735,
     Icon_History = 0xE81C, Icon_Home = 0xE80F, Icon_Download = 0xE896, Icon_Document = 0xE8A5, Icon_Picture = 0xE8B9,
     Icon_Music = 0xEC4F, Icon_Video = 0xE714, Icon_Desktop = 0xE7F4, Icon_OpenFolder = 0xE838,
-    Icon_Refresh = 0xE72C, Icon_Globe = 0xE774,
+    Icon_Refresh = 0xE72C, Icon_Globe = 0xE774, Icon_Copy = 0xE8C8,
 };
 
 // --- commands --------------------------------------------------------------------------------------------------
@@ -44,7 +44,7 @@ enum {
     Cmd_Palette, Cmd_Profile, Cmd_DebugOverlay, Cmd_CloseWindow, Cmd_ToggleBrowser, Cmd_PrevCommand, Cmd_NextCommand, Cmd_Sessions, Cmd_Settings, Cmd_TearOff,
     Cmd_Find, Cmd_Search, Cmd_RenameTab, Cmd_ZoomPane, Cmd_ClearScrollback, Cmd_CopyAll, Cmd_Broadcast, Cmd_Topmost, Cmd_Duplicate,
     Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode, Cmd_NewWebTab,
-    Cmd_NewClaudeAs, Cmd_AddAccount,
+    Cmd_NewClaudeAs, Cmd_AddAccount, Cmd_Compose, Cmd_Reader,
     Cmd_Count
 };
 
@@ -101,6 +101,8 @@ static const CommandDef g_Commands[Cmd_Count] = {
     [Cmd_ClearScrollback] = { "clear_scrollback", "Clear the scrollback", Key_A + 'K' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_GoTo]          = { "go_to", "Go to a folder", Key_A + 'G' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_Bookmark]      = { "bookmark", "Bookmark this folder (again: not)", 0, 0 },
+    [Cmd_Reader]        = { "reader", "Read the claude conversation (markdown, code to copy)", Key_A + 'R' - 'A', Mod_Ctrl | Mod_Shift },
+    [Cmd_Compose]       = { "compose", "Write a prompt (Ctrl+Enter sends it to the terminal)", Key_A + 'I' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_FocusMode]     = { "focus_mode", "Focus: this pane alone, nothing else (again: back)", Key_A + 'F' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_NewWebTab]     = { "new_web_tab", "New web tab", Key_A + 'B' - 'A', Mod_Ctrl | Mod_Shift },
 };
@@ -141,7 +143,13 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_OpenFolder]    = { "More", "Open the settings folder", "settings.txt and the shell setup", SettingKind_Action },
     [Setting_Reset]         = { "More", "Reset to moss's defaults", "settings.txt as moss ships it; the old one kept as settings-old.txt", SettingKind_Action },
 };
-enum { PaletteMode_Commands, PaletteMode_Settings, PaletteMode_GoTo, PaletteMode_Account };
+enum { PaletteMode_Commands, PaletteMode_Settings, PaletteMode_GoTo, PaletteMode_Account, PaletteMode_Model };
+
+// The models the account line's picker offers (Claude Code's /model names); a name typed that isn't one is offered too.
+static const char *const g_Models[][2] = {
+    { "default", "the plan's default" }, { "opus", "the most capable" }, { "sonnet", "fast and capable" },
+    { "haiku", "the fastest" }, { "opus[1m]", "Opus with a 1M token context" }, { "sonnet[1m]", "Sonnet with a 1M token context" },
+};
 
 // --- terminal themes: the terminal's colors; the chrome is made from them ----------------------------------------
 // The first is the default when settings.txt names none: Moss, term's own (the official theme).
@@ -245,8 +253,17 @@ typedef struct NamedRect { String name; Rect rect; } NamedRect;
 enum { App_MaxNamed = 512, App_MaxPanes = 64 };
 
 // The history view (a claude's transcript, searched): its messages wrapped to the pane, and the matches in it.
-enum { HistLine_Text = 0, HistLine_User, HistLine_Claude, HistLine_Blank };
-typedef struct HistLine { u32 kind; String text; } HistLine;
+enum { HistLine_Text = 0, HistLine_User, HistLine_Claude, HistLine_Blank, HistLine_Heading, HistLine_Code, HistLine_Table, HistLine_Rule };
+enum { HistSpan_Bold = 1, HistSpan_Code = 2 };
+typedef struct HistSpan { s32 start, len; u32 style; } HistSpan;   // a bold or `code` run in a line's text
+typedef struct HistLine {
+    u32 kind;                 // HistLine_*
+    String text;              // markdown's marks taken out
+    HistSpan *spans; s32 span_count;
+    String marker; s32 indent;   // a list item: its marker (on its first line) and how far its lines are in
+    s32 block; b32 first;     // Code: its block (App.hist_blocks), the block's first line; Table: the header row
+    String *cells; s32 cell_count; s32 *widths;   // Table: the row's cells, its table's column widths
+} HistLine;
 typedef struct HistMatch { s32 line, start, len; } HistMatch;
 
 // A tab's other face: its folder listed. Listings come from the platform's lister (term_files.h), a folder watched
@@ -421,6 +438,15 @@ struct App {
     Array(HistLine) hist_lines;
     Array(HistMatch) hist_matches;
     s32 hist_current;         // the current match, -1 = none
+    Array(String) hist_blocks;   // the code blocks' text (their copy buttons)
+    s32 hist_copied;          // the block copied last (1-based), and when: "Copied" for a moment
+    u64 hist_copied_us;
+    b32 hist_at_end;          // the view was at its end: a fresh read stays at the end
+    // --- the reader (Ctrl+Shift+R): a claude tab's transcript as the history view, without a search; read again when
+    //     a turn ends ---
+    b32 reader_open;
+    u32 reader_term;
+    b32 reader_busy;          // its claude's turn was under way (a read follows the end)
     f32 hist_scroll;          // px from the top
     b32 hist_follow;          // scroll the current match into view (or the end, with none)
     // --- Claude accounts (accounts.txt): [0] is the default one (Claude Code's own); a claude tab's account is the one
@@ -434,6 +460,12 @@ struct App {
     u8 pending_account[64];   // an account just asked for: its claude tab opens (to /login) once accounts.txt lists it
     s32 pending_account_len;
     b32 account_adding;       // the accounts palette came from "Add a Claude account" (its prompt asks for a name)
+    u32 model_term;           // the claude tab the model picker (PaletteMode_Model) is for
+    // --- the prompt composer (Ctrl+Shift+I): a draft written in a real text box, sent to its terminal as a paste and
+    //     Enter (Ctrl+Enter); one draft, kept while it's away ---
+    TextArea compose;
+    b32 compose_open;
+    u32 compose_term;
     b32 palette_open;
     u8 palette_mode;          // PaletteMode_*
     TextEdit palette_edit;
@@ -483,6 +515,17 @@ struct App {
     b32 sidebar_open;         // the sessions sidebar on the window's left
     b32 side_focus;           // it has the keyboard (type to filter, arrows, Enter resumes)
     u8 side_filter[128];
+    // --- the sidebar's own notes on sessions (sessions.txt): a name of the user's, pinned (first), archived (left out
+    //     unless something's typed); a right-click's menu; a name being edited in its row; the full-text search ---
+    struct { u8 id[48]; s32 id_len; u8 name[128]; s32 name_len; b32 pin, archive; } side_meta[256];
+    s32 side_meta_count;
+    u8 side_menu_id[48]; s32 side_menu_len;   // the session its menu is for (none: 0)
+    s32 side_menu_x, side_menu_y;
+    u8 side_rename_id[48]; s32 side_rename_len;
+    TextEdit side_rename_edit;
+    u8 side_sent[128]; s32 side_sent_len;   // the text every transcript was last searched for
+    u64 side_typed_us;        // the filter last changed: the search goes out once it's been still a moment
+    u32 side_typed_frame;     // (headless runs: two frames, their clock moves only with frames)
     s32 side_filter_len;
     s64 side_cursor;          // the selected session (in the filtered list)
     s64 side_top;             // px scrolled
@@ -743,6 +786,64 @@ static void SelectionRange(const Selection *s, s32 *sx, s32 *sy, s32 *ex, s32 *e
     *sy = forward ? s->ay : s->by;
     *ex = forward ? s->bx : s->ax;
     *ey = forward ? s->by : s->ay;
+}
+
+// Text copied from an agent's tab without its screen's furniture: the marks claude puts in front of its output (a bullet,
+// a tree corner) become spaces, the indent the lines share goes, and a line it wrapped near the screen's edge joins the
+// next (when it ends in a word or punctuation and the next starts a word).
+static String CleanAgentCopy(Arena *a, String text, s32 cols)
+{
+    s64 cap = 0;
+    for (s64 i = 0; i < text.count; i++) cap += text.data[i] == '\n';
+    String *lines = Arena_PushArray(a, String, cap + 1);
+    s32 *widths = Arena_PushArray(a, s32, cap + 1);
+    s64 n = 0;
+    for (s64 at = 0; at <= text.count;) {
+        s64 end = at;
+        while (end < text.count && text.data[end] != '\n') end++;
+        String l = { text.data + at, end - at };
+        if (l.count && l.data[l.count - 1] == '\r') l.count--;
+        // the marks as spaces (they're one cell each)
+        TextBuilder tb = { a, NULL, 0, 0 };
+        s32 w = 0;
+        for (s64 k = 0; k < l.count;) {
+            s64 from = k;
+            u32 cp = Utf8_Decode(l, &k);
+            b32 lead = 1;
+            for (s64 j = 0; j < from; j++) lead &= l.data[j] == ' ';
+            if (lead && (cp == 0x25CF || cp == 0x23BF)) TB_Append(&tb, S(" "));
+            else TB_Append(&tb, (String){ l.data + from, k - from });
+            w++;
+        }
+        lines[n] = TB_String(&tb);
+        while (lines[n].count && lines[n].data[lines[n].count - 1] == ' ') lines[n].count--;
+        widths[n++] = w;
+        at = end + 1;
+    }
+    // the indent they share
+    s64 common = -1;
+    for (s64 i = 0; i < n; i++) {
+        s64 k = 0;
+        while (k < lines[i].count && lines[i].data[k] == ' ') k++;
+        if (k < lines[i].count && (common < 0 || k < common)) common = k;
+    }
+    TextBuilder out = { a, NULL, 0, 0 };
+    for (s64 i = 0; i < n; i++) {
+        String l = lines[i];
+        s64 cut = Min(Max(common, (s64)0), l.count);
+        l.data += cut; l.count -= cut;
+        TB_Append(&out, l);
+        if (i + 1 >= n) break;
+        String next = lines[i + 1];
+        while (next.count && next.data[0] == ' ') { next.data++; next.count--; }
+        u8 last = l.count ? l.data[l.count - 1] : 0;
+        b32 join = widths[i] >= cols - 12 && next.count && l.count &&
+                   ((last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z') || (last >= '0' && last <= '9') || strchr(",.;:)'\"", last)) &&
+                   ((next.data[0] >= 'a' && next.data[0] <= 'z') || (next.data[0] >= 'A' && next.data[0] <= 'Z'));
+        if (join) { TB_Append(&out, S(" ")); lines[i + 1] = next; continue; }
+        TB_Append(&out, S("\n"));
+    }
+    return TB_String(&out);
 }
 
 static String SelectionText(Arena *a, const Selection *s, const TermGrid *g)
@@ -1059,6 +1160,32 @@ static PaneTab *RequestTab(App *app, Frame *f, PaneNode *leaf, u32 kind, String 
 }
 
 static String FocusedCwd(App *app);
+
+// The sidebar's note on a session (sessions.txt): its index, -1 when it has none (add: a new, empty one).
+static s32 SessionMetaIndex(App *app, String id, b32 add)
+{
+    for (s32 i = 0; i < app->side_meta_count; i++) if (Str_Equal((String){ app->side_meta[i].id, app->side_meta[i].id_len }, id)) return i;
+    if (!add || app->side_meta_count >= (s32)ArrayCount(app->side_meta) || id.count > (s64)sizeof(app->side_meta[0].id)) return -1;
+    s32 i = app->side_meta_count++;
+    memset(&app->side_meta[i], 0, sizeof(app->side_meta[i]));
+    memcpy(app->side_meta[i].id, id.data, (size_t)id.count);
+    app->side_meta[i].id_len = (s32)id.count;
+    return i;
+}
+
+// sessions.txt as it is now: "name <id> = <name>", "pin <id>", "archive <id>" lines.
+static String SessionMetaText(App *app, Arena *a)
+{
+    TextBuilder tb = { a, NULL, 0, 0 };
+    TB_Append(&tb, S("# moss: the sessions sidebar's names, pins and archived sessions\r\n"));
+    for (s32 i = 0; i < app->side_meta_count; i++) {
+        String id = { app->side_meta[i].id, app->side_meta[i].id_len };
+        if (app->side_meta[i].name_len) TB_Format(&tb, "name %.*s = %.*s\r\n", STR_ARG(id), app->side_meta[i].name_len, (const char *)app->side_meta[i].name);
+        if (app->side_meta[i].pin) TB_Format(&tb, "pin %.*s\r\n", STR_ARG(id));
+        if (app->side_meta[i].archive) TB_Format(&tb, "archive %.*s\r\n", STR_ARG(id));
+    }
+    return TB_String(&tb);
+}
 
 // A new claude tab in the focused pane, at its folder, under an account (its config folder; empty = the default).
 static void RequestClaudeTab(App *app, Frame *f, String config_dir)
@@ -1854,7 +1981,12 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         if (t && t->browsing && t->browser) { BrowserCopy(f, t); break; }
         if (app->sel.visible && app->sel.term_id) {
             const TermGrid *sg = FindGrid(f->in, app->sel.term_id);
-            if (sg) { f->out->clipboard_set = 1; f->out->clipboard_text = SelectionText(f->fa, &app->sel, sg); }
+            if (sg) {
+                const TermTab *sst = FindServerTab(app, sg->tab_id);
+                f->out->clipboard_set = 1;
+                f->out->clipboard_text = SelectionText(f->fa, &app->sel, sg);
+                if (sst && (sst->flags & TermTab_Agent) && !app->sel.block) f->out->clipboard_text = CleanAgentCopy(f->fa, f->out->clipboard_text, sg->cols);
+            }
         }
         break;
     case Cmd_Paste: if (t && t->term_id && !t->browsing) { app->paste_wait = t->term_id; f->out->read_clipboard = 1; } break;
@@ -1905,6 +2037,26 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         app->palette_top = 0;
         app->setting_editing = 0;
     } break;
+    case Cmd_Reader: {
+        // a claude tab's transcript as the reader (again: back to the terminal); read now, and again when a turn ends
+        const TermTab *st = t ? FindServerTab(app, t->term_id) : NULL;
+        if (!st || !(st->flags & TermTab_Agent) || !st->key.count || t->browsing || t->viewing) break;
+        app->reader_open = !(app->reader_open && app->reader_term == t->term_id);
+        app->reader_term = t->term_id;
+        if (app->reader_open) {
+            f->out->history_get = t->term_id;
+            app->hist_version = 0;
+            app->hist_at_end = 1;
+            app->hist_follow = 1;
+            app->reader_busy = (st->flags & TermTab_Busy) != 0;
+        }
+    } break;
+    case Cmd_Compose:
+        // the composer over the focused terminal (again: away, the draft kept)
+        if (!t || !t->term_id || t->browsing || t->viewing) break;
+        app->compose_open = !(app->compose_open && app->compose_term == t->term_id);
+        app->compose_term = t->term_id;
+        break;
     case Cmd_FocusMode:
         // at once, both ways: the panes snap (no easing); the next frame lays them out
         if (!app->focus_mode && !t) break;
@@ -1969,6 +2121,7 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
                 app->hist_version = 0;   // built again from the fresh read
                 app->hist_current = -1;
                 app->hist_follow = 1;
+                app->hist_at_end = 1;
             }
         }
         break;
@@ -2570,6 +2723,68 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             consumed[i] = ui->consumed[i] = 1;
         }
     }
+    // --- the reader: its tab gone, to its files or another tab: closed; read again when a turn ends. While its tab is the
+    //     focused one it takes the keys (nothing types into the claude under it): Esc back, the arrows and pages scroll ---
+    PaneTab *reader_tab = app->reader_open ? Panes_FindTerm(panes, app->reader_term) : NULL;
+    const TermTab *reader_st = reader_tab ? FindServerTab(app, app->reader_term) : NULL;
+    if (app->reader_open && (!reader_tab || !reader_st || reader_tab->browsing || reader_tab->viewing)) app->reader_open = 0;
+    if (app->reader_open) {
+        b32 busy = (reader_st->flags & TermTab_Busy) != 0;
+        if (busy != app->reader_busy && !busy) out->history_get = app->reader_term;
+        app->reader_busy = busy;
+    }
+    if (app->reader_open && reader_tab == panes->selected && !modal && !(app->compose_open && app->compose_term == app->reader_term) &&
+        !(app->find_open && app->find_focus)) {
+        s32 page = Max(1, (in->client_h - caption_h) * 4 / 5);
+        for (s64 i = 0; i < event_count; i++) {
+            const UiKeyEvent *e = &events[i];
+            if (consumed[i]) continue;
+            consumed[i] = 1;
+            if (!e->down) continue;
+            u8 m = e->modifiers & (Mod_Ctrl | Mod_Alt | Mod_Shift);
+            if (e->key == Key_Escape && !m) app->reader_open = 0;
+            else if (e->key == Key_Up) app->hist_scroll -= (f32)R(1.55) * 3;
+            else if (e->key == Key_Down) app->hist_scroll += (f32)R(1.55) * 3;
+            else if (e->key == Key_PageUp) app->hist_scroll -= (f32)page;
+            else if (e->key == Key_PageDown || e->key == Key_Space) app->hist_scroll += (f32)page;
+            else if (e->key == Key_Home) app->hist_scroll = 0;
+            else if (e->key == Key_End) app->hist_scroll = 1e9f;
+        }
+    }
+    // --- the composer has the keyboard while open on the focused tab: every key the commands left is its; Ctrl+Enter
+    //     sends (a paste, then Enter), Esc puts it away (the draft kept), Ctrl+V asks for a picture too ---
+    PaneTab *compose_tab = app->compose_open ? Panes_FindTerm(panes, app->compose_term) : NULL;
+    if (app->compose_open && (!compose_tab || compose_tab->browsing || compose_tab->viewing)) app->compose_open = 0;
+    if (in->pasted_image.count && app->compose_open) {
+        b32 quote = memchr(in->pasted_image.data, ' ', (size_t)in->pasted_image.count) != NULL;
+        TextArea_Insert(&app->compose, Str_PushFormat(fa, quote ? "\"%.*s\" " : "%.*s ", STR_ARG(in->pasted_image)));
+    }
+    if (app->compose_open && compose_tab == panes->selected && !modal) {
+        for (s64 i = 0; i < event_count; i++) {
+            const UiKeyEvent *e = &events[i];
+            if (consumed[i]) continue;
+            consumed[i] = 1;
+            if (!e->down) continue;
+            u8 m = e->modifiers & (Mod_Ctrl | Mod_Alt | Mod_Shift);
+            if ((e->key == Key_Enter || e->key == Key_KeypadEnter) && m == Mod_Ctrl) {
+                const TermGrid *g = FindGrid(in, app->compose_term);
+                String text = TextArea_String(&app->compose);
+                if (text.count) {
+                    TermSend(&f, app->compose_term, PasteBytes(fa, text, g && (g->flags & TermGrid_BracketedPaste)));
+                    TermSend(&f, app->compose_term, S("\r"));
+                    Logf("app", "composer: sent %lld bytes", (long long)text.count);
+                }
+                app->compose.count = app->compose.cursor = app->compose.mark = app->compose.top = app->compose.undo_len = 0;
+                app->compose_open = 0;
+                ui->consumed[i] = 1;
+            } else if (e->key == Key_Escape && !m) {
+                app->compose_open = 0;
+                ui->consumed[i] = 1;
+            } else if ((e->key == Key_A + 'V' - 'A' && m == Mod_Ctrl) || (e->key == Key_Insert && m == Mod_Shift)) {
+                out->save_clipboard_image = 1;   // the widget pastes the text; a picture's path comes next frame
+            }
+        }
+    }
     // smartcase, as vim's: an uppercase letter matches case
     app->find_case = 0;
     for (s32 k = 0; k < app->find_edit.count; k++) app->find_case |= app->find_edit.buffer[k] >= 'A' && app->find_edit.buffer[k] <= 'Z';
@@ -2582,10 +2797,58 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     if (app->sidebar_open) {
         side_rows = Arena_PushArray(fa, s32, in->session_count + 1);
         String want = { app->side_filter, app->side_filter_len };
-        for (s64 i = 0; i < in->session_count; i++) {
-            const TermSession *ss = &in->sessions[i];
-            if (want.count && !ContainsNoCase(ss->project, want) && !ContainsNoCase(ss->title, want) && !ContainsNoCase(ss->cwd, want)) continue;
-            side_rows[side_count++] = (s32)i;
+        if (in->sessions_meta_text.count) {
+            // sessions.txt, read once at start
+            String text = in->sessions_meta_text;
+            for (s64 at = 0; at < text.count;) {
+                s64 end = at;
+                while (end < text.count && text.data[end] != '\n') end++;
+                String line = { text.data + at, end - at };
+                at = end + 1;
+                while (line.count && strchr("\r \t", line.data[line.count - 1])) line.count--;
+                s64 sp = 0;
+                while (sp < line.count && line.data[sp] != ' ') sp++;
+                if (sp >= line.count || line.data[0] == '#') continue;
+                String kind = { line.data, sp }, rest = { line.data + sp + 1, line.count - sp - 1 };
+                s64 eq = 0;
+                while (eq < rest.count && rest.data[eq] != ' ') eq++;
+                s32 mi = SessionMetaIndex(app, (String){ rest.data, eq }, 1);
+                if (mi < 0) continue;
+                if (Str_Equal(kind, S("pin"))) app->side_meta[mi].pin = 1;
+                else if (Str_Equal(kind, S("archive"))) app->side_meta[mi].archive = 1;
+                else if (Str_Equal(kind, S("name")) && eq + 3 <= rest.count) {
+                    String name = { rest.data + eq + 3, rest.count - eq - 3 };
+                    app->side_meta[mi].name_len = (s32)CopyInto(app->side_meta[mi].name, sizeof(app->side_meta[mi].name), name).count;
+                }
+            }
+        }
+        // every transcript searched once the text has been still a moment (3 characters or more; fewer: none)
+        if (!Str_Equal(want, (String){ app->side_sent, app->side_sent_len })) {
+            if (want.count >= 3 && (now - app->side_typed_us >= 250000 || (app->headless && ui->frame - app->side_typed_frame >= 2))) {
+                out->session_search_set = 1;
+                out->session_search = want;
+                app->side_sent_len = (s32)CopyInto(app->side_sent, sizeof(app->side_sent), want).count;
+            } else if (want.count < 3 && app->side_sent_len) {
+                out->session_search_set = 1;
+                app->side_sent_len = 0;
+            } else if (want.count >= 3 && (!out->wake_at_us || app->side_typed_us + 250000 < out->wake_at_us)) {
+                out->wake_at_us = app->side_typed_us + 250000;
+            }
+        }
+        b32 hits_now = want.count >= 3 && Str_Equal(in->session_hits_text, want);
+        for (s32 pass = 0; pass < 2; pass++) {   // the pinned first
+            for (s64 i = 0; i < in->session_count; i++) {
+                const TermSession *ss = &in->sessions[i];
+                s32 mi = SessionMetaIndex(app, ss->id, 0);
+                b32 pinned = mi >= 0 && app->side_meta[mi].pin, archived = mi >= 0 && app->side_meta[mi].archive;
+                if (pinned != (pass == 0) || (archived && !want.count)) continue;
+                String name = mi >= 0 ? (String){ app->side_meta[mi].name, app->side_meta[mi].name_len } : (String){0};
+                b32 hit = 0;
+                for (s64 h = 0; hits_now && h < in->session_hit_count && !hit; h++) hit = Str_Equal(in->session_hits[h].id, ss->id);
+                if (want.count && !hit && !ContainsNoCase(ss->project, want) && !ContainsNoCase(ss->title, want) && !ContainsNoCase(ss->cwd, want) &&
+                    !ContainsNoCase(name, want)) continue;
+                side_rows[side_count++] = (s32)i;
+            }
         }
         if (in->input.button[Mouse_Left].pressed && !modal) app->side_focus = mouse_x < sidebar_w;
         if (app->side_focus) {
@@ -2599,7 +2862,26 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             app->side_cursor = at;
         }
     }
-    if (app->sidebar_open && app->side_focus && !modal) {
+    if (app->sidebar_open && app->side_rename_len && !modal) {
+        // --- a session's name edited in its row: Enter keeps it (empty: its first prompt again), Esc drops it ---
+        for (s64 i = 0; i < event_count; i++) {
+            const UiKeyEvent *e = &events[i];
+            if (consumed[i]) continue;
+            consumed[i] = 1;
+            if (!e->down) continue;
+            if (e->key == Key_Enter || e->key == Key_KeypadEnter) {
+                s32 mi = SessionMetaIndex(app, (String){ app->side_rename_id, app->side_rename_len }, 1);
+                if (mi >= 0) app->side_meta[mi].name_len = (s32)CopyInto(app->side_meta[mi].name, sizeof(app->side_meta[mi].name), TextEdit_String(&app->side_rename_edit)).count;
+                out->sessions_meta_text = SessionMetaText(app, fa);
+                app->side_rename_len = 0;
+                ui->consumed[i] = 1;
+            } else if (e->key == Key_Escape) {
+                app->side_rename_len = 0;
+                ui->consumed[i] = 1;
+            }
+        }
+    }
+    if (app->sidebar_open && app->side_focus && !app->side_rename_len && !modal) {
         s64 page = Max(1, (in->client_h - caption_h - R(3)) / side_row_h - 1);
         for (s64 i = 0; i < event_count; i++) {
             const UiKeyEvent *e = &events[i];
@@ -2616,18 +2898,20 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             else if (e->key == Key_Enter || e->key == Key_KeypadEnter) {
                 if (side_count) { OpenSession(app, &f, &in->sessions[side_rows[app->side_cursor]]); app->side_focus = 0; }
             } else if (e->key == Key_Escape) {
-                if (app->side_filter_len) app->side_filter_len = 0;
+                if (app->side_filter_len) { app->side_filter_len = 0; app->side_typed_us = now; app->side_typed_frame = ui->frame; }
                 else app->side_focus = 0;
             } else if (e->key == Key_Backspace) {
                 if (app->side_filter_len) {
                     do app->side_filter_len--; while (app->side_filter_len > 0 && (app->side_filter[app->side_filter_len] & 0xC0) == 0x80);
                     to = 0;
+                    app->side_typed_us = now; app->side_typed_frame = ui->frame;
                 }
             } else if (e->text.count && !(mods & (Mod_Ctrl | Mod_Alt)) && e->text.data[0] >= 0x20 && e->text.data[0] != 0x7F &&
                        app->side_filter_len + e->text.count <= (s64)sizeof(app->side_filter)) {
                 memcpy(app->side_filter + app->side_filter_len, e->text.data, (size_t)e->text.count);
                 app->side_filter_len += (s32)e->text.count;
                 to = 0;
+                app->side_typed_us = now; app->side_typed_frame = ui->frame;
                 app->side_top = 0;
             }
             if (to != app->side_cursor) { app->side_cursor = Clamp(to, 0, Max(0, side_count - 1)); app->side_reveal = 1; }
@@ -2887,7 +3171,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     b32 quote = memchr(in->dropped[i].data, ' ', (size_t)in->dropped[i].count) != NULL;
                     TB_Format(&typed, quote ? "\"%.*s\" " : "%.*s ", STR_ARG(in->dropped[i]));
                 }
-                TermSend(&f, target->term_id, TB_String(&typed));
+                if (app->compose_open && app->compose_term == target->term_id) TextArea_Insert(&app->compose, TB_String(&typed));
+                else TermSend(&f, target->term_id, TB_String(&typed));
             }
         }
     }
@@ -3224,7 +3509,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         s32 list_h = Max(1, RectH(list));
         s64 now_s = (s64)(in->wall_time / 10000000ull) + (s64)in->utc_offset_minutes * 60;
         s64 today = now_s / 86400;
-        static const char *const days[5] = { "Today", "Yesterday", "This week", "This month", "Earlier" };
+        static const char *const days[6] = { "Today", "Yesterday", "This week", "This month", "Earlier", "Pinned" };
         s32 *row_y = Arena_PushArray(fa, s32, side_count + 1);
         s32 *row_head = Arena_PushArray(fa, s32, side_count + 1);   // the day heading above it (-1 none)
         s32 y = 0, last_bucket = -1;
@@ -3232,6 +3517,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             const TermSession *ss = &in->sessions[side_rows[k]];
             s64 age_days = today - ((s64)(ss->modified / 10000000ull) + (s64)in->utc_offset_minutes * 60) / 86400;
             s32 bucket = age_days <= 0 ? 0 : age_days == 1 ? 1 : age_days < 7 ? 2 : age_days < 30 ? 3 : 4;
+            s32 pmi = SessionMetaIndex(app, ss->id, 0);
+            if (pmi >= 0 && app->side_meta[pmi].pin) bucket = 5;
             row_head[k] = bucket != last_bucket ? bucket : -1;
             if (bucket != last_bucket) y += side_head_h;
             last_bucket = bucket;
@@ -3288,9 +3575,29 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Rect dot = CutLeft(&l1, R(1.1));
                 Draw_Rect(dl, RectCenter(dot, R(0.6), R(0.6)), c->accent, (f32)R(0.3));
             }
+            s32 mi = SessionMetaIndex(app, ss->id, 0);
+            String name = mi >= 0 && app->side_meta[mi].name_len ? (String){ app->side_meta[mi].name, app->side_meta[mi].name_len } : ss->title;
+            if (mi >= 0 && app->side_meta[mi].archive) Draw_TextIn(dl, small, CutRight(&l1, Font_Measure(small, S("archived")) + R(0.6)), c->dim, S("archived"), 0);
             Draw_TextIn(dl, font, l1, c->text, ss->project.count ? ss->project : S("(no folder)"), 0);
-            Draw_TextIn(dl, small, CutTop(&in_row, R(1.4)), c->dim, ss->title, 0);
+            Rect l2 = CutTop(&in_row, R(1.4));
+            String snippet = {0};
+            for (s64 h = 0; app->side_filter_len >= 3 && Str_Equal(in->session_hits_text, (String){ app->side_filter, app->side_filter_len }) && h < in->session_hit_count; h++) {
+                if (Str_Equal(in->session_hits[h].id, ss->id)) snippet = in->session_hits[h].snippet;
+            }
+            if (app->side_rename_len && Str_Equal((String){ app->side_rename_id, app->side_rename_len }, ss->id)) {
+                Draw_RectEx(dl, l2, c->bg, c->accent, 1, radius_small, NULL, 0, 0, 0);
+                Ui_TextEdit(ui, Ui_Id("SessionRename"), &app->side_rename_edit, RectShrink(l2, R(0.2)), small, 1, S("a name (empty: its first prompt)"), c->text, c->dim, c->selection);
+            } else if (snippet.count) {
+                Draw_TextIn(dl, small, l2, c->accent, snippet, 0);
+            } else {
+                Draw_TextIn(dl, small, l2, mi >= 0 && app->side_meta[mi].name_len ? c->text : c->dim, name, 0);
+            }
             Named(app, Str_PushFormat(fa, "session %.*s", STR_ARG(ss->title)), row);
+            if (rs.pressed && rs.button == Mouse_Right) {
+                app->side_menu_len = (s32)CopyInto(app->side_menu_id, sizeof(app->side_menu_id), ss->id).count;
+                app->side_menu_x = mouse_x;
+                app->side_menu_y = mouse_y;
+            }
             if (rs.clicked && rs.button == Mouse_Left) {
                 app->side_cursor = k;
                 OpenSession(app, &f, ss);
@@ -3298,6 +3605,40 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
         }
         Draw_PopClip(dl);
+        if (app->side_menu_len) {
+            // --- a session's menu (right-click): rename it, pin it, archive it ---
+            String id = { app->side_menu_id, app->side_menu_len };
+            s32 mi = SessionMetaIndex(app, id, 0);
+            b32 pinned = mi >= 0 && app->side_meta[mi].pin, archived = mi >= 0 && app->side_meta[mi].archive;
+            String items[3] = { S("Rename"), pinned ? S("Unpin") : S("Pin to the top"), archived ? S("Unarchive") : S("Archive") };
+            s32 item_h = R(2.2), mw = R(13);
+            Rect menu = R4(app->side_menu_x, app->side_menu_y, app->side_menu_x + mw, app->side_menu_y + 3 * item_h + R(0.6));
+            Draw_RectEx(dl, menu, c->surface, c->line, 1, radius_medium, NULL, 0, 0, (f32)R(1));
+            s32 pick = -1;
+            for (s32 k = 0; k < 3; k++) {
+                Rect ir = R4(menu.x0 + R(0.3), menu.y0 + R(0.3) + k * item_h, menu.x1 - R(0.3), menu.y0 + R(0.3) + (k + 1) * item_h);
+                u64 iid = Ui_IdN(Ui_Id("SessionMenu"), (u64)k);
+                UiSignal is = Ui_Hit(ui, iid, ir);
+                Draw_Rect(dl, ir, HoverFill(app, iid, is, c->hover), radius_small);
+                Draw_TextIn(dl, font, RectShrink(ir, R(0.6)), c->text, items[k], 0);
+                Named(app, Str_PushFormat(fa, "session menu %.*s", STR_ARG(items[k])), ir);
+                if (is.clicked) pick = k;
+            }
+            b32 away = (in->input.button[Mouse_Left].pressed || in->input.button[Mouse_Right].pressed) && !RectHas(menu, mouse_x, mouse_y) && pick < 0;
+            for (s64 i = 0; i < in->input.event_count; i++) away |= in->input.events[i].down && in->input.events[i].key == Key_Escape;
+            if (pick == 0) {
+                memcpy(app->side_rename_id, id.data, (size_t)id.count);
+                app->side_rename_len = (s32)id.count;
+                TextEdit_Set(&app->side_rename_edit, mi >= 0 ? (String){ app->side_meta[mi].name, app->side_meta[mi].name_len } : (String){0});
+            }
+            if (pick == 1 || pick == 2) {
+                s32 m2 = SessionMetaIndex(app, id, 1);
+                if (m2 >= 0 && pick == 1) app->side_meta[m2].pin = !pinned;
+                if (m2 >= 0 && pick == 2) app->side_meta[m2].archive = !archived;
+                out->sessions_meta_text = SessionMetaText(app, fa);
+            }
+            if (pick >= 0 || away) app->side_menu_len = 0;
+        }
         if (!side_count && in->connected) {
             String msg = app->side_filter_len ? S("No matches") : in->session_count ? S("") : S("No Claude Code sessions yet");
             Draw_TextIn(dl, small, R4(list.x0, list.y0, list.x1, list.y0 + R(3)), c->dim, msg, 0.5f);
@@ -3612,13 +3953,66 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Draw_TextIn(dl, bold, pill, c->text, name, 0.5f);
                 CutLeft(&ar, Min(R(1.0), RectW(ar)));
             }
+            // --- on the right: the context's size, and claude's permission mode (read off its screen's bottom rows; a click
+            //     cycles it, Shift+Tab) ---
+            String ctx = AccountPart(account_tab->account, 4);
+            if (ctx.count) {
+                u64 tokens = strtoull((const char *)Str_PushCopy(fa, ctx).data, NULL, 10);
+                String text = tokens >= 1000 ? Str_PushFormat(fa, "%lluk", (unsigned long long)((tokens + 500) / 1000)) : ctx;
+                Draw_TextIn(dl, small, CutRight(&ar, Min(Font_Measure(small, text), RectW(ar))), c->text, text, 1);
+                Draw_TextIn(dl, small, CutRight(&ar, Min(Font_Measure(small, S("Context ")), RectW(ar))), c->dim, S("Context "), 1);
+                CutRight(&ar, Min(R(1.5), RectW(ar)));
+            }
+            const TermGrid *ag = FindGrid(in, account_tab->id);
+            if (ag && ag->cols > 0) {
+                static const char *const modes[][2] = { { "plan mode on", "plan" }, { "accept edits on", "accept edits" }, { "auto mode on", "auto" },
+                                                         { "bypass permissions on", "bypass permissions" } };
+                String mode = S("default");
+                u8 *row = Arena_PushArray(fa, u8, ag->cols + 1);
+                for (s32 y = Max(0, ag->rows - 4); y < ag->rows; y++) {
+                    for (s32 x = 0; x < ag->cols; x++) {
+                        u32 cp = ag->cells[(s64)y * ag->cols + x].codepoint;
+                        row[x] = cp >= 'A' && cp <= 'Z' ? (u8)(cp + 32) : cp >= 0x20 && cp < 0x7F ? (u8)cp : ' ';
+                    }
+                    for (s32 k = 0; k < (s32)ArrayCount(modes); k++) if (ContainsNoCase((String){ row, ag->cols }, Str_FromCStr(modes[k][0]))) mode = Str_FromCStr(modes[k][1]);
+                }
+                Rect mr = CutRight(&ar, Min(Font_Measure(small, mode) + R(1.2), RectW(ar)));
+                u64 mid = Ui_IdN(Ui_Id("ClaudeMode"), account_tab->id);
+                UiSignal ms = Ui_Hit(ui, mid, mr);
+                Draw_Rect(dl, RectShrink(mr, R(0.2)), HoverFill(app, mid, ms, c->hover), radius_small);
+                Draw_TextIn(dl, small, mr, c->text, mode, 0.5f);
+                Draw_TextIn(dl, small, CutRight(&ar, Min(Font_Measure(small, S("Mode ")), RectW(ar))), c->dim, S("Mode "), 1);
+                CutRight(&ar, Min(R(1.5), RectW(ar)));
+                Named(app, S("claude mode"), mr);
+                if (ms.clicked && !(account_tab->flags & TermTab_AccountHeld)) TermSend(&f, account_tab->id, S("\x1b[Z"));
+                Ui_Tooltip(ui, mid, S("Claude's permission mode: a click goes to the next one (Shift+Tab)"));
+            }
             for (s32 k = 0; k < 4 && RectW(ar) > 0; k++) {
                 if (!parts[k].count) continue;
                 if (labels[k][0]) {
                     String label = Str_PushFormat(fa, "%s ", labels[k]);
                     Draw_TextIn(dl, small, CutLeft(&ar, Min(Font_Measure(small, label), RectW(ar))), c->dim, label, 0);
                 }
-                Draw_TextIn(dl, small, CutLeft(&ar, Min(Font_Measure(small, parts[k]), RectW(ar))), c->text, parts[k], 0);
+                if (k == 3) {
+                    // the model: a click picks another (/model)
+                    Rect mr = CutLeft(&ar, Min(Font_Measure(small, parts[k]) + R(1.0), RectW(ar)));
+                    u64 mid = Ui_IdN(Ui_Id("ClaudeModel"), account_tab->id);
+                    UiSignal ms = Ui_Hit(ui, mid, mr);
+                    Draw_Rect(dl, RectShrink(mr, R(0.2)), HoverFill(app, mid, ms, c->hover), radius_small);
+                    Draw_TextIn(dl, small, mr, c->text, parts[k], 0.5f);
+                    Named(app, S("claude model"), mr);
+                    Ui_Tooltip(ui, mid, S("Pick another model (/model)"));
+                    if (ms.clicked) {
+                        app->palette_open = 1;
+                        app->palette_mode = PaletteMode_Model;
+                        app->model_term = account_tab->id;
+                        memset(&app->palette_edit, 0, sizeof(app->palette_edit));
+                        app->palette_sel = 0;
+                        app->palette_top = 0;
+                    }
+                } else {
+                    Draw_TextIn(dl, small, CutLeft(&ar, Min(Font_Measure(small, parts[k]), RectW(ar))), c->text, parts[k], 0);
+                }
                 CutLeft(&ar, Min(R(1.5), RectW(ar)));
             }
             Named(app, Str_PushFormat(fa, "account %.*s", STR_ARG(parts[2].count ? parts[2] : parts[0])), bar);
@@ -4113,7 +4507,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         }
                         if (!in->input.button[Mouse_Left].down) {
                             s->dragging = 0;
-                            if (s->visible && !app->copy_on_select_off) { out->clipboard_set = 1; out->clipboard_text = SelectionText(fa, s, g); }   // copy on select
+                            if (s->visible && !app->copy_on_select_off) {
+                                out->clipboard_set = 1;
+                                out->clipboard_text = SelectionText(fa, s, g);
+                                const TermTab *sst = FindServerTab(app, g->tab_id);
+                                if (sst && (sst->flags & TermTab_Agent) && !s->block) out->clipboard_text = CleanAgentCopy(fa, out->clipboard_text, g->cols);
+                            }   // copy on select
                         }
                         if (s->visible) {
                             draw->sel_on = 1;
@@ -4203,8 +4602,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
 
             // --- search in a claude's history: the history view covers the terminal: its messages wrapped to the pane,
             //     built again when they, the width or the text change; matches lit, the current one framed ---
-            if (t && app->find_open && app->find_history && app->find_term == t->term_id) {
-                String q = TextEdit_String(&app->find_edit);
+            b32 searching = t && app->find_open && app->find_history && app->find_term == t->term_id;
+            if (t && (searching || (app->reader_open && app->reader_term == t->term_id))) {
+                String q = searching ? TextEdit_String(&app->find_edit) : (String){0};
+                Font *mono = &in->fonts[Font_Mono];
                 s32 view_h = Max(1, RectH(content));
                 s32 text_w = Max(R(10), pw - 2 * R(1.2));
                 s32 lh = R(1.55);
@@ -4219,6 +4620,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Arena_Clear(&app->hist_arena);
                     memset(&app->hist_lines, 0, sizeof(app->hist_lines));
                     memset(&app->hist_matches, 0, sizeof(app->hist_matches));
+                    memset(&app->hist_blocks, 0, sizeof(app->hist_blocks));
                     for (s64 i = 0; i < in->history_count; i++) {
                         const TermHistoryEntry *he = &in->history[i];
                         HistLine *hl = Array_Push(&app->hist_arena, app->hist_lines);
@@ -4227,34 +4629,168 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         hl->text = Str_PushFormat(&app->hist_arena, "%s  %.*s", he->from_user ? "You" : "Claude", STR_ARG(when));
                         for (s64 k = 0; k < hl->text.count; k++) if (hl->text.data[k] == 'T') hl->text.data[k] = ' ';
                         String text = Str_PushCopy(&app->hist_arena, he->text);
+                        // --- its markdown, line by line: fenced code (a block, kept for its copy button), tables (cells
+                        //     in columns), headings, rules, list items (a marker, their lines indented), paragraphs; bold
+                        //     and `code` runs taken out of the text and kept as spans; each wrapped to the width ---
+                        b32 in_code = 0;
+                        s64 code_from = 0;
                         for (s64 at = 0; at <= text.count;) {
-                            // a paragraph, wrapped at spaces to the view's width
                             s64 end = at;
                             while (end < text.count && text.data[end] != '\n') end++;
-                            String para = { text.data + at, end - at };
-                            if (para.count && para.data[para.count - 1] == '\r') para.count--;
-                            if (!para.count) Array_Push(&app->hist_arena, app->hist_lines)->kind = HistLine_Blank;
-                            while (para.count) {
-                                s64 cut = Font_Fit(font, para, text_w);
-                                if (cut < para.count) {
+                            String raw = { text.data + at, end - at };
+                            if (raw.count && raw.data[raw.count - 1] == '\r') raw.count--;
+                            String trim = raw;
+                            s32 lead = 0;
+                            while (trim.count && (trim.data[0] == ' ' || trim.data[0] == '\t')) { trim.data++; trim.count--; lead++; }
+                            if (trim.count >= 3 && !memcmp(trim.data, "```", 3)) {
+                                // a fence: a block opens, or the open one closes (its text kept for the copy button)
+                                if (!in_code) { code_from = end + 1; in_code = 1; }
+                                else {
+                                    *Array_Push(&app->hist_arena, app->hist_blocks) = (String){ text.data + code_from, Max(0, at - 1 - code_from) };
+                                    in_code = 0;
+                                }
+                                at = end + 1;
+                                continue;
+                            }
+                            if (in_code) {
+                                // a line of code: mono, wrapped where it stops fitting
+                                String rest = raw;
+                                b32 first_of_block = at == code_from;
+                                do {
+                                    s64 cut = rest.count ? Max((s64)1, Font_Fit(mono, rest, text_w - R(1.6))) : 0;
+                                    while (cut < rest.count && (rest.data[cut] & 0xC0) == 0x80) cut++;
+                                    HistLine *cl = Array_Push(&app->hist_arena, app->hist_lines);
+                                    cl->kind = HistLine_Code;
+                                    cl->text = (String){ rest.data, cut };
+                                    cl->block = (s32)app->hist_blocks.count;
+                                    cl->first = first_of_block;
+                                    first_of_block = 0;
+                                    rest.data += cut;
+                                    rest.count -= cut;
+                                } while (rest.count);
+                                at = end + 1;
+                                continue;
+                            }
+                            if (trim.count && trim.data[0] == '|') {
+                                // --- a table: its rows (the |---| row left out), cells trimmed, columns as wide as their
+                                //     widest cell, narrowed together to fit ---
+                                s64 tat = at;
+                                s32 *widths = Arena_PushArray(&app->hist_arena, s32, 32);
+                                s32 tcols = 0;
+                                HistLine *rows_first = NULL;
+                                b32 header = 1;
+                                while (tat <= text.count) {
+                                    s64 tend = tat;
+                                    while (tend < text.count && text.data[tend] != '\n') tend++;
+                                    String row = { text.data + tat, tend - tat };
+                                    if (row.count && row.data[row.count - 1] == '\r') row.count--;
+                                    while (row.count && row.data[0] == ' ') { row.data++; row.count--; }
+                                    if (!row.count || row.data[0] != '|') break;
+                                    tat = tend + 1;
+                                    b32 rule = 1;
+                                    for (s64 k = 0; k < row.count; k++) rule &= strchr("|-: \t", row.data[k]) != NULL;
+                                    if (rule) continue;
+                                    HistLine *tl = Array_Push(&app->hist_arena, app->hist_lines);
+                                    if (!rows_first) rows_first = tl;
+                                    tl->kind = HistLine_Table;
+                                    tl->first = header;
+                                    tl->cells = Arena_PushArray(&app->hist_arena, String, 32);
+                                    tl->widths = widths;
+                                    for (s64 k = 1; k < row.count && tl->cell_count < 32;) {
+                                        s64 e2 = k;
+                                        while (e2 < row.count && row.data[e2] != '|') e2++;
+                                        String cell = { row.data + k, e2 - k };
+                                        while (cell.count && cell.data[0] == ' ') { cell.data++; cell.count--; }
+                                        while (cell.count && cell.data[cell.count - 1] == ' ') cell.count--;
+                                        if (e2 >= row.count && !cell.count) break;
+                                        tl->cells[tl->cell_count] = cell;
+                                        widths[tl->cell_count] = Max(widths[tl->cell_count], Font_Measure(header ? bold : font, cell));
+                                        tl->cell_count++;
+                                        k = e2 + 1;
+                                    }
+                                    tcols = Max(tcols, tl->cell_count);
+                                    header = 0;
+                                }
+                                s32 gap = R(1.2), total = 0;
+                                for (s32 k = 0; k < tcols; k++) total += widths[k] + gap;
+                                if (total > text_w) for (s32 k = 0; k < tcols; k++) widths[k] = (s32)((s64)widths[k] * (text_w - tcols * gap) / Max(1, total - tcols * gap));
+                                at = tat;
+                                continue;
+                            }
+                            if (!trim.count) { Array_Push(&app->hist_arena, app->hist_lines)->kind = HistLine_Blank; at = end + 1; continue; }
+                            b32 rule = trim.count >= 3;
+                            for (s64 k = 0; k < trim.count; k++) rule &= trim.data[k] == trim.data[0] && strchr("-*_", trim.data[0]) != NULL;
+                            if (rule) { Array_Push(&app->hist_arena, app->hist_lines)->kind = HistLine_Rule; at = end + 1; continue; }
+                            // a heading, a list item, or a paragraph line
+                            u32 kind = HistLine_Text;
+                            String marker = {0};
+                            s32 indent = 0;
+                            if (trim.data[0] == '#') {
+                                s64 k = 0;
+                                while (k < trim.count && trim.data[k] == '#') k++;
+                                if (k <= 6 && k < trim.count && trim.data[k] == ' ') { kind = HistLine_Heading; trim.data += k + 1; trim.count -= k + 1; }
+                            } else if (trim.count >= 2 && strchr("-*+", trim.data[0]) && trim.data[1] == ' ') {
+                                marker = S("\xE2\x80\xA2");
+                                trim.data += 2; trim.count -= 2;
+                            } else {
+                                s64 k = 0;
+                                while (k < trim.count && k < 4 && trim.data[k] >= '0' && trim.data[k] <= '9') k++;
+                                if (k && k + 1 < trim.count && (trim.data[k] == '.' || trim.data[k] == ')') && trim.data[k + 1] == ' ') {
+                                    marker = (String){ trim.data, k + 1 };
+                                    trim.data += k + 2; trim.count -= k + 2;
+                                }
+                            }
+                            if (marker.count) indent = (lead / 2) * R(1.4) + R(1.6);
+                            // bold and code taken out of the text, kept as spans
+                            u8 *plain = Arena_PushArray(&app->hist_arena, u8, trim.count + 1);
+                            HistSpan *spans = Arena_PushArray(&app->hist_arena, HistSpan, trim.count / 2 + 2);
+                            s32 span_count = 0, pn = 0;
+                            u32 style = 0;
+                            s32 span_from = 0;
+                            for (s64 k = 0; k < trim.count; k++) {
+                                u32 flip = 0;
+                                if (trim.data[k] == '`') flip = HistSpan_Code;
+                                else if (!(style & HistSpan_Code) && k + 1 < trim.count && trim.data[k] == '*' && trim.data[k + 1] == '*') { flip = HistSpan_Bold; k++; }
+                                if (!flip) { plain[pn++] = trim.data[k]; continue; }
+                                if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
+                                style ^= flip;
+                                span_from = pn;
+                            }
+                            if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
+                            String para = { plain, pn };
+                            Font *pf = kind == HistLine_Heading ? bold : font;
+                            s32 line_from = 0;
+                            while (line_from < para.count || (!para.count && !line_from)) {
+                                String rest = { para.data + line_from, para.count - line_from };
+                                s64 cut = Font_Fit(pf, rest, text_w - indent);
+                                if (cut < rest.count) {
                                     s64 space = cut;
-                                    while (space > 0 && para.data[space - 1] != ' ') space--;
+                                    while (space > 0 && rest.data[space - 1] != ' ') space--;
                                     if (space > 0) cut = space;
-                                    if (cut <= 0) { cut = 1; while (cut < para.count && (para.data[cut] & 0xC0) == 0x80) cut++; }
+                                    if (cut <= 0) { cut = 1; while (cut < rest.count && (rest.data[cut] & 0xC0) == 0x80) cut++; }
                                 }
                                 HistLine *tl = Array_Push(&app->hist_arena, app->hist_lines);
-                                tl->kind = HistLine_Text;
-                                tl->text = (String){ para.data, cut };
-                                para.data += cut;
-                                para.count -= cut;
+                                tl->kind = kind;
+                                tl->text = (String){ rest.data, cut };
+                                tl->indent = indent;
+                                tl->marker = line_from == 0 ? marker : (String){0};
+                                tl->spans = Arena_PushArray(&app->hist_arena, HistSpan, span_count + 1);
+                                for (s32 k = 0; k < span_count; k++) {
+                                    s32 a = Max(spans[k].start, line_from), b = Min(spans[k].start + spans[k].len, line_from + (s32)cut);
+                                    if (b > a) tl->spans[tl->span_count++] = (HistSpan){ a - line_from, b - a, spans[k].style };
+                                }
+                                line_from += (s32)cut;
+                                if (!cut) break;
                             }
                             at = end + 1;
                         }
+                        if (in_code) *Array_Push(&app->hist_arena, app->hist_blocks) = (String){ text.data + code_from, Max(0, text.count - code_from) };
                         Array_Push(&app->hist_arena, app->hist_lines)->kind = HistLine_Blank;
                     }
                     for (s64 li = 0; q.count && li < app->hist_lines.count; li++) {
                         String lt = app->hist_lines.data[li].text;
-                        if (app->hist_lines.data[li].kind != HistLine_Text) continue;
+                        u32 lk = app->hist_lines.data[li].kind;
+                        if (lk != HistLine_Text && lk != HistLine_Heading && lk != HistLine_Code) continue;
                         for (s64 at = 0; at + q.count <= lt.count; at++) {
                             b32 same = 1;
                             for (s64 k = 0; k < q.count && same; k++) {
@@ -4274,7 +4810,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     // typing goes to the newest match; a fresh read starts at the end
                     app->hist_current = app->hist_matches.count ? (s32)app->hist_matches.count - 1 : -1;
                     app->hist_follow = 1;
-                    if (fresh && !q.count) app->hist_scroll = 1e9f;
+                    if (fresh && !q.count && app->hist_at_end) app->hist_scroll = 1e9f;
                 }
                 f32 content_h = (f32)(app->hist_lines.count * lh + 2 * R(0.6));
                 s32 mc = (s32)app->hist_matches.count;
@@ -4286,6 +4822,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 UiSignal vs = Ui_Hit(ui, Ui_Id("History"), content);
                 if (in->input.wheel[1] && vs.hovered) app->hist_scroll -= (f32)in->input.wheel[1] / 120.0f * 3.0f * (f32)lh;
                 app->hist_scroll = Clamp(app->hist_scroll, 0.0f, Max(0.0f, content_h - (f32)view_h));
+                app->hist_at_end = app->hist_scroll >= content_h - (f32)view_h - (f32)lh;
                 Draw_Rect(dl, content, c->bg, 0);
                 Draw_PushClip(dl, content);
                 if (in->history_tab != t->term_id || !in->history_version || app->hist_term != t->term_id || !app->hist_lines.count) {
@@ -4317,12 +4854,79 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         }
                     }
                     if (hl->kind == HistLine_Blank) continue;
-                    b32 text = hl->kind == HistLine_Text;
-                    Font *lf = text ? font : small;
-                    Draw_TextMarked(dl, lf, lx, ly + (lh - (s32)(lf->line_h + 0.5f)) / 2, text ? c->text : c->dim, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                    u32 code_bg = ColorMix(c->bg, c->text, 0.07f);
+                    if (hl->kind == HistLine_Rule) { Draw_Rect(dl, R4(lx, ly + lh / 2, lx + text_w, ly + lh / 2 + line_w), c->line, 0); continue; }
+                    if (hl->kind == HistLine_Code) {
+                        // a code block's line on its shade, mono; its first line has the block's copy button
+                        Draw_Rect(dl, R4(lx, ly, lx + text_w, ly + lh), code_bg, 0);
+                        Draw_TextMarked(dl, mono, lx + R(0.8), ly + (lh - (s32)(mono->line_h + 0.5f)) / 2, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                        if (hl->first && hl->block < app->hist_blocks.count) {
+                            Rect cb = R4(lx + text_w - R(2.2), ly + R(0.1), lx + text_w - R(0.2), ly + lh - R(0.1));
+                            UiSignal ccs = IconButton(app, Ui_IdN(Ui_Id("CopyCode"), (u64)hl->block), cb, Icon_Copy, icons_small, c->dim, c->hover, radius_small,
+                                                     Str_PushFormat(fa, "copy code %d", hl->block + 1));
+                            if (ccs.clicked) { out->clipboard_set = 1; out->clipboard_text = app->hist_blocks.data[hl->block]; app->hist_copied = hl->block + 1; app->hist_copied_us = now; }
+                            if (app->hist_copied == hl->block + 1 && now - app->hist_copied_us < 1500000) {
+                                Draw_TextIn(dl, small, R4(cb.x0 - R(5), cb.y0, cb.x0 - R(0.3), cb.y1), c->accent, S("Copied"), 1);
+                                if (!out->wake_at_us || app->hist_copied_us + 1500000 < out->wake_at_us) out->wake_at_us = app->hist_copied_us + 1500000;
+                            }
+                        }
+                        continue;
+                    }
+                    if (hl->kind == HistLine_Table) {
+                        // cells in their columns, the header row bold and underlined
+                        s32 x = lx;
+                        for (s32 k = 0; k < hl->cell_count; k++) {
+                            Draw_TextIn(dl, hl->first ? bold : font, R4(x, ly, x + hl->widths[k], ly + lh), c->text, hl->cells[k], 0);
+                            x += hl->widths[k] + R(1.2);
+                        }
+                        if (hl->first) Draw_Rect(dl, R4(lx, ly + lh - line_w, x - R(1.2), ly + lh), c->line, 0);
+                        continue;
+                    }
+                    if (hl->kind == HistLine_User || hl->kind == HistLine_Claude) {
+                        if (hl->kind == HistLine_User) Draw_Rect(dl, R4(lx - R(0.6), ly, lx + text_w, ly + lh), ColorAlpha(c->accent, 0.10f), radius_small);
+                        Draw_Text(dl, small, lx, ly + (lh - (s32)(small->line_h + 0.5f)) / 2, c->dim, hl->text);
+                        continue;
+                    }
+                    // a paragraph's, heading's or list item's line: its marker, then its runs (bold, `code` on a shade)
+                    Font *lf = hl->kind == HistLine_Heading ? bold : font;
+                    s32 tx = lx + hl->indent, ty = ly + (lh - (s32)(lf->line_h + 0.5f)) / 2;
+                    if (hl->marker.count) Draw_Text(dl, font, tx - Font_Measure(font, hl->marker) - R(0.5), ty, c->dim, hl->marker);
+                    if (mark_count || !hl->span_count) { Draw_TextMarked(dl, lf, tx, ty, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]); continue; }
+                    s32 at = 0;
+                    for (s32 k = 0; k <= hl->span_count; k++) {
+                        s32 to = k < hl->span_count ? hl->spans[k].start : (s32)hl->text.count;
+                        if (to > at) tx = Draw_Text(dl, lf, tx, ty, c->text, (String){ hl->text.data + at, to - at });
+                        if (k == hl->span_count) break;
+                        const HistSpan *sp = &hl->spans[k];
+                        String run = { hl->text.data + sp->start, sp->len };
+                        if (sp->style & HistSpan_Code) {
+                            s32 w = Font_Measure(mono, run);
+                            Draw_Rect(dl, R4(tx - R(0.15), ly + R(0.15), tx + w + R(0.15), ly + lh - R(0.15)), code_bg, radius_small);
+                            tx = Draw_Text(dl, mono, tx, ly + (lh - (s32)(mono->line_h + 0.5f)) / 2, c->text, run);
+                        } else {
+                            tx = Draw_Text(dl, bold, tx, ty, c->text, run);
+                        }
+                        at = sp->start + sp->len;
+                    }
                 }
                 Draw_PopClip(dl);
             }
+        }
+        // --- the composer over the bottom of its terminal: as tall as its text (3 lines to half the pane), the keys
+        //     under it ---
+        if (app->compose_open && t && t->term_id == app->compose_term && !t->browsing && !t->viewing) {
+            s32 lh = (s32)(font->line_h + 0.5f), pad = R(0.9), keys_h = R(1.8);
+            s32 inner_w = RectW(content) - 2 * R(1.0) - 2 * pad;
+            s32 lines = Clamp(TextArea_Lines(ui, &app->compose, font, inner_w), 3, Max(3, (RectH(content) / 2 - 2 * pad - keys_h) / Max(1, lh)));
+            Rect box = R4(content.x0 + R(1.0), content.y1 - R(0.8) - (lines * lh + 2 * pad + keys_h), content.x1 - R(1.0), content.y1 - R(0.8));
+            Ui_Hit(ui, Ui_IdN(Ui_Id("Compose"), n->id), box);
+            Draw_RectEx(dl, box, c->surface, focused_pane ? c->accent : c->line, (f32)Max(1, R(0.1)), radius_medium, NULL, 0, 0, (f32)R(1));
+            Rect body = RectShrink(box, pad);
+            Rect keys = CutBottom(&body, keys_h);
+            Ui_TextArea(ui, Ui_IdN(Ui_Id("ComposeText"), n->id), &app->compose, body, font, focused_pane && !modal,
+                        S("Write a prompt..."), c->text, c->dim, c->selection);
+            Draw_TextIn(dl, small, keys, c->dim, S("Ctrl+Enter sends  \xC2\xB7  Enter a new line  \xC2\xB7  Ctrl+V text or a picture  \xC2\xB7  drop files  \xC2\xB7  Esc away"), 0);
+            Named(app, S("composer"), box);
         }
         // --- the panes not in focus a shade darker (settings `dim_unfocused = off`: not), when more than one shows ---
         if (!app->dim_unfocused_off && !focused_pane && panes->root->first_child && !app->zoom_node) {
@@ -4597,7 +5201,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     // --- the command palette: type to filter, Enter or a click runs; in settings mode the settings by group ---
     if (app->palette_open) {
         b32 settings = app->palette_mode == PaletteMode_Settings, go = app->palette_mode == PaletteMode_GoTo;
-        b32 accounts_mode = app->palette_mode == PaletteMode_Account;
+        b32 accounts_mode = app->palette_mode == PaletteMode_Account, model_mode = app->palette_mode == PaletteMode_Model;
         b32 outside = Blocker(app, 0);
         s32 box_w = Min(settings ? R(52) : go ? R(58) : app->palette_mode == PaletteMode_Account ? R(56) : R(40), in->client_w - R(4));
         s32 row_h = settings ? R(2.4) : R(2.2), pad = R(0.5);
@@ -4745,6 +5349,16 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 }
                 if (go_text.count) for (s32 i = 0; i < row_count; i++) pick_row[i] = i;
             }
+        } else if (model_mode) {
+            // --- the models (the text filters them), then the name typed when it's none of them ---
+            b32 known = 0;
+            for (s32 k = 0; k < (s32)ArrayCount(g_Models); k++) {
+                known |= Str_EqualNoCase(Str_FromCStr(g_Models[k][0]), filter);
+                if (filter.count && FuzzyScore(Str_FromCStr(g_Models[k][0]), filter) < 0) continue;
+                pick_row[pickable++] = row_count;
+                rows[row_count++] = (PaletteRow){ k, 0, NULL };
+            }
+            if (filter.count && !known) { pick_row[pickable++] = row_count; rows[row_count++] = (PaletteRow){ (s32)ArrayCount(g_Models), 0, NULL }; }
         } else if (accounts_mode) {
             // --- the accounts (the text filters them), then "add" for a new name typed (letters, digits, - and _) ---
             b32 taken = 0, name_ok = filter.count > 0 && filter.count < (s64)sizeof(app->pending_account);
@@ -4878,6 +5492,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         Ui_TextEdit(ui, Ui_Id("PaletteFilter"), &app->palette_edit, R4(edit.x0 + (go ? R(2.4) : R(0.6)), edit.y0, edit.x1 - R(0.6), edit.y1), font, !app->setting_editing,
                     settings ? S("Type a setting") : go ? S("Go to a folder, or search recents, bookmarks, drives and places") :
                     accounts_mode && app->account_adding ? S("Name the new account (e.g. work, personal)") :
+                    model_mode ? S("Pick a model for this claude (/model), or type one") :
                     accounts_mode ? S("Enter: a claude tab as the account  \xC2\xB7  arrows: its theme  \xC2\xB7  a new name: add one") : S("Type a command"), c->text, c->dim, c->selection);
         Named(app, go ? S("goto edit") : S("palette edit"), edit);
         Draw_PushClip(dl, body);
@@ -4922,7 +5537,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s32 pick_index = 0;
             while (pick_index < pickable && pick_row[pick_index] != j) pick_index++;
             u64 row_id = settings ? Ui_IdN(Ui_Id("SettingRow"), (u64)pr->item) : go ? Ui_IdN(Ui_Id("GotoRow"), Hash_Bytes(go_rows[pr->item].path.data, (u64)go_rows[pr->item].path.count, (u64)go_rows[pr->item].group)) :
-                         pr->tab ? Ui_IdN(Ui_Id("PaletteTab"), pr->tab->id) : Ui_IdN(Ui_Id("PaletteRow"), pr->cmd);
+                         pr->tab ? Ui_IdN(Ui_Id("PaletteTab"), pr->tab->id) :
+                         accounts_mode || model_mode ? Ui_IdN(Ui_Id("PaletteItem"), (u64)pr->item + ((u64)app->palette_mode << 32)) : Ui_IdN(Ui_Id("PaletteRow"), pr->cmd);
             UiSignal rs = Ui_Hit(ui, row_id, row);
             if (selected) Draw_Rect(dl, row, c->selection, radius_small);
             else Draw_Rect(dl, row, HoverFill(app, row_id, rs, c->hover), radius_small);
@@ -4972,6 +5588,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 CutLeft(&in_row, R(0.8));
                 if (g->note.count) Draw_TextIn(dl, small, in_row, c->dim, g->note, 0);
                 Named(app, Str_PushFormat(fa, "goto %.*s", STR_ARG(g->label)), row);
+                if (rs.clicked) { app->palette_sel = pick_index; run = 1; }
+                continue;
+            }
+            if (model_mode) {
+                b32 typed = pr->item >= (s32)ArrayCount(g_Models);
+                String label = typed ? filter : Str_FromCStr(g_Models[pr->item][0]);
+                Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.8)), c->dim, Icon_Robot);
+                Draw_TextIn(dl, font, CutLeft(&in_row, Min(Font_Measure(font, label), RectW(in_row))), c->text, label, 0);
+                CutLeft(&in_row, R(0.8));
+                Draw_TextIn(dl, small, in_row, c->dim, typed ? S("a model name of your own") : Str_FromCStr(g_Models[pr->item][1]), 0);
+                Named(app, Str_PushFormat(fa, "palette model %.*s", STR_ARG(label)), row);
                 if (rs.clicked) { app->palette_sel = pick_index; run = 1; }
                 continue;
             }
@@ -5128,6 +5755,16 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         if (run && pickable && act < 0) {
             const PaletteRow *pr = &rows[pick_row[Clamp(app->palette_sel, 0, pickable - 1)]];
             if (settings) { act = pr->item; step = 0; }
+            else if (model_mode) {
+                // typed into its claude's prompt: /model and the name, Enter (not while a turn runs)
+                app->palette_open = 0;
+                String name = pr->item < (s32)ArrayCount(g_Models) ? Str_FromCStr(g_Models[pr->item][0]) : filter;
+                const TermTab *mt = FindServerTab(app, app->model_term);
+                if (mt && !(mt->flags & (TermTab_Busy | TermTab_AccountHeld))) {
+                    TermSend(&f, app->model_term, Str_PushFormat(fa, "/model %.*s\r", STR_ARG(name)));
+                    Logf("app", "model: %.*s", STR_ARG(name));
+                }
+            }
             else if (accounts_mode) {
                 // a claude tab under the account; or a new account (made by the platform), whose tab opens once it's listed
                 app->palette_open = 0;

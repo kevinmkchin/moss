@@ -48,6 +48,8 @@ typedef struct Platform {
     u8 view_path[1024];
     s32 view_path_len;
     String editor;                // the terminal text editor (settings.txt `editor`, else the first found)
+    u8 pasted_image[MAX_PATH * 3]; // the clipboard picture saved last frame, for the next frame's input
+    s32 pasted_image_len;
     WCHAR accounts_path[MAX_PATH]; // accounts.txt (MOSS_ACCOUNTS_FILE; "NUL": none)
     u8 accounts_text[8192];       // as last read
     s32 accounts_len;
@@ -161,6 +163,8 @@ typedef struct Platform {
     Arena scratch;
     WString session_path;         // NUL-terminated
     WString paths_path;           // paths.txt (recents, bookmarks), NUL-terminated; empty: not saved
+    WString sessions_meta_path;   // sessions.txt (the sidebar's names, pins, archived); empty: not saved
+    String sessions_meta_text;    // as read at start, handed to the first frame
 } Platform;
 
 static void Pump(Platform *p)
@@ -203,6 +207,7 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_UiBold], &p->atlas, ui, 9 * pt, 600);
     Font_Create(&p->fonts[Font_Icon], &p->atlas, icons, 9 * pt, 400);
     Font_Create(&p->fonts[Font_IconSmall], &p->atlas, icons, 7 * pt, 400);
+    Font_Create(&p->fonts[Font_Mono], &p->atlas, L"Cascadia Mono\0Consolas\0", 8.5f * pt, 400);   // code in the reader
     p->fonts_dpi = p->dpi;
 }
 
@@ -260,6 +265,48 @@ static void SetClipboardUtf8(HWND hwnd, String text, Arena *a)
     EmptyClipboard();
     if (!SetClipboardData(CF_UNICODETEXT, mem)) GlobalFree(mem);
     CloseClipboard();
+}
+
+// The clipboard's picture (a screenshot, an image copied) saved as %TEMP%\moss-paste\paste-<time>.png, when it has one
+// and no text: its path (UTF-8), else empty. 24 and 32 bit pictures (CF_DIB); a 32 bit one with no alpha at all is
+// opaque.
+static String SaveClipboardImage(Platform *p)
+{
+    if (!OpenClipboard(p->hwnd)) return (String){0};
+    String out = {0};
+    HANDLE h = IsClipboardFormatAvailable(CF_UNICODETEXT) ? NULL : GetClipboardData(CF_DIB);
+    const BITMAPINFOHEADER *bi = h ? (const BITMAPINFOHEADER *)GlobalLock(h) : NULL;
+    if (bi && (bi->biBitCount == 32 || bi->biBitCount == 24) && (bi->biCompression == BI_RGB || bi->biCompression == BI_BITFIELDS) &&
+        bi->biWidth > 0 && bi->biWidth <= 16384 && bi->biHeight != 0 && abs(bi->biHeight) <= 16384) {
+        s32 w = bi->biWidth, hgt = abs(bi->biHeight), bpp = bi->biBitCount / 8;
+        s32 stride = ((w * bi->biBitCount + 31) / 32) * 4;
+        const u8 *bits = (const u8 *)bi + bi->biSize + (bi->biCompression == BI_BITFIELDS && bi->biSize == sizeof(BITMAPINFOHEADER) ? 12 : 0);
+        u8 *rgba = (u8 *)malloc((size_t)w * hgt * 4);
+        b32 any_alpha = 0;
+        for (s32 y = 0; rgba && y < hgt; y++) {
+            const u8 *row = bits + (size_t)(bi->biHeight > 0 ? hgt - 1 - y : y) * stride;   // bottom-up unless the height is negative
+            for (s32 x = 0; x < w; x++) {
+                u8 *o = rgba + ((size_t)y * w + x) * 4;
+                o[0] = row[x * bpp + 2]; o[1] = row[x * bpp + 1]; o[2] = row[x * bpp + 0];
+                o[3] = bpp == 4 ? row[x * bpp + 3] : 255;
+                any_alpha |= o[3] != 0;
+            }
+        }
+        for (s64 i = 0; rgba && !any_alpha && i < (s64)w * hgt; i++) rgba[i * 4 + 3] = 255;
+        WCHAR dir[MAX_PATH] = {0}, path[MAX_PATH] = {0};
+        GetTempPathW(MAX_PATH, dir);
+        wcscat_s(dir, MAX_PATH, L"moss-paste");
+        CreateDirectoryW(dir, NULL);
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        swprintf_s(path, MAX_PATH, L"%s\\paste-%04d%02d%02d-%02d%02d%02d-%03d.png", dir, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        if (rgba && Image_SavePng(path, rgba, w, hgt)) out = Utf16ToUtf8(&p->scratch, (WString){ (u16 *)path, (s64)wcslen(path) });
+        free(rgba);
+        Logf("app", "pasted picture: %dx%d%s", w, hgt, out.count ? "" : " (not saved)");
+    }
+    if (bi) GlobalUnlock(h);
+    CloseClipboard();
+    return out;
 }
 
 static String ReadClipboardUtf8(HWND hwnd, Arena *a)
@@ -941,6 +988,10 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     fi->image_count = ready;
     fi->images = p->image_list;
     fi->editor = p->editor;
+    fi->sessions_meta_text = p->sessions_meta_text;
+    p->sessions_meta_text = (String){0};   // once
+    fi->pasted_image = Str_PushCopy(&p->scratch, (String){ p->pasted_image, p->pasted_image_len });
+    p->pasted_image_len = 0;
     ReadAccounts(p);
     fi->accounts_text = (String){ p->accounts_text, p->accounts_len };
     fi->accounts_version = p->accounts_version;
@@ -1087,6 +1138,13 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         }
     }
     if (out.read_clipboard) { p->want_clipboard = 1; p->wake_frame = p->frame; }
+    if (out.save_clipboard_image) {
+        // headless runs have no pictures on their clipboard
+        String saved = p->headless ? (String){0} : SaveClipboardImage(p);
+        p->pasted_image_len = (s32)Min(saved.count, (s64)sizeof(p->pasted_image));
+        memcpy(p->pasted_image, saved.data, (size_t)p->pasted_image_len);
+        if (saved.count) p->wake_frame = p->frame;
+    }
     {
         // --- the viewer's pictures: one the worker decoded becomes a texture; the first wanted one that isn't here is
         //     decoded next (at once in headless runs) ---
@@ -1150,6 +1208,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     }
     if (out.session_text.count && p->session_path.count) Term_WriteFileAtomic((const wchar_t *)p->session_path.data, out.session_text);
     if (out.add_account.count) AddAccount(p, out.add_account);
+    if (out.sessions_meta_text.count && p->sessions_meta_path.count) Term_WriteFileAtomic((const wchar_t *)p->sessions_meta_path.data, out.sessions_meta_text);
     if (out.account_theme_name.count) SetAccountTheme(p, out.account_theme_name, out.account_theme);
     if (out.paths_text.count && p->paths_path.count) Term_WriteFileAtomic((const wchar_t *)p->paths_path.data, out.paths_text);
     for (s32 i = 0; i < out.setting_count && !p->headless; i++) {
@@ -2490,6 +2549,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
             swprintf_s(path, MAX_PATH, L"%s\\moss\\paths%s%s.txt", local, instance_name ? L"-" : L"", instance_name ? instance_name : L"");
             p->paths_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, (WString){ (u16 *)path, (s64)wcslen(path) }));
             init.paths_text = Term_ReadFile(&p->arena, (const wchar_t *)p->paths_path.data);
+            swprintf_s(path, MAX_PATH, L"%s\\moss\\sessions%s%s.txt", local, instance_name ? L"-" : L"", instance_name ? instance_name : L"");
+            p->sessions_meta_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, (WString){ (u16 *)path, (s64)wcslen(path) }));
+            p->sessions_meta_text = Term_ReadFile(&p->arena, (const wchar_t *)p->sessions_meta_path.data);
         }
     }
 

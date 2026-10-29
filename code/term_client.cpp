@@ -36,6 +36,9 @@ struct TermClient
     bool32 Close;           // the server said goodbye for good (BYE_CLOSE)
     std::string Name;       // the window's name (empty = the main window), told the server on attach
     std::string Sessions;   // the last MSG_SESSIONS (SessionViews point into it)
+    std::string Hits;       // the last MSG_SESSION_HITS (HitViews and HitsText point into it)
+    std::vector<TermSessionHit> HitViews;
+    String HitsText;
     std::vector<TermSession> SessionViews;
     bool32 WantSessions;    // what the server was told
     u32 FindState[3];       // the last MSG_FIND_STATE: tab, count, index
@@ -283,6 +286,35 @@ extern "C" b32 TermClient_Poll(TermClient* C)
             if(!C->FindMarks.empty()) { memcpy(C->FindMarks.data(), Payload.data() + sizeof(C->FindState), C->FindMarks.size() * 2); }
             Changed = true;
         }
+        else if(Type == MSG_SESSION_HITS && Payload.size() >= 8)
+        {
+            // --- a search of the transcripts: the text, then each hit's id and snippet ---
+            C->Hits = Payload;
+            C->HitViews.clear();
+            const u8* P = (const u8*)C->Hits.data();
+            size_t Size = C->Hits.size(), At = 0;
+            u32 TextLen = 0, Count = 0;
+            memcpy(&TextLen, P, 4);
+            At = 4;
+            if(At + TextLen + 4 <= Size)
+            {
+                C->HitsText = String{(u8*)P + At, (s64)TextLen};
+                At += TextLen;
+                memcpy(&Count, P + At, 4);
+                At += 4;
+                for(u32 I = 0; I < Count && At + 8 <= Size; ++I)
+                {
+                    u32 Lens[2] = {};
+                    memcpy(Lens, P + At, 8);
+                    At += 8;
+                    if(At + (size_t)Lens[0] + Lens[1] > Size) { break; }
+                    TermSessionHit H = {String{(u8*)P + At, (s64)Lens[0]}, String{(u8*)P + At + Lens[0], (s64)Lens[1]}};
+                    At += (size_t)Lens[0] + Lens[1];
+                    C->HitViews.push_back(H);
+                }
+            }
+            Changed = true;
+        }
         else if(Type == MSG_SESSIONS && Payload.size() >= 4)
         {
             // --- Claude Code's sessions: views onto the payload kept whole ---
@@ -390,6 +422,9 @@ extern "C" void TermClient_Fill(TermClient* C, AppFrameInput* In)
     In->tabs = C->TabViews.data();
     In->session_count = (s64)C->SessionViews.size();
     In->sessions = C->SessionViews.data();
+    In->session_hits_text = C->HitsText;
+    In->session_hit_count = (s64)C->HitViews.size();
+    In->session_hits = C->HitViews.data();
     In->grid_count = (s64)C->GridViews.size();
     In->grids = C->GridViews.data();
     In->tabs_received = C->Connected && C->TabsReceived;
@@ -432,6 +467,10 @@ extern "C" void TermClient_Apply(TermClient* C, const AppOutput* Out)
         P.append((const char*)Out->inputs[I].bytes.data, (size_t)Out->inputs[I].bytes.count);
         Term_LatencyMark("client_send");
         ClientSend(C, MSG_INPUT, P);
+    }
+    if(C->Connected && Out->session_search_set)
+    {
+        ClientSend(C, MSG_SEARCH_SESSIONS, std::string((const char*)Out->session_search.data, (size_t)Out->session_search.count));
     }
     if(C->Connected && (bool32)(Out->want_sessions != 0) != C->WantSessions)
     {

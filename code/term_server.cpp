@@ -374,6 +374,7 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
     // --- the model: the transcript's last reply's (projects\<cwd, every other character a dash>\<id>.jsonl), else
     //     what it was started with: --model, ANTHROPIC_MODEL, settings.json ---
     std::string Model;
+    u64 Context = 0;   // tokens in its context at the last reply (its input, cached or not)
     if(!SessionId.empty() && !Cwd.empty())
     {
         std::wstring Mangled = Utf8ToWide(Cwd);
@@ -383,6 +384,13 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
         {
             std::string M;
             if(JsonDecodeString(Tail, At + 9, M) && !M.empty() && M[0] != '<') { Model = M; } // not "<synthetic>" (errors)
+        }
+        // the last reply's usage: what it was given (fresh, cache written, cache read) is what the context held
+        size_t Usage = Tail.rfind("\"usage\":{");
+        for(const char* Field : {"\"input_tokens\":", "\"cache_creation_input_tokens\":", "\"cache_read_input_tokens\":"})
+        {
+            size_t At = Usage == std::string::npos ? Usage : Tail.find(Field, Usage);
+            if(At != std::string::npos && At - Usage < 1024) { Context += strtoull(Tail.c_str() + At + strlen(Field), 0, 10); }
         }
     }
     if(Model.empty())
@@ -421,7 +429,8 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
         if(Ok) { Model = Pretty; }
     }
     if(Model.empty()) { Model = "Default"; }
-    return Method + "\n" + (ClaudeAi ? Org : std::string()) + "\n" + (ClaudeAi ? Email : std::string()) + "\n" + Model;
+    return Method + "\n" + (ClaudeAi ? Org : std::string()) + "\n" + (ClaudeAi ? Email : std::string()) + "\n" + Model + "\n" +
+           (Context ? std::to_string(Context) : std::string());
 }
 
 // A settings.txt list of program names (separated by spaces or commas), lowercase; Default when unset.
@@ -501,6 +510,89 @@ static DWORD WINAPI HistoryReadThread(void* Param)
     H->Reply = ReadHistory(H->TabId, H->ConfigDir, H->SessionId);
     InterlockedExchange(&H->Done, 1);
     SetEvent(H->Wake);
+    return 0;
+}
+
+// A search through every session's transcript on its own thread, in Windows' background mode (low CPU and I/O priority):
+// Text (ASCII case folded) and the transcripts in, Reply (MSG_SESSION_HITS) out: each session with a match, a piece of
+// the text around its first one. A newer search sets Cancel and this one stops between chunks.
+struct sessions_search
+{
+    std::string Text;
+    std::vector<std::pair<std::wstring, std::string>> Files;   // path, session id
+    std::string Reply;
+    volatile LONG Cancel;
+    HANDLE Wake;
+    volatile LONG Done;
+};
+
+static DWORD WINAPI SessionsSearchThread(void* Param)
+{
+    Debug_NameThread("sessions search");
+    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    sessions_search* S = (sessions_search*)Param;
+    std::string Want = S->Text;
+    for(char& C : Want) { if(C >= 'A' && C <= 'Z') { C += 32; } }
+    std::string Hits;
+    u32 Count = 0;
+    u64 StartMs = GetTickCount64(), Bytes = 0;
+    for(size_t F = 0; F < S->Files.size() && !S->Cancel && Count < 300 && !Want.empty(); ++F)
+    {
+        HANDLE File = CreateFileW(S->Files[F].first.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, 0);
+        if(File == INVALID_HANDLE_VALUE) { continue; }
+        std::string Chunk, Lower;
+        u64 Offset = 0;
+        for(;;)
+        {
+            // 4 MiB at a time, each overlapping the last by the text's length (a match across the seam)
+            std::string Got = ReadFileRange(File, Offset, 4u << 20);
+            if(Got.empty() || S->Cancel) { break; }
+            Bytes += Got.size();
+            Lower = Got;
+            for(char& C : Lower) { if(C >= 'A' && C <= 'Z') { C += 32; } }
+            size_t At = Lower.find(Want);
+            if(At != std::string::npos)
+            {
+                // the text around it, JSON's escapes and quotes as spaces, cut on whole characters
+                // within the JSON string it's in (from its opening quote, at most a few words before the match, to
+                // its closing one)
+                size_t From = At, To = At + Want.size();
+                while(From > 0 && At - From < 400 && !(Got[From - 1] == '"' && (From < 2 || Got[From - 2] != '\\'))) { From--; }
+                if(At - From > 40) { From = At - 40; while(From < At && Got[From] != ' ') { From++; } }
+                while(To < Got.size() && To - At < 160 && !(Got[To] == '"' && Got[To - 1] != '\\')) { To++; }
+                while(From > 0 && ((u8)Got[From] & 0xC0) == 0x80) { From--; }
+                while(To < Got.size() && ((u8)Got[To] & 0xC0) == 0x80) { To++; }
+                std::string Snip;
+                for(size_t K = From; K < To; ++K)
+                {
+                    char C = Got[K];
+                    if(C == '\\' && K + 1 < To) { K++; Snip += (Got[K] == 'n' || Got[K] == 't' || Got[K] == 'r') ? ' ' : Got[K]; continue; }
+                    Snip += (C == '"' || C == '\n' || C == '\r') ? ' ' : C;
+                }
+                std::string Folded;
+                for(char C : Snip) { if(!(C == ' ' && !Folded.empty() && Folded.back() == ' ')) { Folded += C; } }
+                u32 Lens[2] = {(u32)S->Files[F].second.size(), (u32)Folded.size()};
+                Hits.append((const char*)Lens, sizeof(Lens));
+                Hits += S->Files[F].second;
+                Hits += Folded;
+                Count++;
+                break;
+            }
+            if(Got.size() < (4u << 20)) { break; }
+            Offset += Got.size() - std::min(Got.size(), Want.size());
+        }
+        CloseHandle(File);
+    }
+    u32 TextLen = (u32)S->Text.size();
+    S->Reply.append((const char*)&TextLen, 4);
+    S->Reply += S->Text;
+    S->Reply.append((const char*)&Count, 4);
+    S->Reply += Hits;
+    Logf("server", "sessions search: %u of %u sessions, %llu MB, %llu ms%s", Count, (u32)S->Files.size(), (unsigned long long)(Bytes >> 20),
+         (unsigned long long)(GetTickCount64() - StartMs), S->Cancel ? " (stopped)" : "");
+    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+    InterlockedExchange(&S->Done, 1);
+    SetEvent(S->Wake);
     return 0;
 }
 
@@ -1580,6 +1672,9 @@ static int ServerMain()
     u64 HistorySavedMs = GetTickCount64(); // last save of the shell tabs' output (not at once: restored tabs still have to type theirs)
     std::vector<session_info> Sessions;
     sessions_scan* SessionsScan = 0;
+    sessions_search* SessionsSearch = 0;   // a search running on its own thread
+    std::string SearchNext;                 // asked for while one ran: started once it stops
+    bool32 SearchWaiting = false;
     history_read* HistoryRead = 0;
     u64 SessionsScanMs = 0;
     std::string TrayTip;
@@ -2055,6 +2150,13 @@ static int ServerMain()
                         if(!IpcSendString(C.Conn, MSG_FIND_STATE, Reply)) { IpcClose(C.Conn); C.Attached = false; }
                     }
                 }
+                else if(Type == MSG_SEARCH_SESSIONS)
+                {
+                    // --- the window's text to find in every transcript: after the running search stops ---
+                    SearchNext = Payload;
+                    SearchWaiting = true;
+                    if(SessionsSearch) { InterlockedExchange(&SessionsSearch->Cancel, 1); }
+                }
                 else if(Type == MSG_WANT_SESSIONS && Payload.size() >= 4)
                 {
                     u32 On = 0;
@@ -2257,9 +2359,13 @@ static int ServerMain()
                     // --- its account: a login, organization or email that changes under a running claude holds it, so it
                     //     can't go on billing the new one unasked: its turn stopped (Esc), input dropped until the window says
                     //     go on (MSG_ACCOUNT_OK) or the account changes back. Model changes are just shown ---
-                    std::string Who = Find->Account.substr(0, Find->Account.rfind('\n'));
-                    std::string WhoWas = T->Account.substr(0, T->Account.rfind('\n'));
-                    std::string WhoHeld = T->AccountWas.substr(0, T->AccountWas.rfind('\n'));
+                    auto Identity = [](const std::string& A) {   // login, organization, email: what bills
+                        size_t P = A.find('\n');
+                        P = P == std::string::npos ? P : A.find('\n', P + 1);
+                        P = P == std::string::npos ? P : A.find('\n', P + 1);
+                        return A.substr(0, P);
+                    };
+                    std::string Who = Identity(Find->Account), WhoWas = Identity(T->Account), WhoHeld = Identity(T->AccountWas);
                     if(!Find->Account.empty() && SameClaude && !T->Account.empty() && Who != WhoWas)
                     {
                         if(T->AccountWas.empty() && T->LoginAtMs && NowMs - T->LoginAtMs < 10 * 60 * 1000)
@@ -2280,8 +2386,9 @@ static int ServerMain()
                     }
                     if(!Find->Account.empty() && Find->Account != T->Account)
                     {
-                        Logf("server", "tab %u: claude account %s, %s", T->Id, Find->Account.substr(0, Find->Account.find('\n')).c_str(),
-                             Find->Account.substr(Find->Account.rfind('\n') + 1).c_str());
+                        // logged when the login or the model changes (the context's size changes every turn)
+                        std::string Now = Find->Account.substr(0, Find->Account.rfind('\n')), Was = T->Account.substr(0, T->Account.rfind('\n'));
+                        if(Now != Was) { Logf("server", "tab %u: claude account %s, %s", T->Id, Now.substr(0, Now.find('\n')).c_str(), Now.substr(Now.rfind('\n') + 1).c_str()); }
                         T->Account = Find->Account;
                     }
                     // --- the folder rules (accounts.txt): a claude in a ruled folder must use that folder's account, and an
@@ -2391,6 +2498,28 @@ static int ServerMain()
             HistoryRead = 0;
         }
 
+        // --- a search of the transcripts: its hits to the windows (unless a newer one is waiting), then the next ---
+        if(SessionsSearch && SessionsSearch->Done)
+        {
+            for(client* C : Clients)
+            {
+                if(SearchWaiting || !C->Attached || !C->WantSessions) { continue; }
+                if(!IpcSendString(C->Conn, MSG_SESSION_HITS, SessionsSearch->Reply)) { IpcClose(C->Conn); C->Attached = false; }
+            }
+            delete SessionsSearch;
+            SessionsSearch = 0;
+        }
+        if(!SessionsSearch && SearchWaiting)
+        {
+            SearchWaiting = false;
+            SessionsSearch = new sessions_search();
+            SessionsSearch->Text = SearchNext;
+            SessionsSearch->Wake = Wake;
+            for(const session_info& S : Sessions) { SessionsSearch->Files.push_back({S.Path, S.Id}); }
+            HANDLE Thread = CreateThread(0, 0, SessionsSearchThread, SessionsSearch, 0, 0);
+            if(Thread) { CloseHandle(Thread); }
+            else { delete SessionsSearch; SessionsSearch = 0; }
+        }
         // --- Claude Code's sessions: read every 5 s while the window shows them (on their own thread) ---
         if(SessionsScan && SessionsScan->Done)
         {

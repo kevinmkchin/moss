@@ -34,6 +34,10 @@ enum msg_type
     MSG_HISTORY,   // server -> window: u32 TabId, u32 Count, then Count x (u8 FromUser, u32 TimeLen, u32 TextLen, time, text),
                    // oldest first (no session: Count 0)
     MSG_ACCOUNT_OK, // window -> server: u32 TabId: its claude may go on with the account it changed to (TAB_ACCOUNT_HELD ends)
+    MSG_SEARCH_SESSIONS, // window -> server: text to find in every session's transcript (UTF-8; empty = none): answered
+                   // with MSG_SESSION_HITS; a newer one stops the one running
+    MSG_SESSION_HITS, // server -> window: u32 TextLen, the text, u32 Count, then Count x (u32 IdLen, u32 SnippetLen, id, a
+                   // piece of the transcript around its first match)
     MSG_NOTIFY,    // window -> server: a title, a 0 byte, a body (UTF-8): a tray notification (a web tab's page; settings
                    // `notifications = off`: none)
 };
@@ -59,7 +63,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 15
+#define TERM_PROTOCOL_VERSION 16
 
 struct msg_attach
 {

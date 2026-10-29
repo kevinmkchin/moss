@@ -248,6 +248,24 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   claude's text, at most 2000 messages of 64 KB) and send it (`MSG_HISTORY`). The history view covers the terminal:
   messages wrapped to the pane (`App.hist_lines`, rebuilt when the history, width or text change), matches in the
   match color, the current one framed and scrolled to the middle.
+## Claude tabs made comfortable: the composer, the reader, clean copy
+
+- The composer (Ctrl+Shift+I, `compose`; any terminal tab): a panel over the bottom of the pane with a real text box
+  (`Ui_TextArea` in term_ui.c: wrapped lines, Up/Down, mouse, a double click's word, undo in bursts, 16 KB; laid out
+  only while open). Enter is a new line, Ctrl+Enter sends (`PasteBytes`, bracketed when the program asked, then `\r`),
+  Esc puts it away (one draft, `App.compose`, kept). Ctrl+V pastes text, and a picture on the clipboard (no text) is
+  saved as `%TEMP%\moss-paste\paste-<time>.png` (`SaveClipboardImage`, `AppOutput.save_clipboard_image` ->
+  `AppFrameInput.pasted_image`) and its path inserted (claude reads pictures by path); files dropped on the pane go in
+  as paths. While open on the focused tab it takes every key the commands leave.
+- The reader (Ctrl+Shift+R, `reader`; a claude tab): the history view without a search. The transcript is read when it
+  opens and again when a turn ends (`TermTab_Busy` going off; never on a timer); built into lines once per read or width
+  change: headings, **bold** and `code` runs (`HistSpan`), list items (marker, indented lines), fenced code (`Font_Mono`:
+  Cascadia Mono, else Consolas; a shade; the block's copy button, `App.hist_blocks`), tables (columns as wide as their
+  widest cell, narrowed together to fit), rules. A fresh read stays at the end only when the view was there. It takes
+  the keys while its tab is focused (Esc back, arrows, pages, Home/End); Ctrl+F searches it.
+- Copying from an agent's tab (a selection, copy on select; not a rectangle) is cleaned (`CleanAgentCopy`): claude's ●
+  and ⎿ marks become spaces, the indent the lines share goes, a line wrapped near the screen's edge joins the next.
+
 ## A claude tab's account line
 
 - Under a claude tab's terminal, a row says who's billed and whose email it reports with, as its /status would: login
@@ -258,6 +276,11 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `subscriptionType` (nothing else is taken from it; secrets read on the way are wiped), and the model of the
   transcript's last reply (else `--model`, `ANTHROPIC_MODEL`, settings.json, "Default"). Organization and email only
   for a claude.ai login. Test: `tests/sessions` (a made-up Max login).
+- Its 5th field is the context's size: the last reply's usage (input, cache written, cache read) in the transcript tail;
+  the hold compares login, organization and email only. On the line's right: "Mode" (claude's permission mode read off
+  its screen's bottom 4 rows: plan, accept edits, auto, bypass permissions, else default; a click sends Shift+Tab) and
+  "Context 42k". The model is a button: the palette's `PaletteMode_Model` (`g_Models`, or a name typed) types
+  `/model <name>` and Enter, not while a turn runs or the tab is held. Test: `tests/claude_ui`.
 - Another account's claude (its own `CLAUDE_CONFIG_DIR`, e.g. set in the shell) registers in its own config folder:
   the scan looks there too (the process's environment, `EnvVar`) and keeps it in `tab::ConfigDir`. tabs.txt saves it
   (the 7th field), a restart resumes the claude under it (the tab's environment gets that `CLAUDE_CONFIG_DIR`), and the
@@ -305,6 +328,14 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 
 ## The sessions sidebar
 
+- Full-text search: a filter of 3 characters or more, still for 250 ms (headless runs: 2 frames, their clock moves with
+  frames), goes to the server (`MSG_SEARCH_SESSIONS`), which reads every account's transcripts on its own thread in
+  Windows' background mode, 4 MiB at a time, the first match in each (`SessionsSearchThread`; a newer search stops it;
+  logs "sessions search: N of M sessions, MB, ms"), and answers `MSG_SESSION_HITS` (each hit's id and the JSON string
+  around the match). Hits join the filter's rows with their snippet in the accent.
+- The sidebar's own notes (`%LOCALAPPDATA%\moss\sessions.txt`: `name <id> = <name>`, `pin <id>`, `archive <id>`; headless
+  and test runs: none): a right-click on a row's menu renames (in the row: Enter keeps, empty = its first prompt), pins
+  (first, under "Pinned") or archives it (left out unless something's typed; marked "archived").
 - The sidebar on the window's left lists Claude Code's sessions; it starts open (layout.txt keeps `SidebarClosed`).
   Ctrl+Shift+S gives it the keyboard (again: closes it; a click in a pane takes the keyboard back). It lists Claude Code's sessions
   newest first under day headings; typing filters (project, first prompt, folder); Enter or a click brings up the
@@ -491,7 +522,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   the captured PNGs. The window path itself: `tools/window_test.ps1` (an off-screen window that never takes
   the foreground, posted keys, `-Clicks "x,y"` posted clicks at window pixels, PrintWindow capture; a test
   window takes the mouse from the posted messages, not the real cursor).
-- Test sets: `tests/run_all.sh` (smoke, layout, terminal, browser, settings, find, tabs, links, shells, agents, sessions, session, windows, accounts); each runs in a temp folder outside
+- Test sets: `tests/run_all.sh` (smoke, layout, terminal, browser, settings, find, tabs, links, shells, agents, sessions, session, windows, accounts, claude_ui); each runs in a temp folder outside
   any repo (prompts must not show git state) and compares with its local `reference/` (`bless` to accept).
   `tests/claude` is a manual set with real Claude Code. Captures named `*_varies.png` (counters, timings) are
   looked at, never compared. Headless runs ignore the user's settings.txt (defaults only).
