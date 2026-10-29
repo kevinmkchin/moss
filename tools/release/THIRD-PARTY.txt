@@ -15,6 +15,10 @@ ConPTY (conpty.dll, OpenConsole.exe)
   The console host from Windows Terminal (Microsoft.Windows.Console.ConPTY), by Microsoft. MIT License
   (conpty-LICENSE.txt). https://github.com/microsoft/terminal
 
+Libre Caslon (fonts\LibreCaslonText-*.ttf, fonts\LibreCaslonDisplay-Regular.ttf)
+  Libre Caslon Text and Libre Caslon Display, by Pablo Impallari (Impallari Type). SIL Open Font License 1.1
+  (fonts\LibreCaslonText-OFL.txt, fonts\LibreCaslonDisplay-OFL.txt). The reader's type. https://github.com/impallari/Libre-Caslon-Text
+
 WebView2 loader (WebView2Loader.dll)
   From the WebView2 SDK 1.0.4314.35 (Microsoft.Web.WebView2), by Microsoft. BSD 3-Clause License
   (webview2-LICENSE.txt). It finds the WebView2 Runtime (Microsoft Edge's engine, part of Windows) for web tabs.

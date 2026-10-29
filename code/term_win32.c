@@ -104,6 +104,7 @@ typedef struct Platform {
     FontAtlas atlas;
     Font fonts[Font_Count];
     u32 fonts_dpi;
+    f32 reader_pt, fonts_reader_pt;   // the reader's text size (settings `reader_size`; AppOutput.reader_pt), the fonts' last
     u64 presented_hash;
     u64 last_frame_us, last_present_us;
     b32 present_deferred;         // something new waits for the next present slot
@@ -209,7 +210,7 @@ static void UpdateMonitor(Platform *p)
 // The UI fonts for the window's DPI: made again (and the glyph atlas emptied) when it changes.
 static void MakeFonts(Platform *p)
 {
-    if (p->fonts_dpi == p->dpi) return;
+    if (p->fonts_dpi == p->dpi && p->fonts_reader_pt == p->reader_pt) return;
     if (!p->atlas.pixels) FontAtlas_Init(&p->atlas);
     else FontAtlas_Reset(&p->atlas);
     for (s32 i = 0; i < Font_Count; i++) Font_Destroy(&p->fonts[i]);
@@ -220,13 +221,27 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_UiBold], &p->atlas, ui, 9 * pt, 600);
     Font_Create(&p->fonts[Font_Icon], &p->atlas, icons, 9 * pt, 400);
     Font_Create(&p->fonts[Font_IconSmall], &p->atlas, icons, 7 * pt, 400);
-    // the reader: an article's type (a serif to read, a sans for headings, a mono for code)
-    Font_Create(&p->fonts[Font_Mono], &p->atlas, L"Cascadia Mono\0Consolas\0", 10 * pt, 400);
-    Font_Create(&p->fonts[Font_Read], &p->atlas, L"Georgia\0Cambria\0", 12 * pt, 400);
-    Font_Create(&p->fonts[Font_ReadBold], &p->atlas, L"Georgia\0Cambria\0", 12 * pt, 700);
-    Font_Create(&p->fonts[Font_ReadHead], &p->atlas, ui, 15 * pt, 600);
-    Font_Create(&p->fonts[Font_ReadSans], &p->atlas, ui, 11 * pt, 400);   // the user's prompts and the prompt box
+    // --- the reader: a magazine's type, moss's own: Libre Caslon (Text to read, Display for headings; fonts\ next to
+    //     moss.exe, SIL Open Font License; Georgia when they're missing), Segoe UI for the user's prompts, a mono for
+    //     code; all at the reader's size (12 pt: the text) ---
+    WCHAR dir[MAX_PATH] = {0};
+    GetModuleFileNameW(NULL, dir, MAX_PATH);
+    WCHAR *slash = wcsrchr(dir, L'\\');
+    if (slash) slash[1] = 0;
+    static const wchar_t *const files[3] = { L"LibreCaslonText-Regular.ttf", L"LibreCaslonText-Bold.ttf", L"LibreCaslonDisplay-Regular.ttf" };
+    WCHAR lists[3][MAX_PATH + 64] = {0};   // "<moss>\fonts\X.ttf\0Georgia\0Cambria\0\0"
+    for (s32 k = 0; k < 3; k++) {
+        s32 n = swprintf_s(lists[k], MAX_PATH, L"%sfonts\\%s", dir, files[k]);
+        wmemcpy(lists[k] + n + 1, L"Georgia\0Cambria\0", 17);
+    }
+    f32 r = (p->reader_pt > 0 ? p->reader_pt : 12) * pt;
+    Font_Create(&p->fonts[Font_Mono], &p->atlas, L"Cascadia Mono\0Consolas\0", r * 0.82f, 400);
+    Font_Create(&p->fonts[Font_Read], &p->atlas, lists[0], r * 1.06f, 400);
+    Font_Create(&p->fonts[Font_ReadBold], &p->atlas, lists[1], r * 1.06f, 700);
+    Font_Create(&p->fonts[Font_ReadHead], &p->atlas, lists[2], r * 1.55f, 600);
+    Font_Create(&p->fonts[Font_ReadSans], &p->atlas, ui, r * 0.92f, 400);   // the user's prompts and the prompt box
     p->fonts_dpi = p->dpi;
+    p->fonts_reader_pt = p->reader_pt;
 }
 
 static UiKeyEvent *PushEvent(Platform *p, u8 key, b32 down, b32 up, u32 repeat_count, u32 lparam, u8 mods)
@@ -922,6 +937,10 @@ static void ReadSettings(Platform *p, AppInit *init, b32 headless)
         init->copy_on_select_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "copy_on_select"), S("off"));
         init->dim_unfocused_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "dim_unfocused"), S("off"));
         init->claude_chat_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "claude_chat"), S("off"));
+        String reader_size = Term_ReadSetting(&p->arena, "reader_size"), reader_theme = Term_ReadSetting(&p->arena, "reader_theme");
+        init->reader_pt = reader_size.count ? (f32)atof((const char *)Str_PushCopy(&p->arena, reader_size).data) : 0;
+        init->reader_theme = Str_EqualNoCase(reader_theme, S("evening")) ? 1 : Str_EqualNoCase(reader_theme, S("window")) ? 2 : 0;
+        p->reader_pt = init->reader_pt;
         init->paste_warning_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
         init->win32_input_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "win32_input"), S("off"));
         String backdrop = Term_ReadSetting(&p->arena, "backdrop");
@@ -1129,6 +1148,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         if (p->cells) TermCells_SetFont(p->cells, p->term_font, p->term_font_px);
         p->wake_frame = p->frame;   // the panes' sizes in cells change
     }
+    if (out.reader_pt > 0) p->reader_pt = out.reader_pt;   // its fonts are made again next frame
     if (p->cells && out.term_font_px > 0 && out.term_font_px != p->term_font_px) {
         p->term_font_px = out.term_font_px;
         TermCells_SetFont(p->cells, p->term_font, out.term_font_px);

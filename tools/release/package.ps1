@@ -30,6 +30,7 @@ Copy-Item -Recurse (Join-Path $root "vendor\clink") (Join-Path $stage "clink")
 Copy-Item -Recurse (Join-Path $root "vendor\clink-completions") (Join-Path $stage "clink-completions")
 Copy-Item -Recurse (Join-Path $root "clink-moss") (Join-Path $stage "clink-moss")
 Copy-Item -Recurse (Join-Path $root "shell") (Join-Path $stage "shell")
+Copy-Item -Recurse (Join-Path $root "vendor\fonts") (Join-Path $stage "fonts")
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
 Copy-Item (Join-Path $PSScriptRoot "THIRD-PARTY.txt") $stage
 if (Test-Path $zip) { Remove-Item -Force $zip }

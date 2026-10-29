@@ -112,7 +112,7 @@ enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
     Setting_DimUnfocused,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
-    Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_GoodProgrammer, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
+    Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_GoodProgrammer, Setting_ReaderTheme, Setting_ReaderSize, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
     Setting_Count
 };
 enum { SettingKind_Choice, SettingKind_Bool, SettingKind_Text, SettingKind_Action };
@@ -135,6 +135,8 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
     [Setting_ClaudeChat]    = { "Agents", "Claude tabs as a conversation", "the transcript to read and a prompt box; Ctrl+Shift+R flips a tab", SettingKind_Bool },
     [Setting_GoodProgrammer] = { "Agents", "Be a good programmer", "your principles (good-programmer.md) in every Claude Code session", SettingKind_Bool },
+    [Setting_ReaderTheme]   = { "Reader", "Colors", "Claude's conversation: Paper, Evening, or the window's", SettingKind_Choice },
+    [Setting_ReaderSize]    = { "Reader", "Text size", "Ctrl+= / Ctrl+- over a conversation", SettingKind_Choice },
     [Setting_HiddenFiles]   = { "Files", "Show hidden files", "Ctrl+H", SettingKind_Bool },
     [Setting_FolderSizes]   = { "Files", "Folder sizes", "local SSDs, measured in the background", SettingKind_Bool },
     [Setting_Notifications] = { "Shell", "Notifications", "when a tab off screen wants you", SettingKind_Bool },
@@ -280,6 +282,10 @@ typedef struct HistMatch { s32 line, start, len; } HistMatch;
 // A claude tab's conversation (its chat view, or its history searched): the transcript's messages as the server sends
 // them (AppFrameInput.history_replies merged in), laid out as lines for the pane's width, and the prompt being written.
 // One per claude tab shown lately; the one unused longest goes for a new one.
+// The conversation's colors (settings `reader_theme`): Paper (warm white, ink, an oxblood accent: a magazine's page),
+// Evening (the same at night), or the window's theme.
+enum { ReaderTheme_Paper = 0, ReaderTheme_Evening, ReaderTheme_Window };
+
 typedef struct ChatMsg { TermHistoryEntry e; u64 pos; } ChatMsg;   // pos: where its text begins in msg_arena
 typedef struct ChatBuilt { s64 line, block; u64 pos; } ChatBuilt;
 typedef struct Chat {
@@ -508,6 +514,8 @@ struct App {
     Chat chats[8];            // claude tabs' conversations (Chat)
     struct { u32 term; u64 at_us; } enters[8];   // Enter for a prompt typed a moment ago (claude would take it as part of a paste)
     b32 chat_off;             // settings.txt `claude_chat = off`: claude tabs show their terminal (Ctrl+Shift+R flips one)
+    f32 reader_pt;            // the conversation's text size (settings `reader_size`; Ctrl+= / Ctrl+- / Ctrl+0 on one)
+    u8 reader_theme;          // ReaderTheme_*
     // --- Claude accounts (accounts.txt): [0] is the default one (Claude Code's own); a claude tab's account is the one
     //     with its config folder ---
     u32 accounts_version;
@@ -1000,6 +1008,8 @@ static void ApplySettings(App *app, const AppInit *init)
     app->copy_on_select_off = init->copy_on_select_off;
     app->dim_unfocused_off = init->dim_unfocused_off;
     app->chat_off = init->claude_chat_off;
+    app->reader_pt = init->reader_pt > 0 ? Clamp(init->reader_pt, 8, 28) : 12;
+    app->reader_theme = init->reader_theme;
     app->paste_warning_off = init->paste_warning_off;
     app->win32_input_off = init->win32_input_off;
     // --- key bindings: the defaults, then settings.txt's `key.<command> = <keys>` lines ("ctrl+shift+d", "none") ---
@@ -2254,6 +2264,12 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
     case Cmd_NextPane: if (t) Panes_Select(&app->panes, Panes_Neighbor(&app->panes, t, 1)); break;
     case Cmd_EvenPanes: Panes_EvenChildren(app->panes.root, 1); Panes_ComputeRects(app->panes.root); break;
     case Cmd_ZoomIn: case Cmd_ZoomOut: case Cmd_ZoomReset:
+        if (t && ChatWanted(app, t) && ClaudePromptBox(FindGrid(f->in, t->term_id)) >= 0) {
+            // a conversation's text instead of the terminals'
+            app->reader_pt = cmd == Cmd_ZoomReset ? 12 : Clamp(app->reader_pt + (cmd == Cmd_ZoomIn ? 1 : -1), 8, 28);
+            SetSetting(f->out, S("reader_size"), Str_PushFormat(f->fa, "%g", (double)app->reader_pt));
+            break;
+        }
         if (t && t->web) {
             // a web tab's page zooms instead of the terminals' text
             t->web_zoom = cmd == Cmd_ZoomReset ? 0 : Clamp(t->web_zoom + (cmd == Cmd_ZoomIn ? 1 : -1), -WebZoom_Base, (s32)ArrayCount(g_WebZooms) - 1 - WebZoom_Base);
@@ -4892,13 +4908,29 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 app->pane_rect_count++;
             }
         } else if (cv && (chat_shown || searching)) {
+            // --- the reader's colors (settings `reader_theme`): Paper or Evening, else the window's ---
+            Chrome reader_c = *c;
+            u32 r_plus = 0xFF000000u | tt->ansi[2], r_minus = 0xFF000000u | tt->ansi[1], r_mark = 0xFF000000u | tt->ansi[3];
+            u32 r_bubble = ColorAlpha(c->accent, 0.09f);
+            if (app->reader_theme == ReaderTheme_Paper) {
+                reader_c.bg = 0xFFFBF8F3; reader_c.text = 0xFF1C1B1A; reader_c.dim = 0xFF7A736B; reader_c.faint = 0xFFB4ACA2;
+                reader_c.line = 0xFFDCD5CB; reader_c.surface = 0xFFFFFFFF; reader_c.accent = 0xFF8E2B2B; reader_c.on_accent = 0xFFFFFFFF;
+                reader_c.hover = 0x14000000; reader_c.selection = 0x40B98A6E;
+                r_plus = 0xFF4E6B3C; r_minus = 0xFFA33A33; r_mark = 0xFFE7C873; r_bubble = 0xFFF1ECE3;
+            } else if (app->reader_theme == ReaderTheme_Evening) {
+                reader_c.bg = 0xFF1C1A18; reader_c.text = 0xFFE8E2D9; reader_c.dim = 0xFF9D958B; reader_c.faint = 0xFF5E5852;
+                reader_c.line = 0xFF3A3530; reader_c.surface = 0xFF24211E; reader_c.accent = 0xFFC98B7B; reader_c.on_accent = 0xFF1C1A18;
+                reader_c.hover = 0x18FFFFFF; reader_c.selection = 0x50C98B7B;
+                r_plus = 0xFFA3B98E; r_minus = 0xFFDB8E82; r_mark = 0xFF8C7236; r_bubble = 0xFF292623;
+            }
+            const Chrome *rc = &reader_c;
             // --- a claude tab's conversation: its transcript as an article over the prompt box, while claude waits at its
             //     own prompt box (a question or a menu shows its terminal instead); or its history searched ---
             Font *sans = &in->fonts[Font_ReadSans];
             const TermTab *cst = FindServerTab(app, t->term_id);
             b32 busy = (cst && (cst->flags & TermTab_Busy)) || ClaudeWorking(box_grid, box_row);
             Rect hv = content;
-            Draw_Rect(dl, content, c->bg, 0);
+            Draw_Rect(dl, content, rc->bg, 0);
             Ui_Hit(ui, Ui_IdN(Ui_Id("Chat"), n->id), content);
             if (in->input.button[Mouse_Left].pressed && !modal && RectHas(content, mouse_x, mouse_y) && t != panes->selected) Panes_Select(panes, t);
             if (app->pane_rect_count < App_MaxPanes) {
@@ -4906,7 +4938,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 app->pane_rects[app->pane_rect_count].term_id = t->term_id;
                 app->pane_rect_count++;
             }
-            s32 text_w = Max(R(10), Min(pw - 2 * R(3), R(64)));
+            s32 text_w = Max(R(10), Min(pw - 2 * R(3), (s32)(R(64) * app->reader_pt / 12)));
             s32 col_x = px0 + (pw - text_w) / 2;
             if (chat_shown) {
                 // --- the prompt box: the column's width and a little more, as tall as its text (a line to 40% of the
@@ -4919,22 +4951,22 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Rect box = R4(bx, dock.y0 + R(0.4), bx + box_w, dock.y1 - R(1.8));
                 b32 typing = focused_pane && !modal && !(app->find_open && app->find_focus) && !app->side_focus;
                 Ui_Hit(ui, Ui_IdN(Ui_Id("ChatBox"), n->id), box);
-                Draw_RectEx(dl, box, c->surface, typing ? ColorMix(c->line, c->accent, 0.7f) : c->line, (f32)Max(1, R(0.1)), radius_large, NULL, 0, 0, (f32)R(1));
+                Draw_RectEx(dl, box, rc->surface, typing ? ColorMix(rc->line, rc->accent, 0.4f) : rc->line, (f32)Max(1, R(0.1)), radius_large, NULL, 0, 0, (f32)R(1));
                 Rect inner = RectShrink(box, pad);
                 Rect foot = CutBottom(&inner, foot_h);
                 Ui_TextArea(ui, Ui_IdN(Ui_Id("ChatDraft"), n->id), &cv->draft, inner, sans, typing,
-                            busy ? S("Write the next prompt: it goes once Claude is done") : S("Reply to Claude..."), c->text, c->dim, c->selection);
+                            busy ? S("Write the next prompt: it goes once Claude is done") : S("Reply to Claude..."), rc->text, rc->dim, rc->selection);
                 b32 stop = busy && !cv->draft.count;
                 Rect sb = RectCenter(CutRight(&foot, R(2.4)), R(2.2), R(2.2));
                 u64 sid = Ui_IdN(Ui_Id("ChatSend"), n->id);
                 UiSignal ss = Ui_Hit(ui, sid, sb);
                 b32 live = stop || cv->draft.count;
-                Draw_Rect(dl, sb, live ? (ss.hovered ? ColorMix(c->accent, 0xFFFFFFFFu, 0.12f) : c->accent) : ColorMix(c->surface, c->text, 0.08f), (f32)R(1.1));
-                Draw_Icon(dl, icons_small, sb, live ? c->on_accent : c->dim, stop ? Icon_Stop : Icon_Up);
+                Draw_Rect(dl, sb, live ? (ss.hovered ? ColorMix(rc->accent, 0xFFFFFFFFu, 0.12f) : rc->accent) : ColorMix(rc->surface, rc->text, 0.08f), (f32)R(1.1));
+                Draw_Icon(dl, icons_small, sb, live ? rc->on_accent : rc->dim, stop ? Icon_Stop : Icon_Up);
                 Named(app, stop ? S("chat stop") : S("chat send"), sb);
                 Ui_Tooltip(ui, sid, stop ? S("Stop Claude   Esc") : S("Send   Enter"));
                 if (ss.clicked) ChatSend(app, &f, cv, stop);
-                Draw_TextIn(dl, small, foot, c->dim, busy ? S("Enter sends  \xC2\xB7  Shift+Enter a new line  \xC2\xB7  Esc stops Claude") :
+                Draw_TextIn(dl, small, foot, rc->dim, busy ? S("Enter sends  \xC2\xB7  Shift+Enter a new line  \xC2\xB7  Esc stops Claude") :
                             S("Enter sends  \xC2\xB7  Shift+Enter a new line  \xC2\xB7  Ctrl+Shift+R its terminal"), 0);
                 Named(app, S("chat prompt"), box);
                 // --- while claude works: a spinner and its own status line (the row over its prompt box: what it's
@@ -4964,8 +4996,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     String glyph = { su, Utf8_Encode(su, spin[(now / 150000) % 4]) };
                     Rect sl = CutBottom(&hv, R(2.2));
                     Rect st_r = R4(col_x, sl.y0, col_x + text_w, sl.y1);
-                    Draw_TextIn(dl, font, CutLeft(&st_r, R(1.8)), c->accent, glyph, 0);
-                    Draw_TextIn(dl, small, st_r, c->dim, status, 0);
+                    Draw_TextIn(dl, font, CutLeft(&st_r, R(1.8)), rc->accent, glyph, 0);
+                    Draw_TextIn(dl, small, st_r, rc->dim, status, 0);
                     Named(app, S("chat status"), sl);
                     u64 next = (now / 150000 + 1) * 150000;
                     if (!out->wake_at_us || next < out->wake_at_us) out->wake_at_us = next;
@@ -4979,7 +5011,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s32 bubble = R(1.2);   // a prompt's bubble: its text this far in
             s32 lh = R(1.55);
             u64 qh = Hash_Bytes(q.data, (u64)q.count, 0x415 + (u64)app->find_case);
-            if (text_w != cv->width) { cv->width = text_w; ChatRebuild(cv, 0); }
+            // the width and the fonts the lines were laid out for (a text size change makes the fonts again a frame later)
+            s32 layout_key = text_w * 64 + (s32)(rfont->line_h * 4) + (s32)(mono->line_h * 4) * 4096;
+            if (layout_key != cv->width) { cv->width = layout_key; ChatRebuild(cv, 0); }
             if (cv->version && (!cv->built || qh != cv->query)) {
                 BEGIN_TIMED_BLOCK(ChatBuild);
                 b32 new_query = qh != cv->query;
@@ -5403,14 +5437,14 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             cv->scroll = Clamp(cv->scroll, 0.0f, max_scroll);
             cv->at_end = cv->scroll >= max_scroll - (f32)lh;
             cv->scroll_seen = cv->scroll;
-            Draw_Rect(dl, hv, c->bg, 0);
+            Draw_Rect(dl, hv, rc->bg, 0);
             Draw_PushClip(dl, hv);
             if (!cv->lines.count) {
                 String msg = !cv->version ? S("reading the conversation...") : chat_shown ? S("Claude is ready: write a prompt below") : S("no history yet");
-                Draw_TextIn(dl, font, R4(hv.x0, hv.y0 + R(4), hv.x1, hv.y0 + R(6)), c->dim, msg, 0.5f);
+                Draw_TextIn(dl, font, R4(hv.x0, hv.y0 + R(4), hv.x1, hv.y0 + R(6)), rc->dim, msg, 0.5f);
             }
             s32 mi = 0;
-            u32 shade = ColorMix(c->bg, c->text, 0.06f), edge = ColorMix(c->bg, c->text, 0.13f);
+            u32 shade = ColorMix(rc->bg, rc->text, 0.06f), edge = ColorMix(rc->bg, rc->text, 0.13f);
             for (s32 li = 0; li < (s32)cv->lines.count; li++) {
                 const HistLine *hl = &cv->lines.data[li];
                 s32 ly = hv.y0 + R(2) + hl->y - (s32)cv->scroll;
@@ -5433,7 +5467,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         s32 mox = hl->kind == HistLine_Code ? R(1.2) : hl->indent;
                         s32 fx = Font_Measure(lf, (String){ hl->text.data, m->start });
                         s32 fw = Font_Measure(lf, (String){ hl->text.data + m->start, m->len });
-                        Draw_RectEx(dl, R4(lx + mox + fx - R(0.2), ly, lx + mox + fx + fw + R(0.2), ly + hl->h), 0, c->accent, 1, radius_small, NULL, 0, 0, 0);
+                        Draw_RectEx(dl, R4(lx + mox + fx - R(0.2), ly, lx + mox + fx + fw + R(0.2), ly + hl->h), 0, rc->accent, 1, radius_small, NULL, 0, 0, 0);
                     }
                 }
                 if (!seen) continue;
@@ -5442,18 +5476,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     b32 top = li && !cv->lines.data[li - 1].user ? 1 : cv->lines.data[li - 1].kind == HistLine_User;
                     b32 bottom = li + 1 >= (s32)cv->lines.count || !cv->lines.data[li + 1].user;
                     f32 rr[4] = { top ? radius_large : 0, top ? radius_large : 0, bottom ? radius_large : 0, bottom ? radius_large : 0 };
-                    Draw_RectEx(dl, R4(col_x, ly - (top ? R(0.6) : 0), col_x + text_w, ly + hl->h + (bottom ? R(0.6) : 0)), ColorAlpha(c->accent, 0.09f), 0, 0, 0, rr, 0, 0, 0);
+                    Draw_RectEx(dl, R4(col_x, ly - (top ? R(0.6) : 0), col_x + text_w, ly + hl->h + (bottom ? R(0.6) : 0)), r_bubble, 0, 0, 0, rr, 0, 0, 0);
                 }
                 if (hl->kind == HistLine_Blank) continue;
                 if (hl->kind == HistLine_Rule) { Draw_Rect(dl, R4(lx, ly + hl->h / 2, lx + text_w, ly + hl->h / 2 + line_w), edge, 0); continue; }
                 if (hl->kind == HistLine_User || hl->kind == HistLine_Claude) {
-                    Draw_Text(dl, small, lx, ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2, c->dim, hl->text);
+                    Draw_Text(dl, small, lx, ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2, rc->dim, hl->text);
                     continue;
                 }
                 if (hl->kind == HistLine_Note) {
                     // a note: a hairline at its left, its text small and dim
                     Draw_Rect(dl, R4(lx, ly, lx + R(0.2), ly + hl->h), edge, 0);
-                    Draw_TextMarked(dl, small, lx + R(1.2), ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2, c->dim, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                    Draw_TextMarked(dl, small, lx + R(1.2), ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2, rc->dim, hl->text, marks, mark_count, r_mark);
                     continue;
                 }
                 if (hl->kind == HistLine_Group) {
@@ -5461,18 +5495,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Rect row = R4(lx - R(0.6), ly, lx + text_w, ly + hl->h);
                     u64 rid = Ui_IdN(Ui_IdN(Ui_Id("ToolRun"), n->id), hl->key);
                     UiSignal grs = Ui_Hit(ui, rid, row);
-                    Draw_Rect(dl, row, HoverFill(app, rid, grs, c->hover), radius_small);
+                    Draw_Rect(dl, row, HoverFill(app, rid, grs, rc->hover), radius_small);
                     Rect in_row = row;
                     CutLeft(&in_row, R(0.6));
-                    Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.6)), c->dim, hl->first ? Icon_ChevronDown : Icon_ChevronRight);
+                    Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.6)), rc->dim, hl->first ? Icon_ChevronDown : Icon_ChevronRight);
                     // what they did dim, how many failed in red
                     s64 fail_at = 0;
                     while (hl->failed && fail_at + 1 < hl->text.count && !(hl->text.data[fail_at] == ' ' && hl->text.data[fail_at + 1] == '(')) fail_at++;
                     String did = hl->failed ? (String){ hl->text.data, fail_at } : hl->text;
-                    if (mark_count) Draw_TextMarked(dl, font, in_row.x0, ly + (hl->h - (s32)(font->line_h + 0.5f)) / 2, c->dim, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                    if (mark_count) Draw_TextMarked(dl, font, in_row.x0, ly + (hl->h - (s32)(font->line_h + 0.5f)) / 2, rc->dim, hl->text, marks, mark_count, r_mark);
                     else {
-                        Draw_TextIn(dl, font, CutLeft(&in_row, Min(Font_Measure(font, did), RectW(in_row))), c->dim, did, 0);
-                        Draw_TextIn(dl, font, in_row, 0xFF000000u | tt->ansi[1], (String){ hl->text.data + did.count, hl->text.count - did.count }, 0);
+                        Draw_TextIn(dl, font, CutLeft(&in_row, Min(Font_Measure(font, did), RectW(in_row))), rc->dim, did, 0);
+                        Draw_TextIn(dl, font, in_row, r_minus, (String){ hl->text.data + did.count, hl->text.count - did.count }, 0);
                     }
                     Named(app, Str_PushFormat(fa, "tools %.*s", STR_ARG(hl->text)), row);
                     if (grs.clicked) {
@@ -5480,6 +5514,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         if (oi >= 0) cv->open[oi] = cv->open[--cv->open_count];
                         else if (cv->open_count < (s32)ArrayCount(cv->open)) cv->open[cv->open_count++] = hl->key;
                         ChatRebuild(cv, hl->msg);
+                        cv->at_end = 0;   // the row stays where it was clicked
                         out->wake_at_us = now;
                     }
                     continue;
@@ -5490,19 +5525,20 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Rect row = R4(lx - R(0.6), ly, lx + text_w - hl->indent, ly + hl->h);
                     u64 rid = Ui_IdN(Ui_IdN(Ui_Id("ToolRow"), n->id), hl->key);
                     UiSignal trs = Ui_Hit(ui, rid, row);
-                    Draw_Rect(dl, row, hl->first ? shade : HoverFill(app, rid, trs, c->hover), radius_small);
+                    Draw_Rect(dl, row, hl->first ? shade : HoverFill(app, rid, trs, rc->hover), radius_small);
                     Rect in_row = row;
                     CutLeft(&in_row, R(0.6));
-                    Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.6)), c->dim, hl->first ? Icon_ChevronDown : Icon_ChevronRight);
-                    Draw_TextIn(dl, bold, CutLeft(&in_row, Min(Font_Measure(bold, hl->marker) + R(1.0), RectW(in_row))), hl->failed ? 0xFF000000u | tt->ansi[1] : c->text, hl->marker, 0);
-                    if (mark_count) Draw_TextMarked(dl, mono, in_row.x0, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, c->dim, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
-                    else Draw_TextIn(dl, mono, in_row, c->dim, hl->text, 0);
+                    Draw_Icon(dl, icons_small, CutLeft(&in_row, R(1.6)), rc->dim, hl->first ? Icon_ChevronDown : Icon_ChevronRight);
+                    Draw_TextIn(dl, bold, CutLeft(&in_row, Min(Font_Measure(bold, hl->marker) + R(1.0), RectW(in_row))), hl->failed ? r_minus : rc->text, hl->marker, 0);
+                    if (mark_count) Draw_TextMarked(dl, mono, in_row.x0, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, rc->dim, hl->text, marks, mark_count, r_mark);
+                    else Draw_TextIn(dl, mono, in_row, rc->dim, hl->text, 0);
                     Named(app, Str_PushFormat(fa, "tool %.*s %.*s", STR_ARG(hl->marker), STR_ARG(hl->text)), row);
                     if (trs.clicked) {
                         s32 oi = ChatOpenIndex(cv, hl->key);
                         if (oi >= 0) cv->open[oi] = cv->open[--cv->open_count];
                         else if (cv->open_count < (s32)ArrayCount(cv->open)) cv->open[cv->open_count++] = hl->key;
                         ChatRebuild(cv, hl->msg);
+                        cv->at_end = 0;   // the row stays where it was clicked
                         out->wake_at_us = now;
                     }
                     continue;
@@ -5513,9 +5549,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Draw_RectEx(dl, R4(lx, ly, lx + text_w - hl->indent, ly + hl->h + (hl->last ? R(0.6) : 0)), shade, 0, 0, 0, br, 0, 0, 0);
                     if (hl->first && hl->block == 3) Draw_Rect(dl, R4(lx, ly, lx + text_w - hl->indent, ly + line_w), edge, 0);
                     u8 lead = hl->text.count ? hl->text.data[0] : 0;
-                    u32 col = hl->block == 2 && lead == '+' ? 0xFF000000u | tt->ansi[2] : hl->block == 2 && lead == '-' ? 0xFF000000u | tt->ansi[1] :
-                              hl->block == 3 ? c->dim : c->text;
-                    Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, col, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                    u32 col = hl->block == 2 && lead == '+' ? r_plus : hl->block == 2 && lead == '-' ? r_minus :
+                              hl->block == 3 ? rc->dim : rc->text;
+                    Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, col, hl->text, marks, mark_count, r_mark);
                     continue;
                 }
                 if (hl->kind == HistLine_Code) {
@@ -5525,21 +5561,21 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         Rect hr = R4(lx, ly - R(2.2), lx + cw, ly);
                         f32 tr[4] = { radius_medium, radius_medium, 0, 0 };
                         Draw_RectEx(dl, hr, edge, 0, 0, 0, tr, 0, 0, 0);
-                        Draw_TextIn(dl, small, R4(hr.x0 + R(1.2), hr.y0, hr.x1 - R(3), hr.y1), c->dim, hl->marker.count ? hl->marker : S("code"), 0);
+                        Draw_TextIn(dl, small, R4(hr.x0 + R(1.2), hr.y0, hr.x1 - R(3), hr.y1), rc->dim, hl->marker.count ? hl->marker : S("code"), 0);
                         if (hl->block < cv->blocks.count) {
                             Rect cb = R4(hr.x1 - R(2.4), hr.y0 + R(0.2), hr.x1 - R(0.4), hr.y1 - R(0.2));
-                            UiSignal ccs = IconButton(app, Ui_IdN(Ui_IdN(Ui_Id("CopyCode"), n->id), (u64)hl->block), cb, Icon_Copy, icons_small, c->dim, c->hover, radius_small,
+                            UiSignal ccs = IconButton(app, Ui_IdN(Ui_IdN(Ui_Id("CopyCode"), n->id), (u64)hl->block), cb, Icon_Copy, icons_small, rc->dim, rc->hover, radius_small,
                                                       Str_PushFormat(fa, "copy code %d", hl->block + 1));
                             if (ccs.clicked) { out->clipboard_set = 1; out->clipboard_text = cv->blocks.data[hl->block]; cv->copied = hl->block + 1; cv->copied_us = now; }
                             if (cv->copied == hl->block + 1 && now - cv->copied_us < 1500000) {
-                                Draw_TextIn(dl, small, R4(cb.x0 - R(5), cb.y0, cb.x0 - R(0.3), cb.y1), c->accent, S("Copied"), 1);
+                                Draw_TextIn(dl, small, R4(cb.x0 - R(5), cb.y0, cb.x0 - R(0.3), cb.y1), rc->accent, S("Copied"), 1);
                                 if (!out->wake_at_us || cv->copied_us + 1500000 < out->wake_at_us) out->wake_at_us = cv->copied_us + 1500000;
                             }
                         }
                     }
                     f32 br[4] = { 0, 0, hl->last ? radius_medium : 0, hl->last ? radius_medium : 0 };
                     Draw_RectEx(dl, R4(lx, ly, lx + cw, ly + hl->h + (hl->last ? R(0.6) : 0)), shade, 0, 0, 0, br, 0, 0, 0);
-                    Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]);
+                    Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, rc->text, hl->text, marks, mark_count, r_mark);
                     continue;
                 }
                 if (hl->kind == HistLine_Table) {
@@ -5548,7 +5584,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     for (s32 k = 0; k < hl->cell_count; k++) row_w += hl->widths[k] + R(2.0);
                     if (hl->first) Draw_Rect(dl, R4(lx, ly, lx + row_w, ly + hl->h), shade, radius_small);
                     for (s32 k = 0; k < hl->cell_count; k++) {
-                        Draw_TextIn(dl, hl->first ? rbold : rfont, R4(x + R(0.8), ly, x + R(0.8) + hl->widths[k], ly + hl->h), c->text, hl->cells[k], 0);
+                        Draw_TextIn(dl, hl->first ? rbold : rfont, R4(x + R(0.8), ly, x + R(0.8) + hl->widths[k], ly + hl->h), rc->text, hl->cells[k], 0);
                         x += hl->widths[k] + R(2.0);
                     }
                     Draw_Rect(dl, R4(lx, ly + hl->h - line_w, lx + row_w, ly + hl->h), edge, 0);
@@ -5556,21 +5592,21 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 }
                 // a paragraph's, heading's or list item's line: its marker, then its runs (bold, `code` on a shade)
                 s32 tx = lx + hl->indent, ty = ly + (hl->h - (s32)(lf->line_h + 0.5f)) / 2;
-                if (hl->marker.count) Draw_Text(dl, rfont, tx - Font_Measure(rfont, hl->marker) - R(0.6), ty, c->dim, hl->marker);
-                if (mark_count || !hl->span_count) { Draw_TextMarked(dl, lf, tx, ty, c->text, hl->text, marks, mark_count, 0xFF000000u | tt->ansi[3]); continue; }
+                if (hl->marker.count) Draw_Text(dl, rfont, tx - Font_Measure(rfont, hl->marker) - R(0.6), ty, rc->dim, hl->marker);
+                if (mark_count || !hl->span_count) { Draw_TextMarked(dl, lf, tx, ty, rc->text, hl->text, marks, mark_count, r_mark); continue; }
                 s32 at = 0;
                 for (s32 k = 0; k <= hl->span_count; k++) {
                     s32 to = k < hl->span_count ? hl->spans[k].start : (s32)hl->text.count;
-                    if (to > at) tx = Draw_Text(dl, lf, tx, ty, c->text, (String){ hl->text.data + at, to - at });
+                    if (to > at) tx = Draw_Text(dl, lf, tx, ty, rc->text, (String){ hl->text.data + at, to - at });
                     if (k == hl->span_count) break;
                     const HistSpan *sp = &hl->spans[k];
                     String run = { hl->text.data + sp->start, sp->len };
                     if (sp->style & HistSpan_Code) {
                         s32 w = Font_Measure(mono, run);
                         Draw_Rect(dl, R4(tx - R(0.2), ly + R(0.35), tx + w + R(0.2), ly + hl->h - R(0.35)), shade, radius_small);
-                        tx = Draw_Text(dl, mono, tx, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, c->text, run);
+                        tx = Draw_Text(dl, mono, tx, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, rc->text, run);
                     } else {
-                        tx = Draw_Text(dl, hl->kind == HistLine_Heading ? rhead : rbold, tx, ty, c->text, run);
+                        tx = Draw_Text(dl, hl->kind == HistLine_Heading ? rhead : rbold, tx, ty, rc->text, run);
                     }
                     at = sp->start + sp->len;
                 }
@@ -6607,6 +6643,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             String value = {0};
             if (k == Setting_Theme) value = Str_FromCStr(g_TermThemes[app->term_theme].name);
             if (k == Setting_Font) value = app->term_font;
+            if (k == Setting_ReaderTheme) value = app->reader_theme == ReaderTheme_Evening ? S("Evening") : app->reader_theme == ReaderTheme_Window ? S("The window's") : S("Paper");
+            if (k == Setting_ReaderSize) value = Str_PushFormat(fa, "%g pt", (double)app->reader_pt);
             if (k == Setting_Cursor) value = app->cursor == 1 ? S("Bar") : app->cursor == 2 ? S("Underline") : S("Block");
             if (k == Setting_Backdrop) value = app->backdrop == 1 ? S("Acrylic") : app->backdrop == 2 ? S("Mica") : S("The desktop");
             if (k == Setting_FontSize) value = Str_PushFormat(fa, "%g pt", (double)app->term_font_pt);
@@ -6620,7 +6658,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                      k == Setting_VsEnv ? !app->vs_env_off : k == Setting_GoodProgrammer ? app->good_programmer : 0;
             b32 clicked_value = 0;
             if (sd->kind == SettingKind_Choice) {
-                s32 wide = k == Setting_Theme || k == Setting_Font || k == Setting_Backdrop ? R(11) : R(5);
+                s32 wide = k == Setting_Theme || k == Setting_Font || k == Setting_Backdrop || k == Setting_ReaderTheme ? R(11) : R(5);
                 Rect more = RectCenter(CutRight(&in_row, R(2)), R(2), R(1.8));
                 Rect val = CutRight(&in_row, wide);
                 Rect less = RectCenter(CutRight(&in_row, R(2)), R(2), R(1.8));
@@ -6756,6 +6794,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 app->reset_confirm = 1;
                 app->palette_open = 0;
                 reset_asked = 1;
+            } else if (act == Setting_ReaderTheme) {
+                app->reader_theme = (u8)((app->reader_theme + (step < 0 ? 2 : 1)) % 3);
+                key = S("reader_theme"); val = app->reader_theme == ReaderTheme_Evening ? S("evening") : app->reader_theme == ReaderTheme_Window ? S("window") : S("paper");
+            } else if (act == Setting_ReaderSize) {
+                app->reader_pt = Clamp(app->reader_pt + (step < 0 ? -1 : 1), 8, 28);
+                key = S("reader_size"); val = Str_PushFormat(fa, "%g", (double)app->reader_pt);
             } else if (act == Setting_Cursor) {
                 app->cursor = (u8)((app->cursor + (step < 0 ? 2 : 1)) % 3);
                 key = S("cursor"); val = app->cursor == 1 ? S("bar") : app->cursor == 2 ? S("underline") : S("block");
@@ -6997,6 +7041,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     out->file_ops = f.file_ops.data;
     out->focus_tab = in->focused && panes->selected ? panes->selected->term_id : 0;
     out->term_font_px = app->term_font_pt * (f32)dpi / 72.0f;
+    out->reader_pt = app->reader_pt;
     out->want_sessions = app->sidebar_open && in->connected;
     out->want_fonts = app->palette_open && app->palette_mode == PaletteMode_Settings;
     out->backdrop = app->backdrop;

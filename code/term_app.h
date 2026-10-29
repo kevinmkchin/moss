@@ -63,6 +63,8 @@ typedef struct AppInit {
     b32 copy_on_select_off;     // settings.txt `copy_on_select = off`
     b32 dim_unfocused_off;      // settings.txt `dim_unfocused = off`: the panes not in focus aren't darkened
     b32 claude_chat_off;        // settings.txt `claude_chat = off`: claude tabs show their terminal, not their conversation
+    f32 reader_pt;              // settings.txt `reader_size` (the conversation's text, pt; 0 = 12)
+    u8 reader_theme;            // settings.txt `reader_theme`: 0 paper, 1 evening, 2 the window's
     b32 paste_warning_off;      // settings.txt `paste_warning = off`
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
     b32 explorer_menu;          // Explorer has "Open in moss" (registered for this user)
@@ -192,6 +194,7 @@ typedef struct AppOutput {
     s64 scroll_count;   TermScroll *scrolls;
     u32 focus_tab;              // the tab with the keyboard focus (0 = none); sent when it changes
     f32 term_font_px;           // the terminal font size in pixels the cells should use (the platform makes the glyphs again on change)
+    f32 reader_pt;              // the conversation's text size (the platform makes the reader's fonts again on change)
     b32 want_sessions;          // the sessions list is on screen: the server keeps it current
     b32 session_search_set;     String session_search;   // find this in every transcript (empty: stop)
     String sessions_meta_text;  // non-empty: save sessions.txt (the sidebar's names, pins, archived)

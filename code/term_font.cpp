@@ -16,6 +16,15 @@ static IDWriteFactory2* FontFactory()
 
 static IDWriteFontFace* FontFaceFor(const wchar_t* Family, DWRITE_FONT_WEIGHT Weight)
 {
+    if(wcschr(Family, L'\\'))
+    {
+        // a font file (moss's own, next to moss.exe): its one face, whatever the weight asked
+        IDWriteFontFile* File = 0;
+        IDWriteFontFace* FileFace = 0;
+        if(GetFileAttributesW(Family) != INVALID_FILE_ATTRIBUTES) { FontFactory()->CreateFontFileReference(Family, 0, &File); }
+        if(File) { FontFactory()->CreateFontFace(DWRITE_FONT_FACE_TYPE_TRUETYPE, 1, &File, 0, DWRITE_FONT_SIMULATIONS_NONE, &FileFace); File->Release(); }
+        return FileFace;
+    }
     IDWriteFontCollection* System = 0;
     FontFactory()->GetSystemFontCollection(&System, FALSE);
     if(!System) { return 0; }
@@ -36,8 +45,8 @@ static IDWriteFontFace* FontFaceFor(const wchar_t* Family, DWRITE_FONT_WEIGHT We
     return Face;
 }
 
-// family: the font; weight 400 regular, 600 semibold, 700 bold. A family that isn't installed uses the next of
-// `families` ("A\0B\0\0"), so icon fonts can name Windows 11's and 10's.
+// family: the font (or a font file's full path); weight 400 regular, 600 semibold, 700 bold. A family that isn't
+// installed uses the next of `families` ("A\0B\0\0"), so icon fonts can name Windows 11's and 10's.
 extern "C" b32 Font_Create(Font* F, FontAtlas* Atlas, const wchar_t* Families, f32 SizePx, s32 Weight)
 {
     font_native* N = new font_native();

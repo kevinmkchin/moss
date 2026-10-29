@@ -46,6 +46,15 @@ waitlabel copy code 1
 sleep 500
 waitidle
 capture out/reader.png
+# the reader's text size (Ctrl+= over a conversation): its fonts and column grow, the terminals' don't
+cmd zoom_in
+cmd zoom_in
+sleep 300
+waitidle
+capture out/reader_big.png
+cmd zoom_reset
+sleep 300
+waitidle
 # the tools it used in a row, folded into one row; open, each opens: its command and its output; the edit as a diff
 cursorui tools Ran 1 command, edited 1 file, ran 1 search (1 failed)
 lmb down

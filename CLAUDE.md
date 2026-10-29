@@ -304,9 +304,15 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   (`Font_Mono`: Cascadia Mono, else Consolas; a shade; the block's copy button, `Chat.blocks`), tables (columns as wide
   as their widest cell, narrowed together to fit), rules. Ctrl+F searches it (a claude tab whose terminal shows gets the
   conversation while searching).
-- It reads like an article: one centered column (about 70 characters, `R(64)` at most), Georgia 12 pt to read
-  (`Font_Read`, `Font_ReadBold`), Segoe UI 15 pt semibold headings (`Font_ReadHead`), the user's prompts in Segoe UI
-  (`Font_ReadSans`) in a soft rounded bubble, Cascadia Mono 10 pt code; each line has its own height and place
+- It reads like an article in a magazine (The New Yorker's look): one centered column (about 70 characters, `R(64)` at
+  12 pt), Libre Caslon Text to read (`Font_Read`, `Font_ReadBold`), Libre Caslon Display headings (`Font_ReadHead`), the
+  user's prompts in Segoe UI (`Font_ReadSans`) in a soft rounded bubble, Cascadia Mono code. moss ships the Caslons
+  (`vendor\fonts`, SIL OFL, copied to `fonts\` next to moss.exe; Georgia when they're missing): `Font_Create` takes a
+  font file's full path as a family. Its text size is its own (settings `reader_size`, "Reader > Text size"; Ctrl+= /
+  Ctrl+- / Ctrl+0 over a conversation, `App.reader_pt` -> `AppOutput.reader_pt`: the platform makes the reader's fonts
+  again, and the lines are laid out again once the new fonts are in). Its colors are its own too (settings
+  `reader_theme`, "Reader > Colors", `ReaderTheme_*`): Paper (warm white, ink, an oxblood accent; the default), Evening
+  (the same at night) or the window's theme; the pane's account line and strip stay the window's; each line has its own height and place
   (`HistLine.y/h`: gaps before a message, a heading, a block); headers in local time ("Today 14:03"); code blocks in a
   container with a header (the fence's language, the copy button); tables padded, the header row on a shade.
 - Notes (`MSG_HISTORY` kind 3, `HistLine_Note`: small, dim, a hairline at the left): a /command and its output (system
@@ -636,8 +642,8 @@ Commit straight to `main` when asked to commit: no feature branches (this overri
 
 `build.bat` (any shell; finds Visual Studio): `build` (optimized, internal checks), `build debug`, `build
 release`. Copies clink (GPL-3.0, a separate program run in each tab's cmd), clink-completions (MIT), ConPTY (MIT), the
-default shell setup next to `moss.exe`. moss ships no fonts: the terminal font is `font` in settings.txt,
-else Cascadia Mono (Windows 11), else Consolas. Its icon (`tools/make_icon.cpp`) is clod's (a rounded
+default shell setup next to `moss.exe`, and the reader's fonts (`vendor\fonts`: Libre Caslon, SIL OFL) to `fonts\`. The
+terminal font is `font` in settings.txt, else Cascadia Mono (Windows 11), else Consolas. Its icon (`tools/make_icon.cpp`) is clod's (a rounded
 block, a serif lambda) in Moss's colors: green-black block, lime lambda in STIX Two Text SemiBold (`vendor/stix`, OFL,
 loaded only by make_icon, never shipped). Links with MSVC's link.exe by full path (Git's
 `link` can shadow it). From Git Bash: `cmd //c "C:\\UnitySrc\\moss\\build.bat"`. `build.bat` must stay CRLF.
@@ -669,7 +675,8 @@ loaded only by make_icon, never shipped). Links with MSVC's link.exe by full pat
 
 ## Licensing
 
-moss is GPL-3.0 (`LICENSE`); it ships clink (GPL-3.0), clink-completions (MIT), ConPTY (MIT) and WebView2's loader (BSD) next to moss.exe
+moss is GPL-3.0 (`LICENSE`); it ships clink (GPL-3.0), clink-completions (MIT), ConPTY (MIT), WebView2's loader (BSD) and
+the Libre Caslon fonts (SIL OFL) next to moss.exe
 (`tools/release/THIRD-PARTY.txt`). Every line of moss is its own or the user's (clod's code is the user's). File
 Pilot is a reference for look and feel only (screenshots, the user's descriptions): none of its code, assets (icon
 font, scheme names) or internals come into the repository; its features come back one by one, written from
