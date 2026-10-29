@@ -173,6 +173,7 @@ typedef struct Platform {
     Arena scratch;
     WString session_path;         // NUL-terminated
     WString paths_path;           // paths.txt (recents, bookmarks), NUL-terminated; empty: not saved
+    WString web_history_path;     // web-history.txt (pages web tabs went to), the same way
     WString sessions_meta_path;   // sessions.txt (the sidebar's names, pins, archived); empty: not saved
     String sessions_meta_text;    // as read at start, handed to the first frame
 } Platform;
@@ -1283,6 +1284,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     if (out.sessions_meta_text.count && p->sessions_meta_path.count) Term_WriteFileAtomic((const wchar_t *)p->sessions_meta_path.data, out.sessions_meta_text);
     if (out.account_theme_name.count) SetAccountTheme(p, out.account_theme_name, out.account_theme);
     if (out.paths_text.count && p->paths_path.count) Term_WriteFileAtomic((const wchar_t *)p->paths_path.data, out.paths_text);
+    if (out.web_history_text.count && p->web_history_path.count) Term_WriteFileAtomic((const wchar_t *)p->web_history_path.data, out.web_history_text);
     for (s32 i = 0; i < out.setting_count && !p->headless; i++) {
         char key[64] = {0};
         memcpy(key, out.setting_keys[i].data, (size_t)Min(out.setting_keys[i].count, 63));
@@ -2646,6 +2648,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
             swprintf_s(path, MAX_PATH, L"%s\\moss\\paths%s%s.txt", local, instance_name ? L"-" : L"", instance_name ? instance_name : L"");
             p->paths_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, (WString){ (u16 *)path, (s64)wcslen(path) }));
             init.paths_text = Term_ReadFile(&p->arena, (const wchar_t *)p->paths_path.data);
+            swprintf_s(path, MAX_PATH, L"%s\\moss\\web-history%s%s.txt", local, instance_name ? L"-" : L"", instance_name ? instance_name : L"");
+            p->web_history_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, (WString){ (u16 *)path, (s64)wcslen(path) }));
+            init.web_history_text = Term_ReadFile(&p->arena, (const wchar_t *)p->web_history_path.data);
             swprintf_s(path, MAX_PATH, L"%s\\moss\\sessions%s%s.txt", local, instance_name ? L"-" : L"", instance_name ? instance_name : L"");
             p->sessions_meta_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, (WString){ (u16 *)path, (s64)wcslen(path) }));
             p->sessions_meta_text = Term_ReadFile(&p->arena, (const wchar_t *)p->sessions_meta_path.data);
