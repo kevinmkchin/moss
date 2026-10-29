@@ -135,6 +135,7 @@ typedef struct AppOutput {
     b32 term_watch_changed;     // send the watch list
     s64 term_watch_count; TermWatch *term_watches;
     u32 history_get;            // read this tab's claude history (AppFrameInput.history_*)
+    u32 account_ok;             // this tab's claude may go on with the account it changed to (TermTab_AccountHeld)
     s64 input_count;    TermInput *inputs;
     s64 new_tab_count;  TermNewTab *new_tabs;
     s64 close_count;    u32 *closes;

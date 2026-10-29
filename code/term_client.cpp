@@ -158,7 +158,7 @@ extern "C" b32 TermClient_Poll(TermClient* C)
                 msg_tab M = {};
                 memcpy(&M, Payload.data() + At, sizeof(M));
                 At += sizeof(M);
-                u32 Lens[6] = {M.KeyLen, M.NameLen, M.CwdLen, M.NoticeLen, M.AgentLen, M.OwnerLen};
+                u32 Lens[8] = {M.KeyLen, M.NameLen, M.CwdLen, M.NoticeLen, M.AgentLen, M.OwnerLen, M.AccountLen, M.AccountWasLen};
                 for(u32 Len : Lens)
                 {
                     size_t From = At < Payload.size() ? At : Payload.size();
@@ -349,15 +349,17 @@ extern "C" void TermClient_Fill(TermClient* C, AppFrameInput* In)
         V.request = M.Request;
         V.flags = (M.Flags & TAB_AGENT ? TermTab_Agent : 0) | (M.Flags & TAB_BUSY ? TermTab_Busy : 0) |
                   (M.Flags & TAB_NEEDS_INPUT ? TermTab_NeedsInput : 0) | (M.Flags & TAB_EXITED ? TermTab_Exited : 0) |
-                  (M.Flags & TAB_RUNNING ? TermTab_Running : 0);
+                  (M.Flags & TAB_RUNNING ? TermTab_Running : 0) | (M.Flags & TAB_ACCOUNT_HELD ? TermTab_AccountHeld : 0);
         V.cpu = M.Cpu;
-        std::string* S = &C->Strings[I * 6];
+        std::string* S = &C->Strings[I * 8];
         V.key = String{(u8*)S[0].data(), (s64)S[0].size()};
         V.name = String{(u8*)S[1].data(), (s64)S[1].size()};
         V.cwd = String{(u8*)S[2].data(), (s64)S[2].size()};
         V.notice = String{(u8*)S[3].data(), (s64)S[3].size()};
         V.agent = String{(u8*)S[4].data(), (s64)S[4].size()};
         V.owner = String{(u8*)S[5].data(), (s64)S[5].size()};
+        V.account = String{(u8*)S[6].data(), (s64)S[6].size()};
+        V.account_was = String{(u8*)S[7].data(), (s64)S[7].size()};
     }
     // --- grids ---
     C->GridViews.resize(C->Grids.size());
@@ -442,6 +444,10 @@ extern "C" void TermClient_Apply(TermClient* C, const AppOutput* Out)
     {
         u32 Ask[2] = {Out->link_tab, Out->link_id};
         ClientSend(C, MSG_LINK_GET, std::string((const char*)Ask, sizeof(Ask)));
+    }
+    if(Out->account_ok)
+    {
+        ClientSend(C, MSG_ACCOUNT_OK, std::string((const char*)&Out->account_ok, 4));
     }
     if(Out->history_get)
     {

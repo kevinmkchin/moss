@@ -462,6 +462,20 @@ static const TermTab *FindServerTab(App *app, u32 term_id)
     return NULL;
 }
 
+// One field of a claude's account (TermTab.account): 0 login method, 1 organization, 2 email, 3 model.
+static String AccountPart(String account, s32 k)
+{
+    s64 at = 0;
+    for (s32 i = 0; i < k; i++) {
+        while (at < account.count && account.data[at] != '\n') at++;
+        if (at >= account.count) return (String){0};
+        at++;
+    }
+    s64 end = at;
+    while (end < account.count && account.data[end] != '\n') end++;
+    return (String){ account.data + at, end - at };
+}
+
 static const TermGrid *FindGrid(const AppFrameInput *in, u32 term_id)
 {
     for (s64 i = 0; term_id && i < in->grid_count; i++) if (in->grids[i].tab_id == term_id) return &in->grids[i];
@@ -1931,6 +1945,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     s32 term_margin = R(0.5);
     s32 cell_w = Max(1, in->cell_w), cell_h = Max(1, in->cell_h);
     s32 browse_header_h = R(2.8), browse_footer_h = R(2.2), browse_row_h = R(2.0), browse_heads_h = R(1.8);
+    s32 account_h = R(2.0);   // a claude tab's account line, under its terminal
     f32 radius_small = (f32)R(0.35), radius_medium = (f32)R(0.6), radius_large = (f32)R(0.9);
 
     ui->tip_font = small;
@@ -3046,14 +3061,16 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         if (n->first_child) continue;
         s32 cols = Max(2, ((s32)(n->px[2] - n->px[0]) - 2 * term_margin) / cell_w);
         s32 rows = Max(2, ((s32)(n->px[3] - n->px[1]) - caption_h - 2 * term_margin) / cell_h);
+        s32 account_rows = Max(2, ((s32)(n->px[3] - n->px[1]) - caption_h - account_h - 2 * term_margin) / cell_h);   // a claude's
         if (app->zoom_node && n->id != app->zoom_node) {
             // behind the zoomed pane: its tabs watched at their own size, not shown
             for (PaneTab *o = n->first_tab; o; o = o->next) {
                 if (!o->term_id) continue;
+                const TermTab *ost = FindServerTab(app, o->term_id);
                 TermWatch *w = Array_Push(fa, watches);
                 w->tab_id = o->term_id;
                 w->cols = cols;
-                w->rows = rows;
+                w->rows = ost && ost->account.count ? account_rows : rows;
             }
             continue;
         }
@@ -3242,14 +3259,40 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         //     browsing one isn't shown (the server keeps it running and sends no cells) ---
         for (PaneTab *o = n->first_tab; o; o = o->next) {
             if (!o->term_id) continue;
+            const TermTab *ost = FindServerTab(app, o->term_id);
             TermWatch *w = Array_Push(fa, watches);
             w->tab_id = o->term_id;
             w->cols = cols;
-            w->rows = rows;
+            w->rows = ost && ost->account.count ? account_rows : rows;
             w->shown = !o->hidden && !o->browsing && !o->viewing;
         }
 
         Rect content = R4(px0, py0 + caption_h, px0 + pw, py0 + ph);
+        const TermTab *account_tab = t && !t->browsing && !t->viewing ? FindServerTab(app, t->term_id) : NULL;
+        if (account_tab && account_tab->account.count) {
+            // --- a claude's account line: who's billed and whose email it reports with (the server reads its login,
+            //     organization, email and model as its /status would), the terminal above it ---
+            rows = account_rows;
+            Rect bar = CutBottom(&content, account_h);
+            Draw_Rect(dl, bar, account_tab->flags & TermTab_AccountHeld ? ColorMix(c->caption, c->danger, 0.3f) : c->caption, 0);
+            Draw_Rect(dl, R4(bar.x0, bar.y0, bar.x1, bar.y0 + line_w), c->line, 0);
+            String parts[4] = {0};
+            for (s32 k = 0; k < 4; k++) parts[k] = AccountPart(account_tab->account, k);
+            static const char *labels[4] = { "", "Organization", "Email", "Model" };
+            Rect ar = bar;
+            CutLeft(&ar, R(1.0));
+            CutRight(&ar, R(1.0));
+            for (s32 k = 0; k < 4 && RectW(ar) > 0; k++) {
+                if (!parts[k].count) continue;
+                if (labels[k][0]) {
+                    String label = Str_PushFormat(fa, "%s ", labels[k]);
+                    Draw_TextIn(dl, small, CutLeft(&ar, Min(Font_Measure(small, label), RectW(ar))), c->dim, label, 0);
+                }
+                Draw_TextIn(dl, small, CutLeft(&ar, Min(Font_Measure(small, parts[k]), RectW(ar))), c->text, parts[k], 0);
+                CutLeft(&ar, Min(R(1.5), RectW(ar)));
+            }
+            Named(app, Str_PushFormat(fa, "account %.*s", STR_ARG(parts[2].count ? parts[2] : parts[0])), bar);
+        }
         if (t && t->viewing && t->viewer) {
             // --- the picture view: the picture fitted (never above its own size at this DPI) on a dark ground, a caption
             //     row: its name, which of the folder's, its size, the keys. The wheel steps too ---
@@ -3900,6 +3943,36 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 }
                 Draw_PopClip(dl);
             }
+        }
+        // --- a claude whose login, organization or email changed under it: held (the server stopped its turn and drops
+        //     what's typed into it) until "Go on" here; what it was and what it is now ---
+        if (account_tab && (account_tab->flags & TermTab_AccountHeld)) {
+            Rect card = RectCenter(content, Max(1, Min(R(56), RectW(content) - R(2))), Max(1, Min(R(13), RectH(content) - R(1))));
+            Ui_Hit(ui, Ui_IdN(Ui_Id("AccountHeld"), n->id), card);
+            Draw_RectEx(dl, card, c->surface, c->danger, (f32)Max(1, R(0.1)), radius_large, NULL, 0, 0, (f32)R(1));
+            Rect body = RectShrink(card, R(1.2));
+            Draw_TextIn(dl, bold, CutTop(&body, R(2)), c->text, S("Claude's account changed"), 0);
+            Draw_TextIn(dl, small, CutTop(&body, R(1.8)), c->dim, S("Its turn was stopped and typing is held back, so nothing goes to the new account."), 0);
+            CutTop(&body, R(0.4));
+            for (s32 k = 0; k < 2; k++) {
+                String acct = k ? account_tab->account : account_tab->account_was;
+                String m = AccountPart(acct, 0), o = AccountPart(acct, 1), e = AccountPart(acct, 2);
+                String who = Str_PushFormat(fa, "%.*s%s%.*s%s%.*s", STR_ARG(m), e.count ? "  \xC2\xB7  " : "", STR_ARG(e),
+                                            o.count ? "  \xC2\xB7  " : "", STR_ARG(o));   // the email before a long organization
+                Rect line = CutTop(&body, R(1.9));
+                Draw_TextIn(dl, small, CutLeft(&line, R(3)), c->dim, k ? S("Now") : S("Was"), 0);
+                Draw_TextIn(dl, font, line, k ? c->text : c->dim, who, 0);
+            }
+            Rect brow = CutBottom(&body, R(2.4));
+            String go = S("Go on with the new account");
+            Rect gb = CutRight(&brow, Min(Font_Measure(font, go) + R(2), RectW(brow)));
+            UiSignal gs = Ui_Hit(ui, Ui_IdN(Ui_Id("AccountGoOn"), n->id), gb);
+            Draw_Rect(dl, gb, gs.hovered ? ColorMix(c->accent, 0xFFFFFFFFu, 0.12f) : c->accent, (f32)R(0.35));
+            Draw_TextIn(dl, font, gb, c->on_accent, go, 0.5f);
+            Draw_TextIn(dl, small, brow, c->dim, S("or close the tab"), 0);
+            Named(app, S("account changed"), card);
+            Named(app, S("account go on"), gb);
+            if (gs.clicked) out->account_ok = account_tab->id;
         }
         Draw_PopClip(dl);   // pane
         pane_index++;

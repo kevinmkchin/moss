@@ -8,7 +8,8 @@ enum msg_type
     MSG_NONE = 0,
     MSG_ATTACH,    // window -> server: msg_attach, then the window's cwd (UTF-8), a 0 byte, the window's name (empty = the main window)
     MSG_BYE,       // server -> window: reason text, then a 0 byte and a BYE_* byte (older windows read just the text)
-    MSG_TABS,      // server -> window: msg_tabs, then per tab msg_tab and its strings (key, name, cwd, notice, agent, owner)
+    MSG_TABS,      // server -> window: msg_tabs, then per tab msg_tab and its strings (key, name, cwd, notice, agent, owner, account, account
+                   // before it changed)
     MSG_CELLS,     // server -> window: msg_cells, then RowCount x (s32 Y, cell[Cols]); one tab per message
     MSG_OUTPUT,    // server -> window: what programs pass to the terminal itself (OSC 52 clipboard) and BEL
     MSG_WATCH,     // window -> server: u32 Count, then Count x msg_watch: every tab the window has, its size, shown or not
@@ -32,6 +33,7 @@ enum msg_type
     MSG_HISTORY_GET, // window -> server: u32 TabId: its claude session's history (the transcript), answered with MSG_HISTORY
     MSG_HISTORY,   // server -> window: u32 TabId, u32 Count, then Count x (u8 FromUser, u32 TimeLen, u32 TextLen, time, text),
                    // oldest first (no session: Count 0)
+    MSG_ACCOUNT_OK, // window -> server: u32 TabId: its claude may go on with the account it changed to (TAB_ACCOUNT_HELD ends)
 };
 
 enum
@@ -55,7 +57,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 12
+#define TERM_PROTOCOL_VERSION 13
 
 struct msg_attach
 {
@@ -71,6 +73,8 @@ enum
     TAB_NEEDS_INPUT = 1 << 2, // claude rang or notified (a permission prompt, a question) and nothing was typed since
     TAB_EXITED      = 1 << 3, // its cmd ended or never started
     TAB_RUNNING     = 1 << 4, // a shell running a program (its cmd has a child process)
+    TAB_ACCOUNT_HELD = 1 << 5, // its claude's login, organization or email changed: its turn was stopped and input to it is
+                               // dropped until MSG_ACCOUNT_OK (msg_tab's account-was string has the old one)
 };
 
 struct msg_tabs
@@ -90,6 +94,8 @@ struct msg_tab
     u32 NoticeLen; // why it wants a look ("finished", "needs you", "bell"), until the window shows it
     u32 AgentLen;  // the agent running in it ("claude", "codex", "gemini", ...); empty = a plain shell
     u32 OwnerLen;  // the window it belongs to (empty = the main window)
+    u32 AccountLen; // claude: its login method, organization, email and model, '\n' between (empty = no claude)
+    u32 AccountWasLen; // TAB_ACCOUNT_HELD: the account before it changed, the same way
 };
 
 struct msg_watch

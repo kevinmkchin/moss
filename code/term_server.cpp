@@ -21,6 +21,9 @@ struct tab
     std::string Title;      // from the session file; used when the child sets no title
     std::string Agent;      // the CLI agent running in it: "claude" (SessionId set) or another found by the scan; empty = shell
     std::wstring AgentCommand; // started with the tab after init (NEW_TAB_AGENT), once
+    std::string Account;    // the claude's login, organization, email and model, '\n' between (ClaudeAccount); empty = none
+    std::string AccountWas; // held: the account before its login, organization or email changed. Its turn was stopped and
+                            // input to it is dropped until the window says go on (MSG_ACCOUNT_OK); empty = not held
     s32 ScrollOffset;       // lines scrolled back from live output; 0 = following
     u64 SeenPushed;         // Term.ScrollbackPushed as of the last scroll fix-up
     std::string Notice;     // why it wants a look ("finished", "needs you", ...), set while the window didn't show it
@@ -211,6 +214,183 @@ static std::wstring ProcessCommandLine(DWORD Pid)
     return Out;
 }
 
+// A process's environment block ("NAME=value", each ending in a 0, then a 0), read from its process parameters
+// like ProcessCommandLine (RTL_USER_PROCESS_PARAMETERS.Environment and EnvironmentSize). Empty if it can't be read.
+static std::wstring ProcessEnvironment(DWORD Pid)
+{
+    typedef LONG (WINAPI *query_fn)(HANDLE, PROCESSINFOCLASS, void*, ULONG, ULONG*);
+    static query_fn Query = (query_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+    HANDLE Proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, Pid);
+    if(!Proc || !Query) { if(Proc) { CloseHandle(Proc); } return std::wstring(); }
+    PROCESS_BASIC_INFORMATION Basic = {};
+    u64 Params = 0, Env = 0, Size = 0;
+    std::wstring Out;
+    if(Query(Proc, ProcessBasicInformation, &Basic, sizeof(Basic), 0) >= 0 &&
+       ReadProcessMemory(Proc, (u8*)Basic.PebBaseAddress + 0x20, &Params, sizeof(Params), 0) &&
+       ReadProcessMemory(Proc, (u8*)(uintptr_t)Params + 0x80, &Env, sizeof(Env), 0) &&
+       ReadProcessMemory(Proc, (u8*)(uintptr_t)Params + 0x3F0, &Size, sizeof(Size), 0) && Env && Size >= 4 && Size <= 1024 * 1024)
+    {
+        Out.resize((size_t)Size / sizeof(wchar_t));
+        if(!ReadProcessMemory(Proc, (void*)(uintptr_t)Env, &Out[0], Out.size() * sizeof(wchar_t), 0)) { Out.clear(); }
+    }
+    CloseHandle(Proc);
+    return Out;
+}
+
+// Who a running claude bills and reports to, as its /status says it: login method, organization, email and model,
+// '\n' between them (organization and email only for a claude.ai login). From its own environment (a cloud provider
+// or an approved API key takes over from the login; CLAUDE_CONFIG_DIR picks the account) and Claude Code's files:
+// .claude.json's oauthAccount and approved keys, .credentials.json's subscriptionType (nothing else is taken from
+// it), settings.json, and the model of the transcript's last reply. Secrets read on the way are wiped. Empty when a
+// file was caught mid-write (not whole JSON): unknown, not a change.
+static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const std::string& Cwd)
+{
+    std::wstring Env = ProcessEnvironment(Pid);
+    auto Var = [&Env](const wchar_t* Name) -> std::string
+    {
+        size_t Len = wcslen(Name);
+        for(size_t At = 0; At < Env.size() && Env[At];)
+        {
+            size_t End = Env.find(L'\0', At);
+            if(End == std::wstring::npos) { End = Env.size(); }
+            if(End - At > Len && Env[At + Len] == L'=' && _wcsnicmp(&Env[At], Name, Len) == 0) { return WideToUtf8(Env.substr(At + Len + 1, End - At - Len - 1)); }
+            At = End + 1;
+        }
+        return std::string();
+    };
+    auto Truthy = [](const std::string& V) { std::string L = ToLower(V); return !L.empty() && L != "0" && L != "false" && L != "no" && L != "off"; };
+    auto ReadTail = [](const std::wstring& Path, u64 Most) -> std::string
+    {
+        HANDLE File = CreateFileW(Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+        if(File == INVALID_HANDLE_VALUE) { return std::string(); }
+        LARGE_INTEGER Size = {};
+        GetFileSizeEx(File, &Size);
+        u64 Start = (u64)Size.QuadPart > Most ? (u64)Size.QuadPart - Most : 0;
+        std::string Out = ReadFileRange(File, Start, (u32)((u64)Size.QuadPart - Start));
+        CloseHandle(File);
+        return Out;
+    };
+    // "Key": "value", pretty-printed or not (the first one at or after From)
+    auto Find = [](const std::string& Json, const char* Key, size_t From) -> std::string
+    {
+        std::string Pattern = std::string("\"") + Key + "\"";
+        for(size_t At = From == std::string::npos ? From : Json.find(Pattern, From); At != std::string::npos; At = Json.find(Pattern, At + 1))
+        {
+            size_t I = At + Pattern.size();
+            while(I < Json.size() && (Json[I] == ' ' || Json[I] == '\t' || Json[I] == '\r' || Json[I] == '\n' || Json[I] == ':')) { ++I; }
+            std::string Out;
+            if(I < Json.size() && Json[I] == '"' && JsonDecodeString(Json, I + 1, Out)) { return Out; }
+        }
+        return std::string();
+    };
+
+    // --- Claude Code's files, where this claude's environment puts them ---
+    std::string Dir = Var(L"CLAUDE_CONFIG_DIR");
+    std::string Home = Var(L"USERPROFILE");
+    if(Home.empty()) { wchar_t Buf[MAX_PATH] = {}; GetEnvironmentVariableW(L"USERPROFILE", Buf, MAX_PATH); Home = WideToUtf8(Buf); }
+    std::wstring ConfigDir = Utf8ToWide(!Dir.empty() ? Dir : Home + "\\.claude");
+    std::wstring GlobalPath = !Dir.empty() ? ConfigDir + L"\\.claude.json" : Utf8ToWide(Home) + L"\\.claude.json";
+    std::wstring CredentialsPath = ConfigDir + L"\\.credentials.json";
+    std::string Global = ReadTail(GlobalPath, 16 * 1024 * 1024);
+    std::string Settings = ReadTail(ConfigDir + L"\\settings.json", 1024 * 1024);
+    std::string Credentials = ReadTail(CredentialsPath, 64 * 1024);
+    std::string Subscription = Find(Credentials, "subscriptionType", 0);
+    // a file that's there but not whole JSON (an object, ending in '}') is being written: unknown this time
+    bool32 Torn = false;
+    for(const std::string* Json : {&Global, &Credentials})
+    {
+        size_t End = Json->find_last_not_of(" \t\r\n");
+        bool32 There = GetFileAttributesW((Json == &Global ? GlobalPath : CredentialsPath).c_str()) != INVALID_FILE_ATTRIBUTES;
+        if(There && (End == std::string::npos || (*Json)[End] != '}')) { Torn = true; }
+    }
+    if(!Credentials.empty()) { SecureZeroMemory(&Credentials[0], Credentials.size()); }
+    if(Torn) { if(!Env.empty()) { SecureZeroMemory(&Env[0], Env.size() * sizeof(wchar_t)); } return std::string(); }
+    size_t Oauth = Global.find("\"oauthAccount\"");
+    std::string Email = Find(Global, "emailAddress", Oauth);
+    std::string Org = Find(Global, "organizationName", Oauth);
+
+    // --- the login: a cloud provider, a token or an approved API key in its environment, else claude.ai's ---
+    std::string Key = Var(L"ANTHROPIC_API_KEY");
+    bool32 KeyApproved = false;
+    if(Key.size() >= 20)
+    {
+        size_t Responses = Global.find("\"customApiKeyResponses\"");
+        size_t Approved = Responses == std::string::npos ? Responses : Global.find("\"approved\"", Responses);
+        size_t End = Approved == std::string::npos ? Approved : Global.find(']', Approved);
+        KeyApproved = End != std::string::npos && Global.substr(Approved, End - Approved).find("\"" + Key.substr(Key.size() - 20) + "\"") != std::string::npos;
+    }
+    bool32 HasKey = !Key.empty();
+    if(!Key.empty()) { SecureZeroMemory(&Key[0], Key.size()); }
+    std::string Method;
+    if(Truthy(Var(L"CLAUDE_CODE_USE_BEDROCK"))) { Method = "Amazon Bedrock"; }
+    else if(Truthy(Var(L"CLAUDE_CODE_USE_VERTEX"))) { Method = "Google Vertex AI"; }
+    else if(Truthy(Var(L"CLAUDE_CODE_USE_FOUNDRY"))) { Method = "Microsoft Foundry"; }
+    else if(!Var(L"ANTHROPIC_AUTH_TOKEN").empty()) { Method = "Auth token (ANTHROPIC_AUTH_TOKEN)"; }
+    else if(HasKey && (KeyApproved || Email.empty())) { Method = "API key (ANTHROPIC_API_KEY)"; }
+    else if(!Find(Settings, "apiKeyHelper", 0).empty()) { Method = "API key (apiKeyHelper)"; }
+    else if(!Var(L"CLAUDE_CODE_OAUTH_TOKEN").empty()) { Method = "OAuth token (CLAUDE_CODE_OAUTH_TOKEN)"; }
+    else if(!Email.empty())
+    {
+        if(!Subscription.empty()) { Subscription[0] = (char)toupper((u8)Subscription[0]); }
+        Method = Subscription.empty() ? "Claude Console account" : "Claude " + Subscription + " account";
+    }
+    else { Method = "Not logged in"; }
+    bool32 ClaudeAi = Method.compare(0, 7, "Claude ") == 0;
+    if(!Env.empty()) { SecureZeroMemory(&Env[0], Env.size() * sizeof(wchar_t)); }
+
+    // --- the model: the transcript's last reply's (projects\<cwd, every other character a dash>\<id>.jsonl), else
+    //     what it was started with: --model, ANTHROPIC_MODEL, settings.json ---
+    std::string Model;
+    if(!SessionId.empty() && !Cwd.empty())
+    {
+        std::wstring Mangled = Utf8ToWide(Cwd);
+        for(wchar_t& C : Mangled) { if(!((C >= L'a' && C <= L'z') || (C >= L'A' && C <= L'Z') || (C >= L'0' && C <= L'9'))) { C = L'-'; } }
+        std::string Tail = ReadTail(ConfigDir + L"\\projects\\" + Mangled + L"\\" + Utf8ToWide(SessionId) + L".jsonl", 256 * 1024);
+        for(size_t At = Tail.rfind("\"model\":\""); At != std::string::npos && Model.empty(); At = At ? Tail.rfind("\"model\":\"", At - 1) : std::string::npos)
+        {
+            std::string M;
+            if(JsonDecodeString(Tail, At + 9, M) && !M.empty() && M[0] != '<') { Model = M; } // not "<synthetic>" (errors)
+        }
+    }
+    if(Model.empty())
+    {
+        std::string Line = WideToUtf8(ProcessCommandLine(Pid));
+        size_t At = Line.find("--model");
+        if(At != std::string::npos)
+        {
+            size_t I = At + 7;
+            while(I < Line.size() && (Line[I] == ' ' || Line[I] == '=' || Line[I] == '"')) { ++I; }
+            while(I < Line.size() && Line[I] != ' ' && Line[I] != '"') { Model += Line[I++]; }
+        }
+    }
+    if(Model.empty()) { Model = Var(L"ANTHROPIC_MODEL"); }
+    if(Model.empty()) { Model = Find(Settings, "model", 0); }
+    // "claude-opus-5-5" -> "Opus 5.5", "claude-sonnet-4-5-20250929" -> "Sonnet 4.5"; anything else as it is
+    if(Model.compare(0, 7, "claude-") == 0)
+    {
+        std::vector<std::string> Parts;
+        for(size_t At = 7; At <= Model.size();)
+        {
+            size_t End = Model.find('-', At);
+            if(End == std::string::npos) { End = Model.size(); }
+            Parts.push_back(Model.substr(At, End - At));
+            At = End + 1;
+        }
+        if(Parts.size() > 1 && Parts.back().size() == 8) { Parts.pop_back(); } // the date
+        bool32 Ok = !Parts.empty() && !Parts[0].empty() && isalpha((u8)Parts[0][0]);
+        std::string Pretty = Ok ? Parts[0] : std::string();
+        if(Ok) { Pretty[0] = (char)toupper((u8)Pretty[0]); }
+        for(size_t I = 1; I < Parts.size() && Ok; ++I)
+        {
+            Ok = !Parts[I].empty() && Parts[I].size() <= 2 && strspn(Parts[I].c_str(), "0123456789") == Parts[I].size();
+            Pretty += (I == 1 ? " " : ".") + Parts[I];
+        }
+        if(Ok) { Model = Pretty; }
+    }
+    if(Model.empty()) { Model = "Default"; }
+    return Method + "\n" + (ClaudeAi ? Org : std::string()) + "\n" + (ClaudeAi ? Email : std::string()) + "\n" + Model;
+}
+
 // The CLI agents the scan looks for (settings.txt `agents`, names separated by spaces or commas):
 // a process under a tab's cmd whose exe has the name, or a script host (node, bun, deno, python)
 // running a script whose path has a folder or file of that name (npm installs: gemini, codex, ...).
@@ -239,6 +419,7 @@ struct claude_find
     std::string Cwd;
     std::string ShellCwd;
     std::string Agent;   // another CLI agent running under it (settings `agents`), when there's no claude
+    std::string Account; // the claude's login, organization, email and model (ClaudeAccount)
     bool32 HasChild; // the cmd runs a program
     u64 CpuUsed;     // CPU time the cmd and everything under it used since the last scan (100 ns units)
 };
@@ -406,6 +587,7 @@ static DWORD WINAPI ClaudeScanThread(void* Param)
         {
             HANDLE Claude = OpenProcess(PROCESS_SET_INFORMATION, FALSE, F.Pid);
             if(Claude) { RaiseForTyping(Claude); CloseHandle(Claude); }
+            F.Account = ClaudeAccount(F.Pid, F.Id, F.Cwd);
         }
         S->Finds.push_back(F);
     }
@@ -897,7 +1079,7 @@ static std::string EncodeTabs(const server_state& Server)
         M.Request = T->Request;
         std::string Agent = !T->SessionId.empty() ? std::string("claude") : T->Agent;
         M.Flags = (Agent.empty() ? 0 : TAB_AGENT) | (T->TitleBusy ? TAB_BUSY : 0) | (T->NeedsInput ? TAB_NEEDS_INPUT : 0) |
-                  (T->Exited ? TAB_EXITED : 0) | (T->Running ? TAB_RUNNING : 0);
+                  (T->Exited ? TAB_EXITED : 0) | (T->Running ? TAB_RUNNING : 0) | (!T->AccountWas.empty() ? TAB_ACCOUNT_HELD : 0);
         M.Cpu = (float)(s32)(T->Cpu + 0.5f); // whole percents: a change of a tenth doesn't resend the list
         M.KeyLen = (u32)Key.size();
         M.NameLen = (u32)Name.size();
@@ -905,6 +1087,8 @@ static std::string EncodeTabs(const server_state& Server)
         M.NoticeLen = (u32)T->Notice.size();
         M.AgentLen = (u32)Agent.size();
         M.OwnerLen = (u32)T->Owner.size();
+        M.AccountLen = (u32)T->Account.size();
+        M.AccountWasLen = (u32)T->AccountWas.size();
         Out.append((const char*)&M, sizeof(M));
         Out += Key;
         Out += Name;
@@ -912,6 +1096,8 @@ static std::string EncodeTabs(const server_state& Server)
         Out += T->Notice;
         Out += Agent;
         Out += T->Owner;
+        Out += T->Account;
+        Out += T->AccountWas;
     }
     return Out;
 }
@@ -1435,7 +1621,8 @@ static int ServerMain()
                     u32 Id = 0;
                     memcpy(&Id, Payload.data(), 4);
                     tab* T = FindTab(Server, Id);
-                    if(T && T->Pty)
+                    if(T && T->Pty && !T->AccountWas.empty()) { Logf("server", "tab %u: input dropped: account changed", T->Id); }
+                    else if(T && T->Pty)
                     {
                         PtyWrite(T->Pty, Payload.substr(4));
                         LatencyMark("server_write");
@@ -1607,6 +1794,17 @@ static int ServerMain()
                         std::string Reply((const char*)&Id, 4);
                         Reply += T->Term.Links[Link];
                         if(!IpcSendString(C.Conn, MSG_LINK, Reply)) { IpcClose(C.Conn); C.Attached = false; }
+                    }
+                }
+                else if(Type == MSG_ACCOUNT_OK && Payload.size() >= 4)
+                {
+                    u32 Id = 0;
+                    memcpy(&Id, Payload.data(), 4);
+                    tab* T = FindTab(Server, Id);
+                    if(T && !T->AccountWas.empty())
+                    {
+                        Logf("server", "tab %u: going on with the new account", T->Id);
+                        T->AccountWas.clear();
                     }
                 }
                 else if(Type == MSG_HISTORY_GET && Payload.size() >= 4 && !HistoryRead)
@@ -1885,8 +2083,39 @@ static int ServerMain()
                         T->Title.clear();
                     }
                     if(!Find->Cwd.empty() && Find->Cwd != T->Cwd) { T->Cwd = Find->Cwd; T->Project = ProjectName(Find->Cwd); }
+                    bool32 SameClaude = T->ClaudePid == Find->Pid;
                     T->ClaudePid = Find->Pid;
                     T->LaunchedAtMs = 0;
+                    // --- its account: a login, organization or email that changes under a running claude holds it, so it
+                    //     can't go on billing the new one unasked: its turn stopped (Esc), input dropped until the window says
+                    //     go on (MSG_ACCOUNT_OK) or the account changes back. Model changes are just shown ---
+                    std::string Who = Find->Account.substr(0, Find->Account.rfind('\n'));
+                    std::string WhoWas = T->Account.substr(0, T->Account.rfind('\n'));
+                    std::string WhoHeld = T->AccountWas.substr(0, T->AccountWas.rfind('\n'));
+                    if(!Find->Account.empty() && SameClaude && !T->Account.empty() && Who != WhoWas)
+                    {
+                        if(T->AccountWas.empty())
+                        {
+                            Logf("server", "tab %u: claude account changed (%s -> %s): held", T->Id, T->Account.substr(0, T->Account.find('\n')).c_str(),
+                                 Find->Account.substr(0, Find->Account.find('\n')).c_str());
+                            T->AccountWas = T->Account;
+                            if(T->Pty && (T->TitleBusy || T->NeedsInput)) { PtyWrite(T->Pty, T->Term.Win32Input ? "\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_" : "\x1b"); }
+                            if(!T->Viewer) { T->Notice = "account changed"; }
+                            if(ReadSetting("notifications") != "off") { TrayNotify(Tray, TabName(*T), "Claude's account changed: stopped until you say go on", (s32)T->Id); }
+                            T->NotifiedAtMs = NowMs;
+                        }
+                        else if(Who == WhoHeld)
+                        {
+                            Logf("server", "tab %u: claude account changed back: no longer held", T->Id);
+                            T->AccountWas.clear();
+                        }
+                    }
+                    if(!Find->Account.empty() && Find->Account != T->Account)
+                    {
+                        Logf("server", "tab %u: claude account %s, %s", T->Id, Find->Account.substr(0, Find->Account.find('\n')).c_str(),
+                             Find->Account.substr(Find->Account.rfind('\n') + 1).c_str());
+                        T->Account = Find->Account;
+                    }
                 }
                 else if(T->ClaudePid || (T->LaunchedAtMs && NowMs - T->LaunchedAtMs > 30000))
                 {
@@ -1897,6 +2126,8 @@ static int ServerMain()
                     T->SessionId.clear();
                     T->Title.clear();
                     T->TitleBusy = false;
+                    T->Account.clear();
+                    T->AccountWas.clear();
                 }
             }
             delete Scan;

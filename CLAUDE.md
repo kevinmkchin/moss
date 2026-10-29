@@ -223,6 +223,23 @@ the disk.
   claude's text, at most 2000 messages of 64 KB) and send it (`MSG_HISTORY`). The history view covers the terminal:
   messages wrapped to the pane (`App.hist_lines`, rebuilt when the history, width or text change), matches in the
   match color, the current one framed and scrolled to the middle.
+## A claude tab's account line
+
+- Under a claude tab's terminal, a row says who's billed and whose email it reports with, as its /status would: login
+  method, organization, email, model (`msg_tab` account string, `TermTab.account`; its terminal is a row or so
+  shorter). The scan thread reads it for each claude it finds (`ClaudeAccount`): the claude's own environment
+  (`ProcessEnvironment`: Bedrock / Vertex / Foundry, an auth token, an approved `ANTHROPIC_API_KEY`, and
+  `CLAUDE_CONFIG_DIR`, which picks the account), `.claude.json`'s `oauthAccount`, `.credentials.json`'s
+  `subscriptionType` (nothing else is taken from it; secrets read on the way are wiped), and the model of the
+  transcript's last reply (else `--model`, `ANTHROPIC_MODEL`, settings.json, "Default"). Organization and email only
+  for a claude.ai login. A claude under another `CLAUDE_CONFIG_DIR` than the server's isn't found as claude at all
+  (its sessions\<pid>.json is elsewhere), so it gets no line. Test: `tests/sessions` (a made-up Max login).
+- A login, organization or email that changes under a running claude (a /login elsewhere, files rewritten) holds it so
+  it can't go on billing the new account unasked (`tab::AccountWas`, `TAB_ACCOUNT_HELD`): the server stops its turn
+  (Esc, when busy or asking), drops every `MSG_INPUT` to it, gives the tab a notice and a tray notification. The pane
+  shows a card (was / now) whose "Go on with the new account" sends `MSG_ACCOUNT_OK`; the account changing back ends
+  it too. A model change is only shown. A config file caught mid-write (not whole JSON) is unknown, never a change.
+
 ## The sessions sidebar
 
 - The sidebar on the window's left lists Claude Code's sessions; it starts open (layout.txt keeps `SidebarClosed`).

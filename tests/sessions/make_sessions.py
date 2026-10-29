@@ -18,5 +18,11 @@ for sid, project, prompt, age in sessions:
     path = os.path.join(folder, sid + '.jsonl')
     with open(path, 'w') as f:
         f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'message': {'role': 'user', 'content': prompt}}, separators=(',', ':')) + '\n')   # compact, as Claude Code writes it
+        f.write(json.dumps({'type': 'assistant', 'cwd': cwd, 'sessionId': sid, 'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': []}}, separators=(',', ':')) + '\n')
     os.utime(path, (now - age, now - age))
+# the account a claude tab's account line shows: a Max login (.claude.json is pretty-printed, as Claude Code writes it)
+with open(os.path.join(cfg, '.claude.json'), 'w') as f:
+    json.dump({'oauthAccount': {'emailAddress': 'tester@example.com', 'organizationName': 'Example Org'}}, f, indent=2)
+with open(os.path.join(cfg, '.credentials.json'), 'w') as f:
+    json.dump({'claudeAiOauth': {'accessToken': 'not-a-token', 'subscriptionType': 'max'}}, f)
 print('sessions-made')
