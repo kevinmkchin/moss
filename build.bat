@@ -44,6 +44,8 @@ rem --- running tabs hold OpenConsole.exe ---
 xcopy /y /q /d "%ROOT%vendor\conpty\conpty.dll" . >nul
 xcopy /y /q /d "%ROOT%vendor\conpty\OpenConsole.exe" . >nul
 copy /y "%ROOT%vendor\conpty\LICENSE" conpty-LICENSE.txt >nul
+rem --- web pages in tabs: WebView2's loader (vendor\webview2, BSD), which finds the Edge runtime Windows has ---
+xcopy /y /q /d "%ROOT%vendor\webview2\WebView2Loader.dll" . >nul
 
 rem --- the two unity builds: C (UI, renderer, app, platform) and C++ (server, client, cells, fonts) ---
 cl %COMMON% /std:c11 /c "%ROOT%code\term_c.c" /Fo:term_c.obj /Fd:moss.pdb

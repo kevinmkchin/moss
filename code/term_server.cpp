@@ -1812,6 +1812,13 @@ static int ServerMain()
                         if(!IpcSendString(C.Conn, MSG_LINK, Reply)) { IpcClose(C.Conn); C.Attached = false; }
                     }
                 }
+                else if(Type == MSG_NOTIFY)
+                {
+                    // a web tab's notification (the window has no tray icon of its own)
+                    size_t Zero = Payload.find('\0');
+                    std::string Title = Payload.substr(0, Zero), Body = Zero == std::string::npos ? std::string() : Payload.substr(Zero + 1);
+                    if(ReadSetting("notifications") != "off") { TrayNotify(Tray, Title, Body, -1); }
+                }
                 else if(Type == MSG_ACCOUNT_OK && Payload.size() >= 4)
                 {
                     u32 Id = 0;

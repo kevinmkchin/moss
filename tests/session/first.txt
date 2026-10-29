@@ -1,4 +1,4 @@
-# Session, first run: two panes, a second tab, then the window goes (the named server keeps the tabs).
+# Session, first run: two panes, a second tab, a web tab, then the window goes (the named server keeps the tabs).
 waitfor λ
 type title left
 key Enter
@@ -11,6 +11,9 @@ waitfor λ pane=1
 type title third
 key Enter
 waitlabel tab third
+key Ctrl+Shift+B
+type example.com
+key Enter
 sleep 1000
 waitidle
 dump layout

@@ -22,7 +22,8 @@ struct Gpu
     HANDLE Latency;
     IDCompositionDevice* Comp;
     IDCompositionTarget* CompTarget;
-    IDCompositionVisual* CompVisual;
+    IDCompositionVisual* CompVisual;   // the swap chain's, on top
+    IDCompositionVisual* Root;         // under it: web pages (term_web.cpp)
     ID3D11Texture2D* Offscreen;   // headless: the frame is drawn here
     ID3D11RenderTargetView* Target;
     s32 W, H;
@@ -205,7 +206,9 @@ extern "C" Gpu* Gpu_Create(void* Hwnd, s32 W, s32 H)
         if(SUCCEEDED(Hr)) { Hr = G->Comp->CreateTargetForHwnd(Window, TRUE, &G->CompTarget); }
         if(SUCCEEDED(Hr)) { Hr = G->Comp->CreateVisual(&G->CompVisual); }
         if(SUCCEEDED(Hr)) { Hr = G->CompVisual->SetContent(G->SwapChain); }
-        if(SUCCEEDED(Hr)) { Hr = G->CompTarget->SetRoot(G->CompVisual); }
+        if(SUCCEEDED(Hr)) { Hr = G->Comp->CreateVisual(&G->Root); }
+        if(SUCCEEDED(Hr)) { Hr = G->Root->AddVisual(G->CompVisual, FALSE, 0); }
+        if(SUCCEEDED(Hr)) { Hr = G->CompTarget->SetRoot(G->Root); }
         if(SUCCEEDED(Hr)) { Hr = G->Comp->Commit(); }
         ReleaseCom(Factory);
         ReleaseCom(Adapter);
@@ -277,6 +280,7 @@ extern "C" void Gpu_Destroy(Gpu* G)
     ReleaseCom(G->Target);
     ReleaseCom(G->Offscreen);
     ReleaseCom(G->CompVisual);
+    ReleaseCom(G->Root);
     ReleaseCom(G->CompTarget);
     ReleaseCom(G->Comp);
     ReleaseCom(G->SwapChain);

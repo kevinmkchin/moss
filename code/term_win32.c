@@ -29,6 +29,7 @@
 
 enum { Platform_MaxEvents = 256, Platform_TextBytes = 4096, Platform_CursorCount = 5 };
 enum { Wake_Files = WM_APP + 1 };   // the lister or the watcher has something
+enum { Test_Command = WM_APP + 3 }; // a test window runs the next of MOSS_TEST_COMMAND's commands (names, ; between)
 
 typedef struct Platform {
     HWND hwnd;
@@ -123,6 +124,7 @@ typedef struct Platform {
     String background_path;
     u8 background_buf[1024];
     b32 test_window;              // MOSS_TEST_WINDOW: off screen, driven by posted messages
+    s32 test_commands_run;        // MOSS_TEST_COMMAND's commands run so far (one per Test_Command)
     b32 closing;                  // the server quit for good: the window is closing
     String window_name;           // `--window NAME`: one of the other windows (empty = the main one)
     WCHAR instance[64];           // the server instance (MOSS_INSTANCE, empty = the user's): windows only trade tabs within one
@@ -144,6 +146,10 @@ typedef struct Platform {
     Arena drop_arena;
     String *dropped;              // dropped files, for the next frame
     s64 dropped_count;
+
+    Web *web;                     // web pages in tabs (WebView2), 0 without it or in headless runs
+    AppWebState web_states[App_MaxWebs];
+    AppWebPopup web_popups[8];
 
     Arena arena;
     Arena scratch;
@@ -827,6 +833,10 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     fi->editor = p->editor;
     fi->settings = p->reset_ready ? &p->reset_settings : NULL;
     p->reset_ready = 0;
+    fi->web_count = Web_Fill(p->web, &p->scratch, p->web_states, App_MaxWebs);
+    fi->webs = p->web_states;
+    fi->web_popup_count = Web_Popups(p->web, &p->scratch, p->web_popups, (s32)ArrayCount(p->web_popups));
+    fi->web_popups = p->web_popups;
     // --- the debug overlay's numbers ---
     Debug_RecentWork(120, &fi->debug.work_ms_avg, &fi->debug.work_ms_max);
     fi->debug.frames_drawn = p->frames_drawn;
@@ -868,6 +878,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
 
     AppOutput out = {0};
     App_Frame(p->app, fi, &out);
+    Web_Update(p->web, out.webs, out.web_count, out.web_focus);
     u64 t2 = Time_NowMicros();
     phase[1] = t2 - t1;
 
@@ -1138,6 +1149,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         else if (Term_SetGoodProgrammer(out.good_programmer == 1)) Logf("window", "be a good programmer %s", state);
         else Logf("window", "be a good programmer %s: couldn't update the global CLAUDE.md", state);
     }
+    if (out.notify_title.count) Logf("window", "a web tab's notification, to the tray");
     if (out.reset_settings) {
         // --- settings.txt back to moss's own (headless runs never write it), read again for the app's next frame ---
         if (p->headless) Logf("headless", "reset settings (settings.txt not written)");
@@ -1286,7 +1298,7 @@ static void FillWindowInput(Platform *p, AppFrameInput *fi, b32 paint, u64 now, 
     fi->client_h = p->client_h;
     fi->dpi = p->dpi;
     fi->foreground = GetForegroundWindow() == hwnd;
-    fi->focused = p->focused;
+    fi->focused = p->focused || Web_HasFocus(p->web);   // a page's keyboard is still the window's
     fi->maximized = maximized;
     fi->now_us = now;
     fi->dt_us = dt;
@@ -1331,6 +1343,21 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     case Wake_Files:
         p->wake_frame = p->frame;
         return 0;
+    case Test_Command: {
+        WCHAR command[512] = {0};
+        if (!p->test_window || !GetEnvironmentVariableW(L"MOSS_TEST_COMMAND", command, 512)) return 0;
+        String name = Utf16ToUtf8(&p->scratch, (WString){ (u16 *)command, (s64)wcslen(command) });
+        for (s32 k = 0; k < p->test_commands_run && name.count; k++) {
+            s64 at = 0;
+            while (at < name.count && name.data[at] != ';') at++;
+            name = at < name.count ? (String){ name.data + at + 1, name.count - at - 1 } : (String){0};
+        }
+        for (s64 at = 0; at < name.count; at++) if (name.data[at] == ';') { name.count = at; break; }
+        p->test_commands_run++;
+        Logf("window", "test command %.*s: %s", STR_ARG(name), App_RunCommandByName(p->app, name) ? "ran" : "unknown");
+        p->wake_frame = p->frame;
+        return 0;
+    }
     case WM_DESTROY:
         RevokeDragDrop(hwnd);
         p->quit = 1;
@@ -1387,7 +1414,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         if (wparam) p->closing = 1;   // logging off: the windows come back with their tabs, none hands them on
         break;
     case WM_SETCURSOR:
-        if (LOWORD(lparam) == HTCLIENT) { SetCursor(p->cursors[p->cursor % Platform_CursorCount]); return TRUE; }
+        if (LOWORD(lparam) == HTCLIENT) { HCURSOR page = (HCURSOR)Web_Cursor(p->web); SetCursor(page ? page : p->cursors[p->cursor % Platform_CursorCount]); return TRUE; }
         break;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mmi = (MINMAXINFO *)lparam;
@@ -1524,6 +1551,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         break;
     }
     case WM_MOUSEMOVE:
+        Web_Mouse(p->web, msg, wparam, lparam);   // the page under the mouse sees it too; the app keeps its hover
         p->wake_frame = p->frame;
         p->posted_mouse[0] = GET_X_LPARAM(lparam);
         p->posted_mouse[1] = GET_Y_LPARAM(lparam);
@@ -1533,11 +1561,13 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         }
         return 0;
     case WM_MOUSELEAVE:
+        Web_Mouse(p->web, msg, wparam, lparam);
         p->wake_frame = p->frame;
         return 0;
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
     case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK:
     case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK: {
+        Web_Mouse(p->web, msg, wparam, lparam);
         p->wake_frame = p->frame;
         s32 b = (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) ? Mouse_Left : (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONDBLCLK) ? Mouse_Right : Mouse_Middle;
         p->input.button[b].down = 1;
@@ -1551,6 +1581,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     case WM_LBUTTONUP:
     case WM_RBUTTONUP:
     case WM_MBUTTONUP: {
+        Web_Mouse(p->web, msg, wparam, lparam);
         p->wake_frame = p->frame;
         s32 b = msg == WM_LBUTTONUP ? Mouse_Left : msg == WM_RBUTTONUP ? Mouse_Right : Mouse_Middle;
         p->input.button[b].released = 1;
@@ -1559,16 +1590,20 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         return 0;
     }
     case WM_MOUSEWHEEL:
+        if (Web_Mouse(p->web, msg, wparam, lparam)) return 0;
         p->wake_frame = p->frame;
         p->input.wheel[1] += GET_WHEEL_DELTA_WPARAM(wparam);
         return 0;
     case WM_XBUTTONDOWN:
+        if (Web_Mouse(p->web, msg, wparam, lparam)) return TRUE;
         p->wake_frame = p->frame;
         p->input.side = GET_XBUTTON_WPARAM(wparam) == XBUTTON1 ? -1 : 1;
         return TRUE;
     case WM_XBUTTONUP:
+        Web_Mouse(p->web, msg, wparam, lparam);
         return TRUE;
     case WM_MOUSEHWHEEL:
+        if (Web_Mouse(p->web, msg, wparam, lparam)) return 0;
         p->wake_frame = p->frame;
         p->input.wheel[0] -= GET_WHEEL_DELTA_WPARAM(wparam);
         return 0;
@@ -2095,6 +2130,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     int argc = 0;
     WCHAR **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     b32 headless = 0, test = 0;
+    const WCHAR *probe_url = NULL, *probe_png = NULL;
     const WCHAR *script = NULL, *session = NULL, *replay = NULL, *instance_name = NULL, *window_name = NULL, *at = NULL, *open_dir = NULL;
     WCHAR open_command[1024] = {0};   // `term -- command line`: a tab running it
     s32 size_w = 1280, size_h = 800, dpi_arg = 96;
@@ -2134,12 +2170,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         }
         else if (wcscmp(argv[i], L"--at") == 0 && i + 1 < argc) at = argv[++i];
         else if (wcscmp(argv[i], L"--vt-replay") == 0 && i + 1 < argc) replay = argv[++i];
+        else if (wcscmp(argv[i], L"--web-probe") == 0 && i + 2 < argc) { probe_url = argv[++i]; probe_png = argv[++i]; }
         else if (wcscmp(argv[i], L"--size") == 0 && i + 1 < argc) swscanf_s(argv[++i], L"%dx%d", &size_w, &size_h);
         else if (wcscmp(argv[i], L"--dpi") == 0 && i + 1 < argc) dpi_arg = _wtoi(argv[++i]);
     }
     if (replay) {
         Debug_Init("replay", 1);
         return Term_VtReplayMain(replay, size_w == 1280 ? 120 : size_w, size_h == 800 ? 40 : size_h);
+    }
+
+    if (probe_url) {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        Debug_Init("webprobe", 1);
+        OleInitialize(NULL);
+        return Web_ProbeMain(probe_url, probe_png);
     }
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -2254,8 +2298,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         WCHAR path[MAX_PATH] = {0};
         swprintf_s(path, MAX_PATH, L"%s\\moss", local);
         CreateDirectoryW(path, NULL);
-        if (window_name) swprintf_s(path, MAX_PATH, L"%s\\moss\\window-%s.txt", local, window_name);
-        else swprintf_s(path, MAX_PATH, L"%s\\moss\\layout.txt", local);
+        // a named instance (`--instance NAME`) keeps its own, never the user's
+        const WCHAR *dash = instance_name ? L"-" : L"", *inst = instance_name ? instance_name : L"";
+        if (window_name) swprintf_s(path, MAX_PATH, L"%s\\moss\\window-%s%s%s.txt", local, window_name, dash, inst);
+        else swprintf_s(path, MAX_PATH, L"%s\\moss\\layout%s%s.txt", local, dash, inst);
         WString w = { (u16 *)path, (s64)wcslen(path) };
         p->session_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, w));
     }
@@ -2317,7 +2363,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         if (!headless && !test) {
             WCHAR local[MAX_PATH] = {0}, path[MAX_PATH] = {0};
             GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
-            swprintf_s(path, MAX_PATH, L"%s\\moss\\paths.txt", local);
+            swprintf_s(path, MAX_PATH, L"%s\\moss\\paths%s%s.txt", local, instance_name ? L"-" : L"", instance_name ? instance_name : L"");
             p->paths_path = Utf8ToUtf16(&p->arena, Utf16ToUtf8(&p->arena, (WString){ (u16 *)path, (s64)wcslen(path) }));
             init.paths_text = Term_ReadFile(&p->arena, (const wchar_t *)p->paths_path.data);
         }
@@ -2405,6 +2451,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         if (FAILED(dr)) LogHr("window", "RegisterDragDrop", dr);
     }
     Files_Start(hwnd, Wake_Files);
+    if (hwnd) {
+        // web pages' data (logins, cookies): the user's in %LOCALAPPDATA%\moss\web, a test's or instance's its own
+        WCHAR folder[MAX_PATH] = {0};
+        if (p->instance[0]) {
+            WCHAR temp[MAX_PATH] = {0};
+            GetTempPathW(MAX_PATH, temp);
+            swprintf_s(folder, MAX_PATH, L"%smoss-web-%s", temp, p->instance);
+        } else {
+            WCHAR local[MAX_PATH] = {0};
+            GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+            swprintf_s(folder, MAX_PATH, L"%s\\moss\\web", local);
+        }
+        WCHAR place[64] = {0};
+        if (GetEnvironmentVariableW(L"MOSS_TEST_WINDOW", place, 64)) {
+            // a test window is off screen: pages there would count as covered and stop drawing
+            SetEnvironmentVariableW(L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"--disable-features=CalculateNativeWinOcclusion");
+        }
+        p->web = Web_Create(hwnd, p->gpu, Wake_Files, folder);
+    }
 
     // --- the server ---
     p->client = TermClient_Create(p->window_name);
@@ -2533,6 +2598,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     if (p->id_atom) GlobalDeleteAtom(p->id_atom);
     Logf(headless ? "headless" : "window", "exit (%d)", result);
     Files_Stop();
+    Web_Destroy(p->web);
     TermCells_Destroy(p->cells);
     TermClient_Destroy(p->client);
     App_Destroy(p->app);

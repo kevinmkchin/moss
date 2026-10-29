@@ -33,6 +33,7 @@ enum {
     Icon_Cloud = 0xE753, Icon_Back = 0xE72B, Icon_Forward = 0xE72A, Icon_Star = 0xE734, Icon_StarFilled = 0xE735,
     Icon_History = 0xE81C, Icon_Home = 0xE80F, Icon_Download = 0xE896, Icon_Document = 0xE8A5, Icon_Picture = 0xE8B9,
     Icon_Music = 0xEC4F, Icon_Video = 0xE714, Icon_Desktop = 0xE7F4, Icon_OpenFolder = 0xE838,
+    Icon_Refresh = 0xE72C, Icon_Globe = 0xE774,
 };
 
 // --- commands --------------------------------------------------------------------------------------------------
@@ -42,7 +43,7 @@ enum {
     Cmd_Fullscreen, Cmd_Copy, Cmd_Paste, Cmd_ScrollPageUp, Cmd_ScrollPageDown, Cmd_ScrollBottom, Cmd_NextTheme,
     Cmd_Palette, Cmd_Profile, Cmd_DebugOverlay, Cmd_CloseWindow, Cmd_ToggleBrowser, Cmd_PrevCommand, Cmd_NextCommand, Cmd_Sessions, Cmd_Settings, Cmd_TearOff,
     Cmd_Find, Cmd_Search, Cmd_RenameTab, Cmd_ZoomPane, Cmd_ClearScrollback, Cmd_CopyAll, Cmd_Broadcast, Cmd_Topmost, Cmd_Duplicate,
-    Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode,
+    Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode, Cmd_NewWebTab,
     Cmd_Count
 };
 
@@ -98,6 +99,7 @@ static const CommandDef g_Commands[Cmd_Count] = {
     [Cmd_GoTo]          = { "go_to", "Go to a folder", Key_A + 'G' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_Bookmark]      = { "bookmark", "Bookmark this folder (again: not)", 0, 0 },
     [Cmd_FocusMode]     = { "focus_mode", "Focus: this pane alone, nothing else (again: back)", Key_A + 'F' - 'A', Mod_Ctrl | Mod_Shift },
+    [Cmd_NewWebTab]     = { "new_web_tab", "New web tab", Key_A + 'B' - 'A', Mod_Ctrl | Mod_Shift },
 };
 
 // --- settings: the palette's settings mode (Ctrl+,), a row each; a change applies at once and goes to settings.txt ---
@@ -373,6 +375,9 @@ struct App {
     s32 sb_target;            // the scroll offset asked for so far (the grid catches up a frame later)
     u64 rename_tab;           // the PaneTab whose name is being edited in its strip (0 = none)
     TextEdit rename_edit;
+    u64 web_edit_tab;         // the PaneTab whose web address is being edited (0 = none)
+    TextEdit web_edit;
+    u32 web_popup_taken;      // the last page's new window (AppWebPopup.id) a web tab was made for
     u64 zoom_node;            // the pane shown over the whole area (0 = none)
     b32 focus_mode;           // focus: the focused pane alone over the whole window, no strips, sidebar or caption buttons;
                               // only its shell / browser keys work (zoom_node is its pane meanwhile)
@@ -517,6 +522,9 @@ static String TabLabel(const TermTab *t)
 
 static String PaneTabLabel(App *app, const PaneTab *t)
 {
+    if (!t->title_len && t->web) {
+        return t->web_title_len ? (String){ (u8 *)t->web_title, t->web_title_len } : t->web_url_len ? (String){ (u8 *)t->web_url, t->web_url_len } : S("New tab");
+    }
     return t->title_len ? (String){ (u8 *)t->title, t->title_len } : TabLabel(FindServerTab(app, t->term_id));
 }
 
@@ -1646,6 +1654,61 @@ static String FocusedCwd(App *app)
     return st ? st->cwd : (String){0};
 }
 
+static const AppWebState *FindWebState(const AppFrameInput *in, u64 id)
+{
+    for (s32 i = 0; i < in->web_count; i++) if (in->webs[i].id == id) return &in->webs[i];
+    return NULL;
+}
+
+// The address row's text, as where the page goes: an address (https:// added when it has no scheme), else a search.
+static void WebGo(PaneTab *t, String text)
+{
+    while (text.count && text.data[0] == ' ') { text.data++; text.count--; }
+    while (text.count && text.data[text.count - 1] == ' ') text.count--;
+    if (!text.count) return;
+    b32 scheme = 0, space = 0, dot = 0;
+    for (s64 i = 0; i < text.count; i++) {
+        if (text.data[i] == ' ') space = 1;
+        if (text.data[i] == '.') dot = 1;
+        if (text.data[i] == ':' && i + 2 < text.count && text.data[i + 1] == '/' && text.data[i + 2] == '/') scheme = 1;
+    }
+    s64 n = 0;
+    const char *prefix = scheme ? "" : !space && (dot || (text.count >= 9 && memcmp(text.data, "localhost", 9) == 0)) ? "https://" : "https://www.google.com/search?q=";
+    for (const char *s = prefix; *s && n < (s64)sizeof(t->web_go); s++) t->web_go[n++] = (u8)*s;
+    for (s64 i = 0; i < text.count && n + 3 <= (s64)sizeof(t->web_go); i++) {
+        u8 ch = text.data[i];
+        if (!scheme && space && (ch == ' ' || ch == '&' || ch == '#' || ch == '+' || ch == '?')) {
+            n += snprintf((char *)t->web_go + n, 4, "%%%02X", ch);   // a search's words
+        } else {
+            t->web_go[n++] = ch;
+        }
+    }
+    t->web_go_len = (s32)n;
+    memcpy(t->web_url, t->web_go, (size_t)n);   // until the page says where it is
+    t->web_url_len = (s32)n;
+}
+
+static void StartWebEdit(App *app, const AppFrameInput *in, PaneTab *t)
+{
+    const AppWebState *ws = FindWebState(in, t->id);
+    String url = ws && ws->url.count ? ws->url : (String){ t->web_url, t->web_url_len };
+    TextEdit_Set(&app->web_edit, Str_Equal(url, S("about:blank")) ? (String){0} : url);
+    app->web_edit_tab = t->id;
+}
+
+// A web tab in `leaf` (after `after`, else at the end), shown and focused; its page goes to `url` (empty: none yet).
+static PaneTab *NewWebTab(App *app, PaneNode *leaf, PaneTab *after, String url, u32 popup)
+{
+    PaneTab *t = Panes_NewTab(&app->panes, leaf, after && after->node == leaf ? after->next : NULL);
+    t->web = 1;
+    t->web_popup = popup;
+    t->created_frame = app->ui.frame;
+    t->web_url_len = (s32)CopyInto(t->web_url, sizeof(t->web_url), url).count;
+    if (url.count && !popup) WebGo(t, url);
+    Panes_Select(&app->panes, t);
+    return t;
+}
+
 static PaneTab *FindPaneTab(Panes *panes, u64 id)
 {
     for (PaneNode *n = panes->root; n && id; n = Panes_NextNode(n)) {
@@ -1726,7 +1789,10 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         break;
     case Cmd_Broadcast: app->broadcast = !app->broadcast; break;
     case Cmd_Topmost: f->out->window_command = AppWindow_ToggleTopmost; break;
-    case Cmd_Duplicate: if (t) RequestTab(app, f, t->node, TermNew_Shell, FocusedCwd(app)); break;
+    case Cmd_Duplicate:
+        if (t && t->web) NewWebTab(app, t->node, t, (String){ t->web_url, t->web_url_len }, 0);
+        else if (t) RequestTab(app, f, t->node, TermNew_Shell, FocusedCwd(app));
+        break;
     case Cmd_CopyAll: if (t && t->term_id) TermScrollBy(f, t->term_id, TermScroll_CopyAll); break;
     case Cmd_ClearScrollback: if (t && t->term_id) TermScrollBy(f, t->term_id, TermScroll_Clear); break;
     case Cmd_ScrollBottom: if (t && t->term_id) TermScrollBy(f, t->term_id, TermScroll_ToBottom); break;
@@ -1831,8 +1897,14 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         break;
     case Cmd_ToggleBrowser:
         if (t && t->browsing) CloseBrowser(app, f, t);
-        else if (t) OpenBrowser(app, t);
+        else if (t && !t->web) OpenBrowser(app, t);
         break;
+    case Cmd_NewWebTab: {
+        // a blank page, the address being typed
+        PaneTab *w = NewWebTab(app, t ? t->node : app->panes.root, t, (String){0}, 0);
+        StartWebEdit(app, f->in, w);
+        break;
+    }
     }
 }
 
@@ -1994,7 +2066,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     app->tabs_seen = in->tabs_received;
     for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
         for (PaneTab *t = n->first_tab; t; t = t->next) {
-            if (t->term_id) continue;
+            if (t->term_id || t->web) continue;
             for (s64 i = 0; i < in->tab_count && !t->term_id; i++) {
                 const TermTab *st = &in->tabs[i];
                 b32 taken = Panes_FindTerm(panes, st->id) != NULL || !Str_Equal(st->owner, app->window_name);
@@ -2016,7 +2088,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         for (PaneTab *t = n->first_tab; t;) {
             PaneTab *next = t->next;
             const TermTab *st = FindServerTab(app, t->term_id);
-            b32 gone = in->connected && app->tabs_seen && ((t->term_id && !st) || (!t->term_id && !t->request) || (st && !Str_Equal(st->owner, app->window_name)));
+            b32 gone = !t->web && in->connected && app->tabs_seen && ((t->term_id && !st) || (!t->term_id && !t->request) || (st && !Str_Equal(st->owner, app->window_name)));
             if (gone) {
                 Logf("app", "pane tab %llu gone (server tab %u)", (unsigned long long)t->id, t->term_id);
                 if (app->sel.term_id == t->term_id) app->sel.term_id = 0;
@@ -2313,6 +2385,20 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         app->rename_tab = 0;
     }
 
+    // --- a web page's address being edited: Enter goes there, Esc drops it, a click elsewhere too ---
+    PaneTab *web_editing = FindPaneTab(panes, app->web_edit_tab);
+    if (!web_editing || !web_editing->web) app->web_edit_tab = 0;
+    if (app->web_edit_tab) {
+        for (s64 i = 0; i < event_count; i++) {
+            if (consumed[i]) continue;
+            consumed[i] = 1;
+            if (!events[i].down) continue;
+            if (events[i].key == Key_Enter || events[i].key == Key_KeypadEnter) { WebGo(web_editing, TextEdit_String(&app->web_edit)); app->web_edit_tab = 0; }
+            if (events[i].key == Key_Escape) app->web_edit_tab = 0;
+        }
+        if (in->input.button[Mouse_Left].pressed && ui->hot != Ui_Id("WebAddress")) app->web_edit_tab = 0;
+    }
+
     // --- the find bar: a click in the pane gives the keyboard back to the terminal, one on the bar takes it; while it
     //     has it, it takes every key the commands left ---
     PaneTab *find_tab = app->find_open ? Panes_FindTerm(panes, app->find_term) : NULL;
@@ -2410,7 +2496,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     // --- keys for the focused pane ---
     PaneTab *focus = panes->selected;
     const TermGrid *focus_grid = focus ? FindGrid(in, focus->term_id) : NULL;
-    if (focus && focus->viewing && focus->viewer) {
+    if (focus && focus->web) {
+        // --- a web page: the page has the keyboard (the platform's); what reaches the window here is Ctrl+L / F6 (the
+        //     address), F5 (reload), Alt+Left / Right stay pane focus. Nothing goes to the shell under it ---
+        for (s64 i = 0; i < event_count; i++) {
+            const UiKeyEvent *e = &events[i];
+            if (consumed[i] || !e->down) continue;
+            consumed[i] = ui->consumed[i] = 1;
+            if ((e->key == Key_A + 'L' - 'A' && (e->modifiers & Mod_Ctrl)) || e->key == Key_F1 + 5) StartWebEdit(app, in, focus);
+            if (e->key == Key_F1 + 4) focus->web_reload = 1;
+        }
+    } else if (focus && focus->viewing && focus->viewer) {
         // --- the picture view: arrows, Space / Backspace, PgUp / PgDn, Home / End step through the folder's pictures
         //     (round); Esc, Enter or q go back; every other key stays here ---
         Viewer *v = focus->viewer;
@@ -3076,6 +3172,48 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         { tt->ansi[0], tt->ansi[1], tt->ansi[2], tt->ansi[3], tt->ansi[4], tt->ansi[5], tt->ansi[6], tt->ansi[7],
           tt->ansi[8], tt->ansi[9], tt->ansi[10], tt->ansi[11], tt->ansi[12], tt->ansi[13], tt->ansi[14], tt->ansi[15] },
     };
+    // --- web tabs: new windows pages asked for become tabs beside their opener ---
+    for (s32 i = 0; i < in->web_popup_count; i++) {
+        const AppWebPopup *pop = &in->web_popups[i];
+        if (pop->id <= app->web_popup_taken) continue;
+        PaneTab *opener = FindPaneTab(panes, pop->opener);
+        if (!opener) continue;
+        app->web_popup_taken = pop->id;
+        NewWebTab(app, opener->node, opener, pop->url, pop->id);
+    }
+    // --- every web tab is listed (the platform closes pages no longer listed; the shown ones get their rect below).
+    //     Their address and title follow the page; one that closed itself goes; a notification while it isn't in front
+    //     goes to the tray and puts a dot on its tab until it's shown ---
+    b32 web_shown = 0;
+    PaneTab *web_closed = NULL;
+    for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
+        for (PaneTab *o = n->first_tab; o; o = o->next) {
+            if (!o->web || out->web_count >= App_MaxWebs) continue;
+            AppWeb *aw = &out->webs[out->web_count++];
+            aw->id = o->id;
+            aw->popup = o->web_popup;
+            b32 in_front = o == panes->selected && !o->hidden && in->foreground;
+            if (in_front) o->web_needs = 0;
+            const AppWebState *ws = FindWebState(in, o->id);
+            if (!ws) continue;
+            o->web_title_len = (s32)CopyInto(o->web_title, sizeof(o->web_title), ws->title).count;
+            if (ws->url.count) o->web_url_len = (s32)CopyInto(o->web_url, sizeof(o->web_url), ws->url).count;
+            if (ws->close_requested) web_closed = o;
+            if (ws->notices != o->web_notices_seen) {
+                if (ws->notices > o->web_notices_seen && !in_front) {
+                    o->web_needs = 1;
+                    out->notify_title = ws->notice_title.count ? ws->notice_title : PaneTabLabel(app, o);
+                    out->notify_body = ws->notice_body;
+                }
+                o->web_notices_seen = ws->notices;
+            }
+        }
+    }
+    if (web_closed) {
+        // gone from the list this frame too: its page closes
+        for (s32 i = 0; i < out->web_count; i++) if (out->webs[i].id == web_closed->id) out->webs[i] = out->webs[--out->web_count];
+        CloseTab(app, &f, web_closed, 1);
+    }
     for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
         if (n->first_child) continue;
         s32 cols = Max(2, ((s32)(n->px[2] - n->px[0]) - 2 * term_margin) / cell_w);
@@ -3194,7 +3332,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 // --- icon: an agent's robot or the shell's prompt; busy spins, needs-input shows a dot ---
                 b32 agent = st && (st->flags & TermTab_Agent);
                 b32 busy = st && (st->flags & TermTab_Busy);
-                b32 needs = st && (st->flags & TermTab_NeedsInput);
+                b32 needs = (st && (st->flags & TermTab_NeedsInput)) || (o->web && o->web_needs);
                 u32 text_color = tab_focused || hovered ? c->text : c->dim;
                 Rect inner = tr;
                 CutLeft(&inner, R(0.7));
@@ -3205,7 +3343,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Draw_Icon(dl, font, icon, text_color, spinner[(now / 120000) % 4]);
                     blink_wanted = 1;
                 } else {
-                    Draw_Icon(dl, icons_small, icon, text_color, o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
+                    Draw_Icon(dl, icons_small, icon, text_color, o->web ? Icon_Globe : o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
                 }
                 if (needs) Draw_Rect(dl, R4(icon.x1 - R(0.3), icon.y0 + RectH(icon) / 2 - R(0.8), icon.x1 + R(0.3), icon.y0 + RectH(icon) / 2 - R(0.2)), c->accent, (f32)R(0.3));
                 CutLeft(&inner, R(0.4));
@@ -3283,11 +3421,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             w->tab_id = o->term_id;
             w->cols = cols;
             w->rows = ost && ost->account.count ? account_rows : rows;
-            w->shown = !o->hidden && !o->browsing && !o->viewing;
+            w->shown = !o->hidden && !o->browsing && !o->viewing && !o->web;
         }
 
         Rect content = R4(px0, py0 + caption_h, px0 + pw, py0 + ph);
-        const TermTab *account_tab = t && !t->browsing && !t->viewing ? FindServerTab(app, t->term_id) : NULL;
+        const TermTab *account_tab = t && !t->browsing && !t->viewing && !t->web ? FindServerTab(app, t->term_id) : NULL;
         if (account_tab && account_tab->account.count) {
             // --- a claude's account line: who's billed and whose email it reports with (the server reads its login,
             //     organization, email and model as its /status would), the terminal above it ---
@@ -3312,7 +3450,57 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             Named(app, Str_PushFormat(fa, "account %.*s", STR_ARG(parts[2].count ? parts[2] : parts[0])), bar);
         }
-        if (t && t->viewing && t->viewer) {
+        if (t && t->web) {
+            // --- a web page: the address row (back, forward, reload, the address: a click edits it), then the page,
+            //     which the platform draws under this frame: nothing is drawn there, the frame is see-through ---
+            const AppWebState *ws = FindWebState(in, t->id);
+            Rect body = content;
+            Rect bar = CutTop(&body, browse_header_h);
+            Draw_Rect(dl, bar, c->bg, 0);
+            CutLeft(&bar, R(0.5));
+            CutRight(&bar, R(0.6));
+            Rect back = RectCenter(CutLeft(&bar, R(2.0)), R(2.0), R(2.0));
+            Rect fwd = RectCenter(CutLeft(&bar, R(2.0)), R(2.0), R(2.0));
+            Rect reload = RectCenter(CutLeft(&bar, R(2.0)), R(2.0), R(2.0));
+            CutLeft(&bar, R(0.4));
+            b32 can_back = ws && ws->can_back, can_forward = ws && ws->can_forward;
+            UiSignal bs = IconButton(app, Ui_IdN(Ui_Id("WebBack"), n->id), back, Icon_Back, icons_small, can_back ? c->dim : c->faint, c->hover, radius_small, Str_PushFormat(fa, "web back %d", pane_index));
+            UiSignal fs = IconButton(app, Ui_IdN(Ui_Id("WebForward"), n->id), fwd, Icon_Forward, icons_small, can_forward ? c->dim : c->faint, c->hover, radius_small, Str_PushFormat(fa, "web forward %d", pane_index));
+            UiSignal rs = IconButton(app, Ui_IdN(Ui_Id("WebReload"), n->id), reload, ws && ws->loading ? Icon_Cancel : Icon_Refresh, icons_small, c->dim, c->hover, radius_small, Str_PushFormat(fa, "web reload %d", pane_index));
+            if (bs.clicked && can_back) t->web_step = -1;
+            if (fs.clicked && can_forward) t->web_step = 1;
+            if (rs.clicked) t->web_reload = 1;
+            Rect ar = RectCenter(bar, RectW(bar), R(2.0));
+            b32 editing = app->web_edit_tab == t->id;
+            Draw_RectEx(dl, ar, ColorMix(c->bg, c->text, 0.06f), editing ? c->accent : c->line, 1, radius_small, NULL, 0, 0, 0);
+            if (editing) {
+                Ui_TextEdit(ui, Ui_Id("WebAddress"), &app->web_edit, RectShrink(ar, R(0.4)), font, 1, S("Address or search"), c->text, c->dim, c->selection);
+            } else {
+                UiSignal as = Ui_Hit(ui, Ui_IdN(Ui_Id("WebBar"), n->id), ar);
+                if (as.hovered) ui->cursor = Cursor_IBeam;
+                if (as.clicked) { Panes_Select(panes, t); StartWebEdit(app, in, t); }
+                String url = { t->web_url, t->web_url_len };
+                if (Str_Equal(url, S("about:blank"))) url = (String){0};
+                Rect tr = ar;
+                CutLeft(&tr, R(0.6));
+                Draw_TextIn(dl, font, tr, url.count ? c->text : c->dim, url.count ? url : S("Address or search (Ctrl+L)"), 0);
+            }
+            Named(app, Str_PushFormat(fa, "web address %d", pane_index), ar);
+            if (ws && ws->failed) {
+                Draw_Rect(dl, body, c->bg, 0);
+                Draw_TextIn(dl, font, R4(body.x0, body.y0 + R(2), body.x1, body.y0 + R(4)), c->dim, S("Web pages need WebView2 (Microsoft Edge's runtime)"), 0.5f);
+            }
+            UiSignal ps = Ui_Hit(ui, Ui_IdN(Ui_Id("Web"), n->id), body);
+            if (ps.pressed && t != panes->selected) Panes_Select(panes, t);
+            for (s32 i = 0; i < out->web_count; i++) {
+                if (out->webs[i].id != t->id) continue;
+                out->webs[i].rect = body;
+                out->webs[i].shown = 1;
+                out->webs[i].mouse = ps.hovered;
+            }
+            web_shown = 1;
+            Named(app, Str_PushFormat(fa, "web page %d", pane_index), body);
+        } else if (t && t->viewing && t->viewer) {
             // --- the picture view: the picture fitted (never above its own size at this DPI) on a dark ground, a caption
             //     row: its name, which of the folder's, its size, the keys. The wheel steps too ---
             Viewer *v = t->viewer;
@@ -3998,6 +4186,22 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     }
 
     if (close_later) CloseTab(app, &f, close_later, 0);
+
+    // --- web pages: where they go this frame (asked in the address row or by its keys), the see-through frame over
+    //     them, and the keyboard for the focused one while nothing of moss's wants it ---
+    for (s32 i = 0; i < out->web_count; i++) {
+        PaneTab *o = FindPaneTab(panes, out->webs[i].id);
+        if (!o) continue;
+        if (o->web_go_len) out->webs[i].navigate = Str_PushCopy(fa, (String){ o->web_go, o->web_go_len });
+        out->webs[i].step = o->web_step;
+        out->webs[i].reload = o->web_reload;
+        o->web_go_len = 0;
+        o->web_step = 0;
+        o->web_reload = 0;
+    }
+    if (web_shown) out->clear_color = 0;
+    PaneTab *web_focus = panes->selected;
+    if (web_focus && web_focus->web && !web_focus->hidden && !modal && !app->web_edit_tab && !app->rename_tab && !app->side_focus && !app->find_open) out->web_focus = web_focus->id;
 
     // --- the splitters again, on top: their lines, and their hit areas over the panes' ---
     for (s32 i = 0; i < splitter_count; i++) {

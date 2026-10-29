@@ -244,7 +244,8 @@ s32 Panes_TabCount(const Panes *p)
 }
 
 // --- session: "term-layout 1", a "window" line, then a line per node ("split" / "pane" with its depth) and per
-//     tab of a pane ("tab"), depth first. Text fields are the line's last, tab-separated ---
+//     tab of a pane ("tab"), depth first. Text fields are the line's last, tab-separated: key, title, browser
+//     folder, web address (a web tab's) ---
 
 String Session_Write(Arena *arena, const Panes *p, const SessionLayout *s)
 {
@@ -256,8 +257,9 @@ String Session_Write(Arena *arena, const Panes *p, const SessionLayout *s)
         if (n->first_child) { TB_Format(&tb, "split %d %d %.4f\n", depth, n->vertical ? 1 : 0, (double)n->split_ratio); continue; }
         TB_Format(&tb, "pane %d %.4f\n", depth, (double)n->split_ratio);
         for (PaneTab *t = n->first_tab; t; t = t->next) {
-            TB_Format(&tb, "tab %d %d %d %d\t%.*s\t%.*s\t%.*s\n", t == p->selected ? 1 : 0, t->hidden ? 0 : 1, t->browsing ? 1 : 0, (int)t->color,
-                      t->key_len, (const char *)t->key, t->title_len, (const char *)t->title, STR_ARG(t->browse_path));
+            TB_Format(&tb, "tab %d %d %d %d\t%.*s\t%.*s\t%.*s\t%.*s\n", t == p->selected ? 1 : 0, t->hidden ? 0 : 1, t->browsing ? 1 : 0, (int)t->color,
+                      t->key_len, (const char *)t->key, t->title_len, (const char *)t->title, STR_ARG(t->browse_path),
+                      t->web ? (t->web_url_len ? t->web_url_len : 11) : 0, t->web_url_len ? (const char *)t->web_url : "about:blank");
         }
     }
     return TB_String(&tb);
@@ -337,12 +339,20 @@ b32 Session_Read(Panes *p, String text, SessionLayout *out)
             t->hidden = !b;
             t->browsing = c;
             t->color = (u8)d;
-            String key = Field(line, 1), title = Field(line, 2), path = Field(line, 3);
+            String key = Field(line, 1), title = Field(line, 2), path = Field(line, 3), url = Field(line, 4);
             t->key_len = (s32)Min(key.count, (s64)sizeof(t->key));
             memcpy(t->key, key.data, (size_t)t->key_len);
             t->title_len = (s32)Min(title.count, (s64)sizeof(t->title));
             memcpy(t->title, title.data, (size_t)t->title_len);
             if (path.count) t->browse_path = Str_PushCopy(&fresh.arena, path);
+            if (url.count) {
+                // a web tab: its page goes back where it was
+                t->web = 1;
+                t->web_url_len = (s32)Min(url.count, (s64)sizeof(t->web_url));
+                memcpy(t->web_url, url.data, (size_t)t->web_url_len);
+                memcpy(t->web_go, t->web_url, (size_t)t->web_url_len);
+                t->web_go_len = t->web_url_len;
+            }
             if (a) selected = t;
         }
     }

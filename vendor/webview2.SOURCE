@@ -1,0 +1,8 @@
+WebView2 SDK 1.0.4314.35: WebView2.h and WebView2Loader.dll (x64), unmodified, from the NuGet package
+Microsoft.Web.WebView2 1.0.4314.35 (https://www.nuget.org/packages/Microsoft.Web.WebView2).
+
+Licensed under BSD-3-Clause (vendor/webview2/LICENSE; keep the notice with any copy we ship).
+
+The window loads WebView2Loader.dll from next to moss.exe (code/term_web.cpp, Web_Create); it finds the WebView2
+Runtime (Microsoft Edge's engine, part of Windows 11) and starts it for web pages in tabs.
+To upgrade: take the new package's build/native/include/WebView2.h and build/native/x64/WebView2Loader.dll.

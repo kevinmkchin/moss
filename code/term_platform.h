@@ -81,6 +81,18 @@ void  TermCells_Stats(TermCells *t, s32 *glyphs, s32 *atlas_percent, s32 *resolv
 s64   TermCells_MonoFonts(TermCells *t, Arena *arena, String **out);
 void  TermCells_Destroy(TermCells *t);
 
+// --- web pages in tabs (WebView2; term_web.cpp): in the window's composition tree, under its frame ---
+typedef struct Web Web;
+Web *Web_Create(void *hwnd, Gpu *g, u32 wake_message, const wchar_t *data_folder);   // NULL: no WebView2 loader
+void Web_Update(Web *w, const AppWeb *webs, s32 count, u64 focus);   // the app's pages: made, placed, navigated, closed
+s32  Web_Fill(Web *w, Arena *arena, AppWebState *out, s32 max);      // their state
+s32  Web_Popups(Web *w, Arena *arena, AppWebPopup *out, s32 max);    // new windows they asked for, waiting for tabs
+b32  Web_HasFocus(Web *w);                                           // a page has the keyboard
+void *Web_Cursor(Web *w);                                            // the page under the mouse's cursor (HCURSOR), or 0
+b32  Web_Mouse(Web *w, u32 msg, u64 wparam, s64 lparam);            // a mouse message, to a page if it's one's (1)
+void Web_Destroy(Web *w);
+int  Web_ProbeMain(const wchar_t *url, const wchar_t *png);           // `moss --web-probe URL OUT.png`
+
 // --- images (WIC) ---
 b32   Image_SavePng(const wchar_t *path, const u8 *rgba, s32 w, s32 h);
 u8   *Image_LoadPng(const wchar_t *path, Arena *arena, s32 *w, s32 *h);   // RGBA8 rows, NULL on failure

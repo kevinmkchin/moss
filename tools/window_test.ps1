@@ -2,9 +2,10 @@
 # window off screen that never takes the foreground (MOSS_TEST_WINDOW), types into it with posted messages,
 # captures it with PrintWindow, and closes it.
 #   powershell -File tools/window_test.ps1 [out.png] [text to type]
-param([string]$Out = "window.png", [string]$Text = "echo window-ok", [int]$LatencyKeys = 0, [string]$Clicks = "")
+param([string]$Out = "window.png", [string]$Text = "echo window-ok", [int]$LatencyKeys = 0, [string]$Clicks = "", [string]$Command = "", [int]$Wait = 0)
 #   -LatencyKeys N: then N key presses 80 ms apart (run with MOSS_LATENCY=1, read with tools/latency.py)
 #   -Clicks "x,y;x,y": then left clicks at those client points, 1 s apart (e.g. the face button)
+#   -Command NAME: runs that command (`dump commands` names, e.g. web_page) before the clicks; -Wait MS: then waits
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -24,6 +25,7 @@ public class W {
 [W]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null   # per monitor v2: posted mouse positions aren't rescaled
 $exe = Join-Path $PSScriptRoot "..\build\moss.exe"
 $env:MOSS_TEST_WINDOW = "-3000,100,1200,760"
+if ($Command) { $env:MOSS_TEST_COMMAND = $Command }
 $p = Start-Process -FilePath $exe -ArgumentList "--test" -PassThru
 $hwnd = [IntPtr]::Zero
 for ($i = 0; $i -lt 100 -and $hwnd -eq [IntPtr]::Zero; $i++) {
@@ -42,6 +44,8 @@ for ($i = 0; $i -lt $LatencyKeys; $i++) {
   [W]::PostMessageW($hwnd, 0x0101, [IntPtr]0x58, [IntPtr]0xC0000001) | Out-Null # WM_KEYUP X
   Start-Sleep -Milliseconds 80
 }
+if ($Command) { [W]::PostMessageW($hwnd, 0x8003, [IntPtr]0, [IntPtr]0) | Out-Null }   # WM_APP + 3: MOSS_TEST_COMMAND
+Start-Sleep -Milliseconds $Wait
 foreach ($c in ($Clicks -split ";")) {
   if (!$c) { continue }
   $xy = $c -split ","

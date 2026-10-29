@@ -30,6 +30,18 @@ typedef struct PaneTab {
     u8 title[64];               // the name the user gave it; empty = the server's
     s32 title_len;
     u8 color;                   // the user's color: 0 none, 1-6 an ANSI color (red .. cyan)
+    b32 web;                    // a web tab: a page (the platform hosts it, AppOutput.webs), no server tab
+    u8 web_url[1024];           // where its page is (kept in the layout)
+    s32 web_url_len;
+    u8 web_go[1024];            // where the page goes next (sent with the next frame's AppOutput.webs)
+    s32 web_go_len;
+    s32 web_step;               // -1 back, 1 forward (next frame)
+    b32 web_reload;
+    u32 web_popup;              // made for a page's new window (AppWebPopup.id)
+    u8 web_title[128];          // the page's title (its tab's name)
+    s32 web_title_len;
+    u32 web_notices_seen;       // the page's notifications counted so far (AppWebState.notices)
+    b32 web_needs;              // it notified while not in front: a dot on its tab until shown
 } PaneTab;
 
 struct PaneNode {
