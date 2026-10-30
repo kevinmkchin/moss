@@ -33,7 +33,9 @@ enum msg_type
     MSG_HISTORY_GET, // window -> server: u32 TabId, u32 From, u32 Have: its claude session's history (the transcript) from
                      // message From on, answered with MSG_HISTORY unless nothing changed since version Have (0: none yet)
     MSG_HISTORY,   // server -> window: u32 TabId, u32 Version, u32 From, u32 Stable, u32 Count, then Count x (u8 Kind: 0
-                   // claude, 1 the user, 2 a tool's use (name, summary, detail, result; \x1f between); u32 TimeLen,
+                   // claude, 1 the user, 2 a tool's use (name, summary, detail, result; \x1f between; a subagent's
+                   // steps after a \x1e while it waits), 3 a note, 4 a failed tool's use, 5 the plan (a line per item:
+                   // status, text, active form; \x1f between), 6 a turn's end (its duration in ms); u32 TimeLen,
                    // u32 TextLen, time, text), oldest first: messages From.. replace what the window has from From on
                    // (From isn't where it asked: start over there). Stable: the messages before it won't change, ask
                    // from there next (no session: Count 0)
@@ -67,7 +69,7 @@ enum
 
 // Bump whenever a message's layout or meaning changes: a window from another build is turned away
 // with a clear message instead of misreading the stream.
-#define TERM_PROTOCOL_VERSION 19
+#define TERM_PROTOCOL_VERSION 20
 
 struct msg_attach
 {

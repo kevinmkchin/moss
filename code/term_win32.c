@@ -223,16 +223,17 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_UiBold], &p->atlas, ui, 9 * pt, 600);
     Font_Create(&p->fonts[Font_Icon], &p->atlas, icons, 9 * pt, 400);
     Font_Create(&p->fonts[Font_IconSmall], &p->atlas, icons, 7 * pt, 400);
-    // --- the reader: a magazine's type, moss's own: Libre Caslon (Text to read, Display for headings; fonts\ next to
-    //     moss.exe, SIL Open Font License; Georgia when they're missing), Segoe UI for the user's prompts, a mono for
-    //     code; all at the reader's size (12 pt: the text) ---
+    // --- the reader: a magazine's type, moss's own: Libre Caslon (Text to read, its italic, Display for headings;
+    //     fonts\ next to moss.exe, SIL Open Font License; Georgia when they're missing), a mono for code; all at the
+    //     reader's size (12 pt: the text) ---
     WCHAR dir[MAX_PATH] = {0};
     GetModuleFileNameW(NULL, dir, MAX_PATH);
     WCHAR *slash = wcsrchr(dir, L'\\');
     if (slash) slash[1] = 0;
-    static const wchar_t *const files[3] = { L"LibreCaslonText-Regular.ttf", L"LibreCaslonText-Bold.ttf", L"LibreCaslonDisplay-Regular.ttf" };
-    WCHAR lists[3][MAX_PATH + 64] = {0};   // "<moss>\fonts\X.ttf\0Georgia\0Cambria\0\0"
-    for (s32 k = 0; k < 3; k++) {
+    static const wchar_t *const files[4] = { L"LibreCaslonText-Regular.ttf", L"LibreCaslonText-Bold.ttf", L"LibreCaslonDisplay-Regular.ttf",
+                                             L"LibreCaslonText-Italic.ttf" };
+    WCHAR lists[4][MAX_PATH + 64] = {0};   // "<moss>\fonts\X.ttf\0Georgia\0Cambria\0\0"
+    for (s32 k = 0; k < 4; k++) {
         s32 n = swprintf_s(lists[k], MAX_PATH, L"%sfonts\\%s", dir, files[k]);
         wmemcpy(lists[k] + n + 1, L"Georgia\0Cambria\0", 17);
     }
@@ -241,10 +242,9 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_Read], &p->atlas, lists[0], r * 1.06f, 400);
     Font_Create(&p->fonts[Font_ReadBold], &p->atlas, lists[1], r * 1.06f, 700);
     Font_Create(&p->fonts[Font_ReadHead], &p->atlas, lists[2], r * 1.55f, 600);
-    Font_Create(&p->fonts[Font_ReadSans], &p->atlas, ui, r * 0.92f, 400);   // the user's prompts and the prompt box
-    Font_Create(&p->fonts[Font_ReadSansBold], &p->atlas, ui, r * 0.92f, 600);
+    Font_Create(&p->fonts[Font_ReadItalic], &p->atlas, lists[3], r * 1.06f, 400);
     // Caslon's hairlines are thinner than a pixel at reading sizes: its coverage darkened, as DirectWrite's own does
-    p->fonts[Font_Read].contrast = p->fonts[Font_ReadBold].contrast = p->fonts[Font_ReadHead].contrast = 1.5f;
+    p->fonts[Font_Read].contrast = p->fonts[Font_ReadBold].contrast = p->fonts[Font_ReadHead].contrast = p->fonts[Font_ReadItalic].contrast = 1.5f;
     p->fonts_dpi = p->dpi;
     p->fonts_reader_pt = p->reader_pt;
 }

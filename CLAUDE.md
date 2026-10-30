@@ -272,8 +272,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   turns that the other way; Ctrl+Shift+R (`chat_mode`) flips one tab (`PaneTab.chat_flip`). Only while claude sits at its own
   prompt box (`ClaudePromptBox`: a rule, the `❯` line (a no-break space after it), a rule, the lowest rule within the
   bottom 12 rows written, nothing under it but the mode line and notices such as a usage warning: no other rule, no
-  `❯ 1.` choice): a question, a permission, a menu (/model) or the start shows the terminal, and the conversation comes back
-  once it's answered there.
+  `❯ 1.` choice), or asks something that can be read off its screen (`ClaudeDialog`: numbered rows "1." .. "N." in the
+  bottom 30, one marked `❯`, the question's rows over them up to a rule): a card where the prompt was, its choices
+  mirrored from the screen (a click types the number; keys go to claude as they are). Anything else (`ChatShows`: the
+  start, a free-text answer) shows the terminal, and the conversation comes back once it's answered there.
 - Its prompt (`Chat.draft`, a `Ui_TextArea`) is written on the page itself: the column's width and reading type
   (`Font_Read`), under a hairline (darker while it has the keyboard), no box; under it the keys, faint, and "Send ↵" /
   "Stop · Esc" as a word in the accent. Enter sends (`ChatSend`: as typed, or a
@@ -281,10 +283,31 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   of a paste: `SendLine`, `App.enters`, also the model picker's `/model` and the composer; an Enter still on its way to
   the tab goes before the next line), Shift+Enter is a new line, Esc stops a turn (win32-input-mode's Esc key
   when asked), Shift+Tab claude's mode, PgUp/PgDn and Ctrl+Home/End scroll, Ctrl+V a picture's path, files dropped and
-  Ctrl+Shift+V pastes go in. The prompt shows at once (`Chat.pending`) until the transcript has it (a `!` command's tool row
-  counts; 20 s at most once claude isn't working, so one queued during a turn stays; never for /commands). While claude works (its title's spinner, or "esc to interrupt" on its mode line: `ClaudeWorking`): a
-  ◐◓◑◒ spinner and claude's own status line (the row over its box, its mark dropped; else "Working…") above the box, a
-  stop button. The wheel scrolls anywhere over the view (rows and code blocks take the hover).
+  Ctrl+Shift+V pastes go in. Prompts show at once (`Chat.pending`, each ended by a 0, or a 1 when sent while claude
+  worked: "You  queued" until the turn ends) until the transcript has each (a `!` command's tool row counts; 20 s at most
+  once claude isn't working; never for /commands). While claude works (its title's spinner, or "esc to interrupt" on its
+  mode line: `ClaudeWorking`): a ◐◓◑◒ spinner and claude's own status line (the row over its box, its mark dropped; else
+  "Working…") above the box, a stop button, a dot breathing under the last line; over the status, the tool running (the
+  last message, a tool with no result yet: "Running <command>", how long by the tool's time) and a subagent's last three
+  steps under it. The wheel scrolls anywhere over the view (rows and code blocks take the hover); the view eases to
+  where it's going (`scroll_shown`). Ctrl+Up / Ctrl+Down put the user's previous / next prompt at the top. Under the
+  prompt, a hairline filled as far as the context is used and "62% of context" (the account line's tokens over 200k;
+  1M for a `[1m]` model or once past 200k).
+- The plan (TodoWrite, or TaskCreate / TaskUpdate numbered from 1; `MSG_HISTORY` kind 5: a line per item, status \x1f
+  text \x1f active form; the last one replaced while nothing came between) is a "Plan  2 of 5 done" row that opens to its
+  items, and while its turn goes on (no turn's end after it) and something isn't done, a card pinned over the prompt:
+  done struck through, the current one (its active form) bold, the heading folds it.
+- A turn's end (`turn_duration` lines: kind 6, its ms) is a quiet row, "Worked 2m 14s", and the turn's edits as a button
+  ("+48 −12 in 3 files": Edit / MultiEdit '-' / '+' lines, a Write's every line; failed ones not) that opens them: each
+  file's name, its edits under it (`HistLine_Footer`, `ToolBody` blocks 4 and 2; 600 lines at most).
+- Subagents (an `Agent` / `Task` tool's; Claude Code 2.1 runs them in the background, the tool's result comes at
+  once): the server reads each one's own transcript (`<session>\subagents\agent-<id>.jsonl`, its `.meta.json` names the
+  tool's id, `toolUseId`, and says `finished`) on each read while one isn't finished (`SubagentsRunning`: every ask reads
+  again) and puts how many tools it used and its last three after a \x1e on its tool's entry (gone once it's
+  finished). While claude works they show over the status line, "Agent <description>", its steps under it. Protocol 20.
+- New messages fade in (`ChatMsg.arrived_us`: a veil of the page's color going over 300 ms; not the first read's).
+- A green dot on a tab whose claude turn ended while it wasn't in front (`PaneTab.done_unseen`; the accent's dot is
+  "needs you", the server's `TermTab_NeedsInput`).
 - Live: the window asks for the history (`AppOutput.history_asks`: tab, from, have) when it shows, every 400 ms while
   a turn runs or 4 s after a send, a change or the turn's end (its last reply can land in the transcript a moment
   after claude's screen says it's done), else every 5 s. The server keeps each tab's transcript read
@@ -306,13 +329,16 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   saved as `%TEMP%\moss-paste\paste-<time>.png` (`SaveClipboardImage`, `AppOutput.save_clipboard_image` ->
   `AppFrameInput.pasted_image`) and its path inserted (claude reads pictures by path); files dropped on the pane go in
   as paths. While open on the focused tab it takes every key the commands leave.
-- Its markdown: headings, **bold** and `code` runs (`HistSpan`), list items (marker, indented lines), fenced code
+- Its markdown: headings, **bold**, *italic* (Libre Caslon Text Italic, `Font_ReadItalic`; `_x_` only at word ends) and
+  `code` runs (`HistSpan`), links ([text](address) and addresses written out, in the accent; a click opens them) and
+  `code` runs that name a file (a folder in them or a source extension; a click opens it as a terminal's Ctrl+click
+  does, `:line` to the editor), block quotes (a bar, italic, dim), quotes made curly and " -- " a dash, list items (marker, indented lines), fenced code
   (`Font_Mono`: Cascadia Mono, else Consolas; a shade; the block's copy button, `Chat.blocks`), tables (columns as wide
   as their widest cell, narrowed together to fit), rules. Ctrl+F searches it (a claude tab whose terminal shows gets the
   conversation while searching).
 - It reads like an article in a magazine (The New Yorker's look): one centered column (about 70 characters, `R(64)` at
   12 pt), Libre Caslon Text to read (`Font_Read`, `Font_ReadBold`), Libre Caslon Display headings (`Font_ReadHead`), the
-  user's prompts in Segoe UI (`Font_ReadSans`) in a soft rounded bubble, Cascadia Mono code. moss ships the Caslons
+  user's prompts in the same type in a soft rounded bubble, Cascadia Mono code. moss ships the Caslons
   (`vendor\fonts`, SIL OFL, copied to `fonts\` next to moss.exe; Georgia when they're missing): `Font_Create` takes a
   font file's full path as a family. Caslon's hairlines are thinner than a pixel at reading sizes, so the reader's fonts
   darken their coverage as DirectWrite's enhanced contrast does (`Font.contrast` 1.5: a' = a(k+1) / (ak+1)). Its text size is its own (settings `reader_size`, "Chat mode > Text size"; Ctrl+= /
@@ -347,6 +373,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   lines green and red) and the output under a rule, at most 400 lines.
 - Copying from an agent's tab (a selection, copy on select; not a rectangle) is cleaned (`CleanAgentCopy`): claude's ●
   and ⎿ marks become spaces, the indent the lines share goes, a line wrapped near the screen's edge joins the next.
+- In chat mode the mouse selects text anywhere on the page (its text lines, code, notes, a tool's output; rows, buttons
+  and links keep their clicks): a drag (the view scrolls at its edges), a double click's word, a triple click's line;
+  copied on select, Ctrl+C / Ctrl+Shift+C too (`ChatSelectionText`: wrapped lines joined, list markers kept). Each
+  Claude heading has a copy button: the reply's words as claude wrote them (markdown), to the next prompt.
 
 ## A claude tab's account line
 

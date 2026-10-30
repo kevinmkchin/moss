@@ -1,8 +1,9 @@
 # A stand-in for claude: registered like Claude Code (CLAUDE_CONFIG_DIR\sessions\<pid>.json) with the session it
 # resumes, its screen drawn as claude draws it (what it said, then its prompt box: a rule, the "❯" line, a rule, the
 # mode line). Each line it hears is a turn: busy (a spinner in its title, a status line over the box), the prompt, a
-# command run and a reply written to the session's transcript. "ask" shows a question in place of the box until the next
-# line; a line starting with / is only heard.
+# command run and a reply written to the session's transcript, then the turn's duration. "ask" shows a question in place
+# of the box until the next line; "agent" runs a subagent (its steps in its own transcript); a line starting with / is
+# only heard.
 import glob, json, os, sys, threading, time
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else ''
 cfg = os.environ.get('CLAUDE_CONFIG_DIR', '')
@@ -82,8 +83,42 @@ def turn(text, n):
     time.sleep(0.8)
     reply = 'You said **%s**. Here it is as code:\n\n```text\n%s\n```' % (text.replace('\n', ' / '), text)
     write({'type': 'assistant', 'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [{'type': 'text', 'text': reply}]}})
+    write({'type': 'system', 'subtype': 'turn_duration', 'durationMs': 2400})
     with lock:
         said.append('● You said %s.' % text.replace('\n', ' / '))
+        state['status'] = ''
+        title(False)
+        draw()
+
+def agent_turn():
+    # a subagent in the background, as Claude Code 2.1 runs them: the Agent tool's result at once, the subagent's steps
+    # written to <session>\subagents\agent-<id>.jsonl, its .meta.json naming the tool and, at the end, finished
+    with lock:
+        title(True)
+        state['status'] = '· Delegating… (esc to interrupt)'
+        draw()
+    write({'type': 'user', 'message': {'role': 'user', 'content': 'agent'}})
+    write({'type': 'assistant', 'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [
+        {'type': 'tool_use', 'id': 'toolu_ag', 'name': 'Agent', 'input': {'description': 'Look around', 'subagent_type': 'general-purpose', 'prompt': 'Look around the code'}}]}})
+    write({'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_ag', 'content': 'Async agent launched successfully.'}]}})
+    folder = os.path.join(transcript()[:-6], 'subagents')
+    os.makedirs(folder, exist_ok=True)
+    meta = {'agentType': 'general-purpose', 'description': 'Look around', 'toolUseId': 'toolu_ag', 'requestShape': 'background'}
+    with open(os.path.join(folder, 'agent-a1.meta.json'), 'w') as f:
+        json.dump(meta, f, separators=(',', ':'))
+    for name, key, value in [('Read', 'file_path', 'C:\\src\\parse.c'), ('Grep', 'pattern', 'add\\('), ('Bash', 'command', 'git log -3')]:
+        time.sleep(0.6)
+        with open(os.path.join(folder, 'agent-a1.jsonl'), 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'type': 'assistant', 'isSidechain': True, 'message': {'role': 'assistant', 'content': [
+                {'type': 'tool_use', 'id': 'toolu_s' + name, 'name': name, 'input': {key: value}}]}}, separators=(',', ':')) + '\n')
+    time.sleep(2.5)
+    meta['finished'] = True
+    with open(os.path.join(folder, 'agent-a1.meta.json'), 'w') as f:
+        json.dump(meta, f, separators=(',', ':'))
+    write({'type': 'assistant', 'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [{'type': 'text', 'text': 'Looked around.'}]}})
+    write({'type': 'system', 'subtype': 'turn_duration', 'durationMs': 6100})
+    with lock:
+        said.append('● Looked around.')
         state['status'] = ''
         title(False)
         draw()
@@ -125,6 +160,9 @@ for raw in sys.stdin:
         if line == 'notice':
             state['notice'] = True
             draw()
+            continue
+        if line == 'agent':
+            threading.Thread(target=agent_turn).start()
             continue
         draw()
     if line and not line.startswith('/'):

@@ -296,7 +296,8 @@ static std::wstring SessionFilePath(const std::wstring& ConfigDir, const std::st
 // (with its result), oldest first; 64 KB a message at most. Each read takes only what was written since (a turn under
 // way is read again and again), the first one the last 16 MB.
 struct history_entry { u32 Kind; std::string Time, Text; };   // Kind: 0 claude, 1 the user, 2 a tool used (4: it failed),
-                                                              // 3 a note (a /command's output, an interruption, ...)
+                                                              // 3 a note (a /command's output, an interruption, ...),
+                                                              // 5 the plan as it is now, 6 a turn's end (its duration, ms)
 struct history_cache
 {
     std::string SessionId;
@@ -306,6 +307,10 @@ struct history_cache
     std::vector<history_entry> Entries;
     std::map<std::string, size_t> Pending;   // the tools used whose result hasn't come yet: their entry
     std::set<std::string> ToolIds;           // the tools used so far (claude writes some twice)
+    std::vector<std::string> Plan;           // its plan (TodoWrite, TaskCreate / TaskUpdate): "status\x1ftext\x1factive form"
+    std::map<std::string, size_t> AgentIds;  // the Agent / Task tools used (their subagents' steps go on their entries)
+    bool32 SubagentsRunning;                 // one of them isn't finished: read again on every ask
+    u64 AgentWatchUntil;                     // and for 30 s after one starts (its .meta.json may come after its result)
     u32 Version;              // the last change's (counted server-wide, so never the same twice)
     u32 ResetVersion;         // when it last started over (another session, a shorter file)
     u64 UsedMs;               // asked for last (unused ones go)
@@ -349,6 +354,8 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
         C.Entries.clear();
         C.Pending.clear();
         C.ToolIds.clear();
+        C.Plan.clear();
+        C.AgentIds.clear();
         C.Version = C.ResetVersion = (u32)InterlockedIncrement(&g_HistoryVersion);
     }
     bool32 Changed = false;
@@ -383,6 +390,19 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
             else if(Line.find("\"subtype\":\"compact_boundary\"") != std::string::npos)
             {
                 Note = "Conversation compacted";
+            }
+            else if(Line.find("\"subtype\":\"turn_duration\"") != std::string::npos)
+            {
+                // a turn's end: how long it took
+                size_t At = Line.find("\"durationMs\":");
+                if(At == std::string::npos) { continue; }
+                history_entry D = {};
+                D.Kind = 6;
+                D.Text = std::to_string(strtoull(Line.c_str() + At + 13, 0, 10));
+                JsonFindString(Line, "timestamp", true, D.Time);
+                C.Entries.push_back(D);
+                Changed = true;
+                continue;
             }
             else if(Line.find("\"role\":\"user\",\"content\":\"") != std::string::npos)
             {
@@ -488,6 +508,61 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                         else if(Ch == '}' && --Depth == 0) { End++; break; }
                     }
                     std::string In = Line.substr(Input + 8, End - Input - 8);
+                    if(Name == "TodoWrite" || Name == "TaskCreate" || Name == "TaskUpdate")
+                    {
+                        // --- the plan: a TodoWrite is the whole list again, a TaskCreate adds one (numbered from 1), a
+                        //     TaskUpdate changes one; an entry (kind 5) with the list as it is now, the last one replaced
+                        //     while nothing came between ---
+                        if(Name == "TodoWrite")
+                        {
+                            C.Plan.clear();
+                            for(size_t I = In.find("\"content\":\""); I != std::string::npos;)
+                            {
+                                size_t Next = In.find("\"content\":\"", I + 1);
+                                size_t From = In.rfind('{', I), To = Next == std::string::npos ? In.size() : In.rfind('{', Next);
+                                std::string Item = In.substr(From, To - From), Text, Status, Active;
+                                I = Next;
+                                JsonFindString(Item, "content", false, Text);
+                                JsonFindString(Item, "status", false, Status);
+                                JsonFindString(Item, "activeForm", false, Active);
+                                C.Plan.push_back(Status + "\x1f" + Text + "\x1f" + Active);
+                            }
+                        }
+                        else if(Name == "TaskCreate")
+                        {
+                            std::string Text, Active;
+                            JsonFindString(In, "subject", false, Text);
+                            JsonFindString(In, "activeForm", false, Active);
+                            C.Plan.push_back("pending\x1f" + Text + "\x1f" + Active);
+                        }
+                        else
+                        {
+                            std::string TaskId, Status;
+                            JsonFindString(In, "taskId", false, TaskId);
+                            size_t K = (size_t)strtoul(TaskId.c_str(), 0, 10);
+                            if(K >= 1 && K <= C.Plan.size() && JsonFindString(In, "status", false, Status))
+                            {
+                                std::string& P = C.Plan[K - 1];
+                                P = Status + P.substr(P.find('\x1f'));
+                            }
+                        }
+                        history_entry P = {};
+                        P.Kind = 5;
+                        for(const std::string& Item : C.Plan) { P.Text += Item + "\n"; }
+                        JsonFindString(Line, "timestamp", true, P.Time);
+                        if(!E.Text.empty())
+                        {
+                            if(E.Text.size() > 64 * 1024) { E.Text.resize(64 * 1024); }
+                            E.Time = P.Time;
+                            if(!C.Entries.empty() && C.Entries.back().Kind == 0 && C.Entries.back().Time == E.Time) { C.Entries.back().Text += "\n\n" + E.Text; }
+                            else { C.Entries.push_back(E); }
+                            E.Text.clear();
+                        }
+                        if(!C.Entries.empty() && C.Entries.back().Kind == 5) { C.Entries.back() = P; }
+                        else { C.Entries.push_back(P); }
+                        Changed = true;
+                        continue;
+                    }
                     std::string Summary, Detail, A, B;
                     if(JsonFindString(In, "command", false, A)) { Summary = A.substr(0, A.find('\n')); Detail = A; }
                     else if(JsonFindString(In, "file_path", false, A) || JsonFindString(In, "notebook_path", false, A))
@@ -521,6 +596,7 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                         Changed = true;
                         E.Text.clear();
                     }
+                    if(Name == "Agent" || Name == "Task") { C.AgentIds[Id] = C.Entries.size(); C.AgentWatchUntil = GetTickCount64() + 30000; }
                     C.Pending[Id] = C.Entries.size();
                     C.Entries.push_back(T);
                     Changed = true;
@@ -547,7 +623,9 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                     else if(Content != std::string::npos) { size_t T = Block.find("\"text\":\"", Content); if(T != std::string::npos) { JsonDecodeString(Block, T + 8, Out); } }
                     if(Out.size() > 16 * 1024) { Out.resize(16 * 1024); }
                     if(Block.find("\"is_error\":true") != std::string::npos) { C.Entries[P->second].Kind = 4; }
-                    C.Entries[P->second].Text += Out;
+                    std::string& Text = C.Entries[P->second].Text;
+                    if(Text.find('\x1e') != std::string::npos) { Text.resize(Text.find('\x1e')); }   // a subagent's steps go
+                    Text += Out;
                     Changed = true;
                     C.Pending.erase(P);
                 }
@@ -604,6 +682,89 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                 continue;
             }
             C.Entries.push_back(E);
+            Changed = true;
+        }
+    }
+    // --- subagents at work (an Agent or Task tool's; Claude Code 2.1 runs them in the background: the tool's result
+    //     comes at once): each one's last steps, from its own transcript (<session>\subagents\agent-<id>.jsonl; its
+    //     .meta.json names the tool's id and says when it's finished), on the end of the tool's entry after a \x1e: how
+    //     many tools it used, then its last three, one a line. Gone once it's finished ---
+    C.SubagentsRunning = false;
+    if(!C.AgentIds.empty() && C.Path.size() > 6)
+    {
+        std::wstring Dir = C.Path.substr(0, C.Path.size() - 6) + L"\\subagents\\";
+        std::map<size_t, std::wstring> Running;   // entry -> its subagent's transcript
+        WIN32_FIND_DATAW Fd;
+        HANDLE Find = FindFirstFileW((Dir + L"agent-*.meta.json").c_str(), &Fd);
+        if(Find != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                std::wstring Name = Fd.cFileName;
+                HANDLE M = CreateFileW((Dir + Name).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+                if(M == INVALID_HANDLE_VALUE) { continue; }
+                std::string Json = ReadFileRange(M, 0, 64 * 1024), ToolId, Desc;
+                CloseHandle(M);
+                if(Json.find("\"finished\":true") != std::string::npos) { continue; }
+                size_t Entry = (size_t)-1;
+                if(JsonFindString(Json, "toolUseId", false, ToolId) && C.AgentIds.count(ToolId)) { Entry = C.AgentIds[ToolId]; }
+                else if(JsonFindString(Json, "description", false, Desc))
+                {
+                    // older ones: the waiting tool with its description
+                    for(const auto& P : C.Pending)
+                    {
+                        if(!C.AgentIds.count(P.first) || P.second >= C.Entries.size()) { continue; }
+                        const std::string& T = C.Entries[P.second].Text;
+                        size_t S1 = T.find('\x1f'), S2 = T.find('\x1f', S1 + 1);
+                        if(S2 != std::string::npos && T.compare(S1 + 1, S2 - S1 - 1, Desc) == 0) { Entry = P.second; }
+                    }
+                }
+                if(Entry < C.Entries.size()) { Running[Entry] = Dir + Name.substr(0, Name.size() - 10) + L".jsonl"; }
+            } while(FindNextFileW(Find, &Fd));
+            FindClose(Find);
+        }
+        for(const auto& A : C.AgentIds)
+        {
+            if(A.second >= C.Entries.size()) { continue; }
+            std::string& Text = C.Entries[A.second].Text;
+            std::string Progress;
+            auto R = Running.find(A.second);
+            if(R != Running.end())
+            {
+                C.SubagentsRunning = true;
+                HANDLE F = CreateFileW(R->second.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+                std::string Sub;
+                if(F != INVALID_HANDLE_VALUE)
+                {
+                    LARGE_INTEGER FSize = {};
+                    GetFileSizeEx(F, &FSize);
+                    u64 From = (u64)FSize.QuadPart > 4ull * 1024 * 1024 ? (u64)FSize.QuadPart - 4ull * 1024 * 1024 : 0;
+                    Sub = ReadFileRange(F, From, (u32)((u64)FSize.QuadPart - From));
+                    CloseHandle(F);
+                }
+                std::vector<std::string> Steps;
+                for(size_t At = Sub.find("\"type\":\"tool_use\""); At != std::string::npos; At = Sub.find("\"type\":\"tool_use\"", At + 1))
+                {
+                    size_t Input = Sub.find("\"input\":{", At), Nl = Sub.find('\n', At);
+                    if(Input == std::string::npos || Input > Nl) { continue; }
+                    std::string Head = Sub.substr(At, Input - At), In = Sub.substr(Input, std::min(Nl, Input + 4096) - Input), Name, What;
+                    JsonFindString(Head, "name", false, Name);
+                    for(const char* Key : {"command", "file_path", "pattern", "description", "query", "url", "prompt"})
+                    {
+                        if(JsonFindString(In, Key, false, What)) { break; }
+                    }
+                    What = What.substr(0, What.find('\n'));
+                    if(What.size() > 200) { What.resize(200); }
+                    Steps.push_back(Name + " " + What);
+                }
+                Progress = "\x1e" + std::to_string(Steps.size());
+                for(size_t K = Steps.size() > 3 ? Steps.size() - 3 : 0; K < Steps.size(); ++K) { Progress += "\n" + Steps[K]; }
+            }
+            size_t Old = Text.find('\x1e');
+            std::string Had = Old == std::string::npos ? std::string() : Text.substr(Old);
+            if(Had == Progress) { continue; }
+            if(Old != std::string::npos) { Text.resize(Old); }
+            Text += Progress;
             Changed = true;
         }
     }

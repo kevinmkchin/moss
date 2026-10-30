@@ -2509,7 +2509,9 @@ static int ServerMain()
             Cache->UsedMs = NowMs;
             std::string SessionId = T ? T->SessionId : std::string();
             bool32 Fresh = W.Read;
-            if(!Fresh && Cache->Version && SessionId == Cache->SessionId && !Cache->Path.empty())
+            bool32 Subagent = Cache->SubagentsRunning || GetTickCount64() < Cache->AgentWatchUntil;   // a subagent at work writes its own transcript: read again for its steps
+            for(const auto& P : Cache->Pending) { Subagent |= Cache->AgentIds.count(P.first) > 0; }
+            if(!Fresh && !Subagent && Cache->Version && SessionId == Cache->SessionId && !Cache->Path.empty())
             {
                 // its size from an open handle: the folder's entry lags while claude keeps the file open
                 HANDLE File = CreateFileW(Cache->Path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);

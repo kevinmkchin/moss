@@ -1,5 +1,6 @@
 # Made-up Claude Code sessions for the claude_ui test, in CLAUDE_CONFIG_DIR (run.sh points it here): one with markdown
-# (a heading, bold, `code`, a list, a code block, a table) and its reply's token usage, one whose later message has a
+# (a heading, bold, italic, `code`, a path, a link, a quote, a list, a code block, a table), its reply's token usage, the
+# turn's duration and a plan (TodoWrite) left half done, one whose later message has a
 # word only a full-text search finds, and one plain. Dated against the headless clock (2026-06-15 12:00 UTC).
 import calendar, json, os, re
 
@@ -10,6 +11,10 @@ reply = '\n'.join([
     'We **change two files** and keep `main` green:',
     '- the parser',
     '- the `tests/` folder',
+    '',
+    '> Keep it *small* -- the "fast path" first.',
+    '',
+    'See [the guide](https://example.com/guide) and `src/parse.c:12`, it\'s short.',
     '',
     '```c',
     'int add(int a, int b)',
@@ -57,6 +62,9 @@ for sid, project, prompt, text, age in sessions:
                                         'usage': {'input_tokens': 1200, 'cache_creation_input_tokens': 800, 'cache_read_input_tokens': 40000, 'output_tokens': 300}}},
                            separators=(',', ':')) + '\n')
         if project == 'markdown':
+            # how long the turn took
+            f.write(json.dumps({'type': 'system', 'subtype': 'turn_duration', 'durationMs': 134000, 'messageCount': 5,
+                                'timestamp': '2026-06-15T10:00:05.500Z', 'cwd': cwd, 'sessionId': sid}, separators=(',', ':')) + '\n')
             # then a /command with its output, and a prompt the user interrupted
             for content in ['<command-name>/cost</command-name>\n            <command-message>cost</command-message>\n            <command-args></command-args>',
                             '<local-command-stdout>Total cost: $0.42\nTotal duration: 3m 12s</local-command-stdout>']:
@@ -74,6 +82,14 @@ for sid, project, prompt, text, age in sessions:
             f.write(json.dumps({'parentUuid': 'x', 'isSidechain': False, 'attachment': {'type': 'queued_command', 'prompt': 'Also check the tests',
                                 'commandMode': 'prompt', 'timestamp': '2026-06-15T10:00:09.000Z'}, 'type': 'attachment',
                                 'timestamp': '2026-06-15T10:00:09.000Z', 'cwd': cwd, 'sessionId': sid}, separators=(',', ':')) + '\n')
+            # its plan, one item done, one under way (pinned over the prompt)
+            f.write(json.dumps({'type': 'assistant', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:10.000Z',
+                                'message': {'role': 'assistant', 'model': 'claude-opus-5-5', 'content': [
+                                    {'type': 'tool_use', 'id': 'toolu_4', 'name': 'TodoWrite', 'input': {'todos': [
+                                        {'content': 'Read the parser', 'status': 'completed', 'activeForm': 'Reading the parser'},
+                                        {'content': 'Make it faster', 'status': 'in_progress', 'activeForm': 'Making it faster'},
+                                        {'content': 'Run the tests', 'status': 'pending', 'activeForm': 'Running the tests'}]}}]}},
+                               separators=(',', ':')) + '\n')
     os.utime(path, (now - age, now - age))
 with open(os.path.join(cfg, '.claude.json'), 'w') as f:
     json.dump({'oauthAccount': {'emailAddress': 'tester@example.com', 'organizationName': 'Example Org'}}, f, indent=2)

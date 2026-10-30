@@ -1,6 +1,7 @@
 # Claude tabs made comfortable: the composer (a multi-line prompt, sent with Ctrl+Enter), a claude tab's conversation
 # (markdown, a code block's copy button, the tools it used; its prompt box: a prompt sent, the turn coming in as it
-# runs; a question shows the terminal), the account line (the model picker, the mode, the context), the sidebar's
+# runs, the tool running, a subagent's steps; a question as a card; the plan, a turn's changes, links, a selection), the
+# account line (the model picker, the mode, the context), the sidebar's
 # full-text search and its menu (pin, rename, archive). Claude is faked; its sessions are made up (make.py).
 waitfor λ
 type python make.py
@@ -26,7 +27,7 @@ lmb up
 waitfor fake-claude ready
 waitlabel claude model
 waitlabel chat prompt
-waitlabel copy code 1
+waitlabel chat plan
 sleep 3500
 waitidle
 capture out/account_line.png
@@ -42,7 +43,7 @@ lmb down
 lmb up
 waitfor heard: /model sonnet
 # --- the conversation: markdown, a code block copied ---
-waitlabel copy code 1
+waitlabel chat plan
 sleep 500
 waitidle
 capture out/reader.png
@@ -55,27 +56,62 @@ capture out/reader_big.png
 cmd zoom_reset
 sleep 300
 waitidle
+# a turn's changes (its end's row): open, each file's edits; then a selection with the mouse over the notes under it
+cursorui chat changes +1 −1 in 1 file
+wait 1
+lmb down
+lmb up
+sleep 300
+waitidle
+capture out/chat_changes.png
+cursorui chat changes +1 −1 in 1 file
+wait 1
+lmb down
+lmb up
+sleep 300
+waitidle
+cursorui chat changes +1 −1 in 1 file
+cursorby -150 40
+wait 1
+lmb down
+cursorby 250 60
+wait 2
+lmb up
+sleep 300
+waitidle
+capture out/chat_select.png
+key Escape
 # the tools it used in a row, folded into one row; open, each opens: its command and its output; the edit as a diff
 key Ctrl+Home
 sleep 300
 waitidle
 cursorui tools Ran 1 command, edited 1 file, ran 1 search (1 failed)
+wait 1
 lmb down
 lmb up
 sleep 300
 waitidle
 cursorui tool Bash git status
+wait 1
 lmb down
 lmb up
 sleep 300
 waitidle
 cursorui tool Edit C:\src\parse.c
+wait 1
 lmb down
 lmb up
 sleep 300
 waitidle
 capture out/reader_tools.png
+# the code block's copy button, a page down
+key Ctrl+Home
+key PageDown
+sleep 500
+waitidle
+capture out/chat_rich.png
 cursorui copy code 1
+wait 1
 lmb down
 lmb up
 sleep 300
@@ -93,14 +129,27 @@ waitgone chat status
 sleep 1200
 waitidle
 capture out/chat_turn.png
-# --- a question: the terminal shows until it's answered there ---
+# --- a subagent: its tool's row over the status line, its last steps under it ---
+type agent
+key Enter
+waitlabel chat running Look around
+waitfor heard: agent
+sleep 2200
+waitidle
+capture out/chat_agent_varies.png
+waitfor Looked around
+waitgone chat status
+# --- a question: a card in place of the prompt; a click on a choice types its number (Enter here: the fake reads lines) ---
 type ask
 key Enter
-waitgone chat prompt
+waitlabel chat question
 sleep 300
 waitidle
 capture out/asking.png
-type 1
+cursorui chat choice 1
+wait 1
+lmb down
+lmb up
 key Enter
 waitlabel chat prompt
 # --- a usage warning under claude's box doesn't take the conversation away ---

@@ -262,9 +262,11 @@ enum { HistLine_Text = 0, HistLine_User, HistLine_Claude, HistLine_Blank, HistLi
        HistLine_Tool, HistLine_ToolBody,     // a tool claude used (a row that opens), a line of its detail or result
        HistLine_Note,                        // a note's line (a /command and its output, an interruption, a notice)
        HistLine_Group,                       // tools used in a row, folded into one ("Ran 3 commands, read 2 files")
-       HistLine_Image };                     // a picture a message names (its path the text), shown under it
-enum { HistSpan_Bold = 1, HistSpan_Code = 2 };
-typedef struct HistSpan { s32 start, len; u32 style; } HistSpan;   // a bold or `code` run in a line's text
+       HistLine_Image,                       // a picture a message names (its path the text), shown under it
+       HistLine_Footer };                    // a turn's end: how long it worked, what it changed (opens the changes)
+enum { HistSpan_Bold = 1, HistSpan_Code = 2, HistSpan_Italic = 4, HistSpan_Link = 8, HistSpan_Path = 16 };
+typedef struct HistSpan { s32 start, len; u32 style; String url; } HistSpan;   // a bold, italic, `code` or link run in a
+                                                                              // line's text (a link's address, a path's)
 typedef struct HistLine {
     u32 kind;                 // HistLine_*
     String text;              // markdown's marks taken out
@@ -279,6 +281,9 @@ typedef struct HistLine {
     b32 failed;               // Tool: its result was an error
     s32 y0;                   // where the line before it ended (its gap starts there)
     String *cells; s32 cell_count; s32 *widths;   // Table: the row's cells, its table's column widths
+    b32 quote;                // a block quote's line (a bar at its left)
+    b32 wrapped;              // it goes on from the line before (copied without a line break between)
+    s32 text_x; Font *font;   // where its text was drawn last frame (from the column's left) and in what (selecting)
 } HistLine;
 typedef struct HistMatch { s32 line, start, len; } HistMatch;
 
@@ -289,7 +294,8 @@ typedef struct HistMatch { s32 line, start, len; } HistMatch;
 // Evening (the same at night), or the window's theme.
 enum { ReaderTheme_Paper = 0, ReaderTheme_Evening, ReaderTheme_Window };
 
-typedef struct ChatMsg { TermHistoryEntry e; u64 pos; } ChatMsg;   // pos: where its text begins in msg_arena
+typedef struct ChatMsg { TermHistoryEntry e; u64 pos; u64 arrived_us; } ChatMsg;   // pos: where its text begins in
+                                                                                    // msg_arena; arrived: new (fades in)
 typedef struct ChatBuilt { s64 line, block; u64 pos; } ChatBuilt;
 typedef struct Chat {
     u32 term;                 // its tab (0: free)
@@ -305,8 +311,8 @@ typedef struct Chat {
     s64 build_from;
     u64 asked_us;             // when they were last asked for
     b32 busy;                 // its claude's turn was under way (one more read when it ends)
-    u8 pending[4096];         // the prompt just sent: shown at once, until the transcript has a prompt from pending_at on
-    s32 pending_len;
+    u8 pending[4096];         // the prompts just sent, each ended by a 0 (a 1: sent while claude worked, "queued" until its
+    s32 pending_len;          // turn ends): shown at once, each until the transcript has a prompt from pending_at on
     u32 pending_at;
     u64 sent_us;
     u64 changed_us;           // when a reply last changed them (more may follow)
@@ -328,10 +334,20 @@ typedef struct Chat {
     s32 total_h;              // the lines' height, all of them
     u64 open[128];            // the tools' rows open (their keys)
     s32 open_count;
-    f32 scroll;               // px from the top
+    f32 scroll;               // px from the top (where it's going: scroll_shown eases there)
+    f32 scroll_shown;
+    u64 scroll_us;
     b32 follow;               // scroll the current match into view (or the end, with none)
     TextArea draft;           // its prompt box
+    b32 plan_folded;          // the plan's card shows only its heading
+    s32 sel_line[2], sel_byte[2];   // the text selected with the mouse: from where it was pressed [0] to [1]
+    b32 sel_on, selecting;
+    s32 copied_msg;           // the reply copied last (1-based message), when: "Copied" for a moment
 } Chat;
+
+// A question claude asks on its screen (a permission, a choice, a menu: numbered choices, one marked "❯"), read as a
+// card the conversation shows in place of its prompt: the question's last lines over the choices.
+typedef struct ChatDialog { String lines[6]; s32 line_count; String options[9]; s32 option_count, selected; } ChatDialog;
 
 // A page in the web history (web-history.txt): where, its title, how often and when last (seconds since 1601).
 typedef struct WebVisit { u8 url[512]; s32 url_len; u8 title[128]; s32 title_len; u32 visits; s64 last; } WebVisit;
@@ -1375,6 +1391,125 @@ static s32 ClaudePromptBox(const TermGrid *g)
     return (p == 0x276F || p == '>') && (sp == ' ' || sp == 0 || sp == 0xA0) ? top : -1;   // ❯, then a space (claude's is a no-break one)
 }
 
+// One row of a grid as text (UTF-8, its ends trimmed of spaces and a box's sides), in a.
+static String GridRowText(Arena *a, const TermGrid *g, s32 y)
+{
+    TextBuilder tb = { a, NULL, 0, 0 };
+    for (s32 x = 0; x < g->cols; x++) {
+        const TermCell *cell = &g->cells[(s64)y * g->cols + x];
+        if (cell->flags & TermCell_WideCont) continue;
+        u32 cp = cell->codepoint >= 0x20 && cell->codepoint != 0x2502 ? cell->codepoint : ' ';   // │ a box's side
+        u8 u[4];
+        TB_Append(&tb, (String){ u, Utf8_Encode(u, cp) });
+    }
+    String row = TB_String(&tb);
+    while (row.count && row.data[row.count - 1] == ' ') row.count--;
+    while (row.count && row.data[0] == ' ') { row.data++; row.count--; }
+    return row;
+}
+
+// Claude's question on its screen (ChatDialog), its choices' count; 0 when there's none it can be read from: numbered
+// rows "1." .. "N." (N >= 2) in the bottom 30, one of them marked "❯", the question's lines over them up to a rule.
+// d NULL: only whether there's one.
+static s32 ClaudeDialog(const TermGrid *g, Arena *a, ChatDialog *d)
+{
+    if (!g || g->cols < 8) return 0;
+    s32 ys[32] = {0}, nums[32] = {0}, starts[32] = {0}, found = 0;
+    b32 marks[32] = {0};
+    for (s32 y = g->rows - 1; y >= 0 && y >= g->rows - 30 && found < 32; y--) {
+        const TermCell *row = &g->cells[(s64)y * g->cols];
+        s32 x = 0;
+        while (x < g->cols && (row[x].codepoint == ' ' || row[x].codepoint == 0 || row[x].codepoint == 0x2502)) x++;
+        b32 mark = x < g->cols && row[x].codepoint == 0x276F;   // ❯
+        // (claude moves the cursor over the gaps: cells never written are 0)
+        if (mark) { x++; while (x < g->cols && (row[x].codepoint == ' ' || row[x].codepoint == 0 || row[x].codepoint == 0xA0)) x++; }
+        s32 num = 0, digits = 0;
+        while (x < g->cols && digits < 2 && row[x].codepoint >= '0' && row[x].codepoint <= '9') { num = num * 10 + (s32)(row[x].codepoint - '0'); x++; digits++; }
+        u32 after = x + 1 < g->cols ? row[x + 1].codepoint : 'x';
+        if (!digits || x + 1 >= g->cols || row[x].codepoint != '.' || !(after == ' ' || after == 0 || after == 0xA0)) continue;
+        ys[found] = y; nums[found] = num; marks[found] = mark; starts[found] = x + 2;
+        found++;
+    }
+    // the lowest "1.", then 2, 3, ... under it in order
+    s32 one = -1;
+    for (s32 k = 0; k < found && one < 0; k++) if (nums[k] == 1) one = k;
+    if (one < 0) return 0;
+    s32 count = 1, marked = marks[one] ? 0 : -1;
+    for (s32 k = one - 1; k >= 0 && count < 9 && nums[k] == count + 1; k--) { if (marks[k]) marked = count; count++; }
+    if (count < 2 || marked < 0) return 0;
+    if (!d) return count;
+    memset(d, 0, sizeof(*d));
+    d->option_count = count;
+    d->selected = marked;
+    for (s32 k = 0; k < count; k++) {
+        s32 at = one - k;
+        String row = GridRowText(a, g, ys[at]);
+        // the choice's text: after its number (the row's text starts where its first cell isn't blank)
+        s32 skip = 0;
+        while (skip < row.count && !(row.data[skip] >= '0' && row.data[skip] <= '9')) skip++;
+        while (skip < row.count && row.data[skip] >= '0' && row.data[skip] <= '9') skip++;
+        if (skip < row.count) skip++;   // its '.'
+        while (skip < row.count && row.data[skip] == ' ') skip++;
+        d->options[k] = (String){ row.data + skip, row.count - skip };
+    }
+    // the question: the rows over the first choice, up to a rule or 10 rows, blanks left out; its last 6
+    String lines[10];
+    s32 n = 0;
+    for (s32 y = ys[one] - 1; y >= 0 && y >= ys[one] - 10 && n < 10; y--) {
+        u32 c0 = 0;
+        for (s32 x = 0; x < g->cols && !c0; x++) if (g->cells[(s64)y * g->cols + x].codepoint > ' ') c0 = g->cells[(s64)y * g->cols + x].codepoint;
+        if (c0 == 0x2500 || c0 == 0x256D || c0 == 0x2570 || c0 == 0x254C) break;   // ─ ╭ ╰ ╌ the dialog's top
+        String row = GridRowText(a, g, y);
+        if (row.count) lines[n++] = row;
+    }
+    for (s32 k = Min(n, 6) - 1; k >= 0; k--) d->lines[d->line_count++] = lines[k];
+    return count;
+}
+
+// A claude tab showing its conversation now: it's wanted, and claude waits at its own prompt box or asks a question
+// that can be read off its screen (anything else shows its terminal).
+static b32 ChatShows(App *app, const AppFrameInput *in, const PaneTab *t)
+{
+    if (!ChatWanted(app, t)) return 0;
+    const TermGrid *g = FindGrid(in, t->term_id);
+    return ClaudePromptBox(g) >= 0 || ClaudeDialog(g, NULL, NULL) > 0;
+}
+
+// An ISO 8601 time ("2026-10-30T14:03:12.345Z", UTC) as seconds since 1970; 0 when it isn't one.
+static s64 IsoToUnix(String t)
+{
+    if (t.count < 19) return 0;
+    const u8 *ts = t.data;
+    s32 yy = (ts[0] - '0') * 1000 + (ts[1] - '0') * 100 + (ts[2] - '0') * 10 + (ts[3] - '0');
+    s32 mo = (ts[5] - '0') * 10 + (ts[6] - '0'), dd = (ts[8] - '0') * 10 + (ts[9] - '0');
+    s32 hh = (ts[11] - '0') * 10 + (ts[12] - '0'), mi = (ts[14] - '0') * 10 + (ts[15] - '0'), ss = (ts[17] - '0') * 10 + (ts[18] - '0');
+    s64 y = yy - (mo <= 2), era = (y >= 0 ? y : y - 399) / 400, yoe = y - era * 400;
+    s64 doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + dd - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (era * 146097 + doe - 719468) * 86400 + hh * 3600 + mi * 60 + ss;
+}
+
+// The text selected in a conversation: its lines from the first to the last, a line going on from the one before
+// joined to it, the others on lines of their own (a list item with its marker).
+static String ChatSelectionText(Arena *a, const Chat *cv)
+{
+    s32 l0 = cv->sel_line[0], b0 = cv->sel_byte[0], l1 = cv->sel_line[1], b1 = cv->sel_byte[1];
+    if (l1 < l0 || (l1 == l0 && b1 < b0)) { s32 tl = l0, tb = b0; l0 = l1; b0 = b1; l1 = tl; b1 = tb; }
+    TextBuilder tb = { a, NULL, 0, 0 };
+    for (s32 li = Max(0, l0); li <= l1 && li < (s32)cv->lines.count; li++) {
+        const HistLine *hl = &cv->lines.data[li];
+        if (hl->kind != HistLine_Text && hl->kind != HistLine_Heading && hl->kind != HistLine_Code && hl->kind != HistLine_ToolBody &&
+            hl->kind != HistLine_Note && hl->kind != HistLine_Blank) continue;   // not text (a tool's row, a picture)
+        if (li > l0 && !hl->wrapped) TB_Append(&tb, S("\n"));
+        s64 from = li == l0 ? Clamp(b0, 0, (s32)hl->text.count) : 0, to = li == l1 ? Clamp(b1, 0, (s32)hl->text.count) : hl->text.count;
+        if (from == 0 && hl->marker.count && hl->kind == HistLine_Text) {
+            if (Str_Equal(hl->marker, S("\xE2\x80\xA2"))) TB_Append(&tb, S("- "));
+            else TB_Format(&tb, "%.*s ", STR_ARG(hl->marker));
+        }
+        if (to > from) TB_Append(&tb, (String){ hl->text.data + from, to - from });
+    }
+    return TB_String(&tb);
+}
+
 // The sidebar's note on a session (sessions.txt): its index, -1 when it has none (add: a new, empty one).
 static s32 SessionMetaIndex(App *app, String id, b32 add)
 {
@@ -1453,13 +1588,18 @@ static void ChatSend(App *app, Frame *f, Chat *cv, b32 stop)
     if (!text.count) return;
     SendLine(app, f, cv->term, text);
     if (text.data[0] != '/') {
-        // a command (/clear, /model) isn't a prompt the transcript keeps
-        s32 len = (s32)Min(text.count, (s64)sizeof(cv->pending));
+        // a command (/clear, /model) isn't a prompt the transcript keeps; a prompt sent while others wait goes after them
+        s32 len = (s32)Min(text.count, (s64)sizeof(cv->pending) - cv->pending_len - 1);
         while (len < text.count && len > 0 && (text.data[len] & 0xC0) == 0x80) len--;
-        memcpy(cv->pending, text.data, (size_t)len);
-        cv->pending_len = len;
-        cv->pending_at = cv->base + (u32)cv->msgs.count;
-        ChatRebuild(cv, cv->msgs.count);
+        if (len > 0) {
+            const TermTab *st = FindServerTab(app, cv->term);
+            b32 working = (st && (st->flags & TermTab_Busy)) || ClaudeWorking(g, ClaudePromptBox(g));
+            if (!cv->pending_len) cv->pending_at = cv->base + (u32)cv->msgs.count;
+            memcpy(cv->pending + cv->pending_len, text.data, (size_t)len);
+            cv->pending_len += len;
+            cv->pending[cv->pending_len++] = working ? 1 : 0;
+            ChatRebuild(cv, cv->msgs.count);
+        }
     }
     cv->sent_us = f->in->now_us;
     cv->draft.count = cv->draft.cursor = cv->draft.mark = cv->draft.top = cv->draft.undo_len = 0;
@@ -2288,7 +2428,7 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
     case Cmd_NextPane: if (t) Panes_Select(&app->panes, Panes_Neighbor(&app->panes, t, 1)); break;
     case Cmd_EvenPanes: Panes_EvenChildren(app->panes.root, 1); Panes_ComputeRects(app->panes.root); break;
     case Cmd_ZoomIn: case Cmd_ZoomOut: case Cmd_ZoomReset:
-        if (t && ChatWanted(app, t) && ClaudePromptBox(FindGrid(f->in, t->term_id)) >= 0) {
+        if (t && ChatShows(app, f->in, t)) {
             // a conversation's text instead of the terminals'
             app->reader_pt = cmd == Cmd_ZoomReset ? 12 : Clamp(app->reader_pt + (cmd == Cmd_ZoomIn ? 1 : -1), 8, 28);
             SetSetting(f->out, S("reader_size"), Str_PushFormat(f->fa, "%g", (double)app->reader_pt));
@@ -2305,6 +2445,11 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
     case Cmd_Fullscreen: f->out->window_command = AppWindow_Fullscreen; break;
     case Cmd_Copy:
         if (t && t->browsing && t->browser) { BrowserCopy(f, t); break; }
+        if (t && ChatFor(app, t->term_id) && ChatFor(app, t->term_id)->sel_on && ChatShows(app, f->in, t)) {
+            f->out->clipboard_set = 1;
+            f->out->clipboard_text = ChatSelectionText(f->fa, ChatFor(app, t->term_id));
+            break;
+        }
         if (app->sel.visible && app->sel.term_id) {
             const TermGrid *sg = FindGrid(f->in, app->sel.term_id);
             if (sg) {
@@ -3080,6 +3225,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         Chat *cv = ChatFor(app, r->tab);
         if (!cv) continue;
         u32 have = (u32)cv->msgs.count;
+        u32 old_end = cv->base + have;   // messages past it are new (they fade in; not the first read's)
+        b32 had_any = cv->version != 0;
         if (r->from < cv->base || r->from > cv->base + have) {
             Arena_Clear(&cv->msg_arena);
             Arena_Clear(&cv->list_arena);
@@ -3101,9 +3248,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             m->e = r->entries[k];
             m->e.time = Str_PushCopy(&cv->msg_arena, r->entries[k].time);
             m->e.text = Str_PushCopy(&cv->msg_arena, r->entries[k].text);
-            // the prompt sent is in now (a "!" command comes in as a tool row named "!")
+            m->arrived_us = had_any && r->from + (u32)k >= old_end ? now : 0;
+            // the first prompt waiting is in now (a "!" command comes in as a tool row named "!"); the next one waits for
+            // a prompt after it
             b32 bang = m->e.kind == 2 && m->e.text.count >= 2 && m->e.text.data[0] == '!' && m->e.text.data[1] == 0x1f;
-            if ((m->e.kind == 1 || bang) && r->from + (u32)k >= cv->pending_at) cv->pending_len = 0;
+            if ((m->e.kind == 1 || bang) && r->from + (u32)k >= cv->pending_at && cv->pending_len) {
+                s32 drop = 0;
+                while (drop < cv->pending_len && cv->pending[drop] > 1) drop++;
+                drop = Min(drop + 1, cv->pending_len);
+                memmove(cv->pending, cv->pending + drop, (size_t)(cv->pending_len - drop));
+                cv->pending_len -= drop;
+                cv->pending_at = r->from + (u32)k + 1;
+            }
         }
         cv->version = r->version;
         cv->stable = r->stable;
@@ -3141,6 +3297,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         // every 400 ms while a turn runs, 4 s after a send, a change or the turn's end (its last reply can land in the
         // transcript a moment after claude's screen says it's done); else every 5 s, for anything missed
         if (cv->busy && !busy) cv->ended_us = now;
+        if (cv->busy != busy && cv->pending_len) ChatRebuild(cv, cv->msgs.count);   // "queued" comes and goes
         b32 polling = busy || cv->pending_len || now < cv->sent_us + 4000000 || now < cv->changed_us + 4000000 || now < cv->ended_us + 4000000;
         u64 every = polling ? 400000 : 5000000;
         if ((!cv->asked_us || now >= cv->asked_us + every) && out->history_ask_count < (s32)ArrayCount(out->history_asks)) {
@@ -3194,6 +3351,24 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 else if (e->key == Key_PageDown && !m) cv->scroll += (f32)page;
                 else if (e->key == Key_Home && m == Mod_Ctrl) cv->scroll = 0;
                 else if (e->key == Key_End && m == Mod_Ctrl) cv->scroll = 1e9f;
+                else if ((e->key == Key_Up || e->key == Key_Down) && m == Mod_Ctrl) {
+                    // the previous / next prompt of the user's at the top
+                    f32 to = -1;
+                    for (s64 li = 0; li < cv->lines.count; li++) {
+                        if (cv->lines.data[li].kind != HistLine_User) continue;
+                        f32 y = (f32)cv->lines.data[li].y - (f32)R(0.6);
+                        if (e->key == Key_Up && y < cv->scroll - 2) to = y;
+                        if (e->key == Key_Down && y > cv->scroll + 2) { to = y; break; }
+                    }
+                    if (to >= 0) cv->scroll = to;
+                    else if (e->key == Key_Up) cv->scroll = 0;
+                    else cv->scroll = 1e9f;
+                }
+                else if (e->key == Key_A + 'C' - 'A' && m == Mod_Ctrl && cv->sel_on) {
+                    out->clipboard_set = 1;
+                    out->clipboard_text = ChatSelectionText(fa, cv);
+                }
+                else if (e->key == Key_Escape && !m && cv->sel_on) cv->sel_on = 0;
                 else {
                     taken = 0;
                     if ((e->key == Key_A + 'V' - 'A' && m == Mod_Ctrl) || (e->key == Key_Insert && m == Mod_Shift)) out->save_clipboard_image = 1;   // the box pastes the text
@@ -4187,6 +4362,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
         }
     }
+    // --- a claude turn that ended while its tab wasn't in front (another tab shown, the window behind): a dot on the tab
+    //     until it's shown ---
+    for (PaneNode *n = panes->root; n; n = Panes_NextNode(n)) {
+        for (PaneTab *o = n->first_tab; o; o = o->next) {
+            const TermTab *ost = o->term_id ? FindServerTab(app, o->term_id) : NULL;
+            b32 obusy = ost && (ost->flags & TermTab_Busy);
+            b32 in_front = !o->hidden && (in->foreground || app->headless);
+            if (o->was_busy && !obusy && !in_front) o->done_unseen = 1;
+            if (in_front) o->done_unseen = 0;
+            o->was_busy = obusy;
+        }
+    }
     if (in->web_torn_off && FindPaneTab(panes, in->web_torn_off)) web_closed = FindPaneTab(panes, in->web_torn_off);   // its page opened in another window
     if (web_closed) {
         // gone from the list this frame too: its page closes
@@ -4358,7 +4545,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     b32 held = st && (st->flags & TermTab_AccountHeld);
                     Draw_Icon(dl, icons_small, icon, held ? c->danger : text_color, o->web ? Icon_Globe : o->browsing ? Icon_Folder : agent ? Icon_Robot : Icon_Prompt);
                 }
-                if (needs) Draw_Rect(dl, R4(icon.x1 - R(0.3), icon.y0 + RectH(icon) / 2 - R(0.8), icon.x1 + R(0.3), icon.y0 + RectH(icon) / 2 - R(0.2)), c->accent, (f32)R(0.3));
+                // a dot: the accent's when it needs the user (a question, a permission), green when a turn ended unseen
+                if (needs || o->done_unseen) Draw_Rect(dl, R4(icon.x1 - R(0.3), icon.y0 + RectH(icon) / 2 - R(0.8), icon.x1 + R(0.3), icon.y0 + RectH(icon) / 2 - R(0.2)),
+                                                       needs ? c->accent : 0xFF000000u | tt->ansi[2], (f32)R(0.3));
                 CutLeft(&inner, R(0.4));
                 inner.x1 = close.x0 - R(0.2);
                 if (st && st->account.count && app->account_count > 1 && !o->browsing) {
@@ -4559,7 +4748,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         b32 searching = t && app->find_open && app->find_history && app->find_term == t->term_id;
         const TermGrid *box_grid = ChatWanted(app, t) ? FindGrid(in, t->term_id) : NULL;
         s32 box_row = ClaudePromptBox(box_grid);
-        b32 chat_shown = box_row >= 0;
+        ChatDialog dialog = {0};   // claude asks something (its prompt box gone): shown as a card if it can be read
+        if (box_grid && box_row < 0) ClaudeDialog(box_grid, fa, &dialog);
+        b32 chat_shown = box_row >= 0 || dialog.option_count > 0;
         Chat *cv = t ? ChatFor(app, t->term_id) : NULL;
         if (t && t->web) {
             // --- a web page: the address row (back, forward, reload, the address: a click edits it), then the page,
@@ -4980,7 +5171,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             const Chrome *rc = &reader_c;
             // --- a claude tab's conversation: its transcript as an article over the prompt box, while claude waits at its
             //     own prompt box (a question or a menu shows its terminal instead); or its history searched ---
-            Font *sans = &in->fonts[Font_ReadSans], *sans_bold = &in->fonts[Font_ReadSansBold];
+            // an article: one column (about 70 characters, centered), a serif to read (the user's prompts too), a mono for code
+            Font *mono = &in->fonts[Font_Mono], *rfont = &in->fonts[Font_Read], *rbold = &in->fonts[Font_ReadBold], *rhead = &in->fonts[Font_ReadHead];
+            Font *rital = &in->fonts[Font_ReadItalic];
             const TermTab *cst = FindServerTab(app, t->term_id);
             b32 busy = (cst && (cst->flags & TermTab_Busy)) || ClaudeWorking(box_grid, box_row);
             Rect hv = content;
@@ -4994,7 +5187,49 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             s32 text_w = Max(R(10), Min(pw - 2 * R(3), (s32)(R(64) * app->reader_pt / 12)));
             s32 col_x = px0 + (pw - text_w) / 2;
-            if (chat_shown) {
+            if (chat_shown && dialog.option_count) {
+                // --- claude asks (a permission, a choice, a menu): its question as a card where the prompt was. A click on
+                //     a choice types its number; keys go to claude as they are (a number, the arrows, Enter, Esc), and its
+                //     screen says which choice is marked ---
+                s32 opt_h = R(2.4), qlh = (s32)(small->line_h * 1.55f);
+                s32 card_h = R(1.2) + dialog.line_count * qlh + R(0.5) + dialog.option_count * opt_h + R(2.6);
+                Rect dock = CutBottom(&hv, Min(RectH(hv), card_h + R(1.6)));
+                Rect card = R4(col_x - R(1.2), dock.y0 + R(0.4), col_x + text_w + R(1.2), dock.y0 + R(0.4) + card_h);
+                Draw_RectEx(dl, card, rc->surface, rc->line, (f32)line_w, radius_large, NULL, 0, 0, 0);
+                Named(app, S("chat question"), card);
+                s32 y = card.y0 + R(1.0);
+                for (s32 k = 0; k < dialog.line_count; k++) {
+                    b32 last = k == dialog.line_count - 1;   // the question itself ("Do you want to proceed?")
+                    Draw_TextIn(dl, last ? rfont : small, R4(col_x, y, col_x + text_w, y + qlh), last ? rc->text : rc->dim, dialog.lines[k], 0);
+                    y += qlh;
+                }
+                y += R(0.5);
+                for (s32 k = 0; k < dialog.option_count; k++) {
+                    Rect orow = R4(col_x - R(0.6), y, col_x + text_w + R(0.6), y + opt_h - R(0.3));
+                    u64 oid = Ui_IdN(Ui_IdN(Ui_Id("ChatChoice"), n->id), (u64)k);
+                    UiSignal os = Ui_Hit(ui, oid, orow);
+                    b32 marked = k == dialog.selected;
+                    Draw_Rect(dl, orow, marked ? ColorAlpha(rc->accent, 0.10f) : HoverFill(app, oid, os, rc->hover), radius_small);
+                    if (os.hovered) ui->cursor = Cursor_Hand;
+                    Rect ir = orow;
+                    CutLeft(&ir, R(0.8));
+                    Draw_TextIn(dl, small, CutLeft(&ir, R(1.8)), marked ? rc->accent : rc->faint, Str_PushFormat(fa, "%d", k + 1), 0);
+                    Draw_TextIn(dl, rfont, ir, marked ? rc->text : rc->dim, dialog.options[k], 0);
+                    Named(app, Str_PushFormat(fa, "chat choice %d", k + 1), orow);
+                    if (os.clicked) {
+                        // its number (as the key when the tab asked for win32-input-mode: '1'.. has scan code 2..)
+                        b32 win32 = (box_grid->flags & TermGrid_Win32Input) && !app->win32_input_off;
+                        u32 d = (u32)k + 1;
+                        TermSend(&f, t->term_id, win32 ? Str_PushFormat(fa, "\x1b[%u;%u;%u;1;0;1_\x1b[%u;%u;%u;0;0;1_", 0x30 + d, d + 1, 0x30 + d, 0x30 + d, d + 1, 0x30 + d)
+                                                       : Str_PushFormat(fa, "%u", d));
+                        Panes_Select(panes, t);
+                        Logf("app", "chat: choice %u for tab %u", d, t->term_id);
+                    }
+                    y += opt_h;
+                }
+                Draw_TextIn(dl, small, R4(col_x, y, col_x + text_w, card.y1 - R(0.6)), rc->faint,
+                            S("A number or a click picks  \xC2\xB7  \xE2\x86\x91\xE2\x86\x93 and Enter  \xC2\xB7  Esc cancels  \xC2\xB7  Ctrl+Shift+R the terminal"), 0);
+            } else if (chat_shown) {
                 // --- the prompt: written on the page itself, in the column's type and width, under a hairline (darker
                 //     while it has the keyboard), as tall as its text (a line to 40% of the pane); under it the keys, faint,
                 //     and on the right "Send" (or "Stop", while claude works and nothing's written), a word in the accent ---
@@ -5020,6 +5255,23 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Draw_TextIn(dl, small, sb, live ? (ss.hovered ? rc->text : rc->accent) : rc->faint, act, 1);
                 Named(app, stop ? S("chat stop") : S("chat send"), sb);
                 if (ss.clicked && live) ChatSend(app, &f, cv, stop);
+                // --- the context used: a hairline under the prompt filled as far as it goes, "62% of context" by Send (of
+                //     200k tokens; 1M for a [1m] model, or once past 200k) ---
+                String ctx = cst ? AccountPart(cst->account, 4) : (String){0};
+                if (ctx.count) {
+                    u64 tokens = strtoull((const char *)Str_PushCopy(fa, ctx).data, NULL, 10);
+                    u64 window = ContainsNoCase(AccountPart(cst->account, 3), S("[1m]")) || tokens > 200000 ? 1000000 : 200000;
+                    f32 used = Min(1.0f, (f32)tokens / (f32)window);
+                    u32 tone = used > 0.8f ? r_minus : rc->faint;
+                    s32 bar_y = dock.y1 - R(0.45);
+                    Draw_Rect(dl, R4(col_x, bar_y, col_x + text_w, bar_y + Max(1, line_w)), ColorMix(rc->bg, rc->line, 0.6f), 0);
+                    Draw_Rect(dl, R4(col_x, bar_y, col_x + (s32)((f32)text_w * used), bar_y + Max(1, line_w)), tone, 0);
+                    String pct = Str_PushFormat(fa, "%d%% of context", (s32)(used * 100.0f + 0.5f));
+                    CutRight(&foot, R(1.2));
+                    Rect pr = CutRight(&foot, Min(Font_Measure(small, pct), RectW(foot)));
+                    Draw_TextIn(dl, small, pr, tone, pct, 1);
+                    Named(app, S("chat context"), pr);
+                }
                 Draw_TextIn(dl, small, foot, rc->faint, S("Shift+Enter a new line  \xC2\xB7  Ctrl+Shift+R the terminal"), 0);
                 Named(app, S("chat prompt"), box);
                 // --- while claude works: a spinner and its own status line (the row over its prompt box: what it's
@@ -5056,10 +5308,129 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     if (!out->wake_at_us || next < out->wake_at_us) out->wake_at_us = next;
                 }
             }
+            for (s64 mi2 = cv->msgs.count - 1, shown_rows = 0; chat_shown && busy && mi2 >= 0 && mi2 >= cv->msgs.count - 64 && shown_rows < 3; mi2--) {
+                // --- what claude runs now: the tool waiting for its result (the last message), and subagents at work (in
+                //     the background: their tool's result came, their steps still do): what, for how long, a subagent's
+                //     last steps under it; the newest lowest ---
+                const ChatMsg *lm = &cv->msgs.data[mi2];
+                if (lm->e.kind != 2) continue;
+                String fields[4] = {0};
+                String rest = lm->e.text;
+                for (s32 k = 0; k < 4; k++) {
+                    s64 sep = 0;
+                    while (sep < rest.count && rest.data[sep] != 0x1F) sep++;
+                    fields[k] = (String){ rest.data, sep };
+                    rest = sep < rest.count ? (String){ rest.data + sep + 1, rest.count - sep - 1 } : (String){0};
+                }
+                s64 rs = 0;
+                while (rs < fields[3].count && fields[3].data[rs] != 0x1E) rs++;
+                b32 has_steps = rs < fields[3].count, waiting = mi2 == cv->msgs.count - 1 && !rs;
+                if (has_steps || waiting) {
+                    shown_rows++;
+                    String steps = has_steps ? (String){ fields[3].data + rs + 1, fields[3].count - rs - 1 } : (String){0};
+                    String step_lines[4] = {0};
+                    s32 step_count = 0, step_total = 0;
+                    for (s64 at = 0; at < steps.count && step_count < 4;) {
+                        s64 end = at;
+                        while (end < steps.count && steps.data[end] != '\n') end++;
+                        String sl2 = { steps.data + at, end - at };
+                        if (at == 0) step_total = (s32)strtol((const char *)Str_PushCopy(fa, sl2).data, NULL, 10);
+                        else step_lines[step_count++] = sl2;
+                        at = end + 1;
+                    }
+                    String name = fields[0];
+                    String verb = Str_Equal(name, S("Bash")) || Str_Equal(name, S("PowerShell")) || Str_Equal(name, S("!")) ? S("Running") :
+                                  Str_Equal(name, S("Read")) ? S("Reading") :
+                                  Str_Equal(name, S("Edit")) || Str_Equal(name, S("MultiEdit")) || Str_Equal(name, S("Write")) || Str_Equal(name, S("NotebookEdit")) ? S("Editing") :
+                                  Str_Equal(name, S("Grep")) || Str_Equal(name, S("Glob")) ? S("Searching") :
+                                  Str_Equal(name, S("WebFetch")) ? S("Fetching") : Str_Equal(name, S("WebSearch")) ? S("Searching the web") :
+                                  Str_Equal(name, S("Agent")) || Str_Equal(name, S("Task")) ? S("Agent") : name;
+                    // how long, from the tool's time (shown only when the clocks agree: not ahead, under a day)
+                    s64 since = (s64)(in->wall_time / 10000000ull) - 11644473600ll - IsoToUnix(lm->e.time);
+                    String took = since >= 0 && since < 86400 && lm->e.time.count ?
+                                  since >= 3600 ? Str_PushFormat(fa, "%d:%02d:%02d", (s32)(since / 3600), (s32)(since / 60 % 60), (s32)(since % 60)) :
+                                                  Str_PushFormat(fa, "%d:%02d", (s32)(since / 60), (s32)(since % 60)) : (String){0};
+                    if (step_total) took = Str_PushFormat(fa, "%d step%s%s%.*s", step_total, step_total == 1 ? "" : "s", took.count ? "  \xC2\xB7  " : "", STR_ARG(took));
+                    s32 step_h = R(1.7);
+                    Rect steps_r = CutBottom(&hv, step_count * step_h);
+                    Rect tr = CutBottom(&hv, R(2.2));
+                    Rect row = R4(col_x, tr.y0, col_x + text_w, tr.y1);
+                    CutLeft(&row, R(1.8));
+                    if (took.count) Draw_TextIn(dl, small, CutRight(&row, Min(Font_Measure(small, took) + R(0.6), RectW(row))), rc->dim, took, 1);
+                    Draw_TextIn(dl, font, CutLeft(&row, Min(Font_Measure(font, verb) + R(0.8), RectW(row))), rc->text, verb, 0);
+                    Draw_TextIn(dl, mono, row, rc->dim, fields[1], 0);
+                    Named(app, Str_PushFormat(fa, "chat running %.*s", STR_ARG(fields[1])), tr);
+                    for (s32 k = 0; k < step_count; k++) {
+                        Rect sr = R4(col_x + R(1.8), steps_r.y0 + k * step_h, col_x + text_w, steps_r.y0 + (k + 1) * step_h);
+                        Draw_TextIn(dl, small, sr, rc->faint, Str_PushFormat(fa, "\xE2\x86\xB3  %.*s", STR_ARG(step_lines[k])), 0);
+                    }
+                    u64 next = (now / 1000000 + 1) * 1000000;   // the time goes on
+                    if (!out->wake_at_us || next < out->wake_at_us) out->wake_at_us = next;
+                }
+            }
+            if (chat_shown) {
+                // --- the plan (the newest TodoWrite or task list) while its turn goes on and something on it isn't done:
+                //     pinned over the prompt, done items struck through, the current one in the accent; its heading folds it ---
+                const ChatMsg *pm = NULL;
+                for (s64 k = cv->msgs.count - 1; k >= 0 && !pm && cv->msgs.data[k].e.kind != 6; k--) if (cv->msgs.data[k].e.kind == 5) pm = &cv->msgs.data[k];
+                String st[64], tx[64];
+                s32 ni = 0, done = 0, current = -1;
+                for (s64 at = 0; pm && at < pm->e.text.count && ni < 64;) {
+                    s64 end = at;
+                    while (end < pm->e.text.count && pm->e.text.data[end] != '\n') end++;
+                    String item = { pm->e.text.data + at, end - at };
+                    at = end + 1;
+                    s64 s1 = 0;
+                    while (s1 < item.count && item.data[s1] != 0x1F) s1++;
+                    s64 s2 = s1 + 1;
+                    while (s2 < item.count && item.data[s2] != 0x1F) s2++;
+                    String status = { item.data, s1 };
+                    if (Str_Equal(status, S("deleted"))) continue;
+                    String text = s1 < item.count ? (String){ item.data + s1 + 1, Min(s2, item.count) - s1 - 1 } : (String){0};
+                    String active = s2 < item.count ? (String){ item.data + s2 + 1, item.count - s2 - 1 } : (String){0};
+                    b32 now_doing = Str_Equal(status, S("in_progress"));
+                    if (now_doing && current < 0) current = ni;
+                    done += Str_Equal(status, S("completed"));
+                    st[ni] = status;
+                    tx[ni] = now_doing && active.count ? active : text;
+                    ni++;
+                }
+                if (ni && done < ni) {
+                    s32 most = 8, first = ni > most ? Clamp(current - 2, 0, ni - most) : 0, shown = Min(ni, most);
+                    s32 item_h = R(1.9), head_h = R(2.3);
+                    s32 card_h = head_h + (cv->plan_folded ? 0 : shown * item_h + R(0.5));
+                    Rect pr = CutBottom(&hv, card_h + R(1.0));
+                    Rect card = R4(col_x - R(1.2), pr.y0, col_x + text_w + R(1.2), pr.y0 + card_h);
+                    Draw_RectEx(dl, card, rc->surface, rc->line, (f32)line_w, radius_medium, NULL, 0, 0, 0);
+                    Rect head = R4(card.x0, card.y0, card.x1, card.y0 + head_h);
+                    u64 pid = Ui_IdN(Ui_Id("ChatPlan"), n->id);
+                    UiSignal ps2 = Ui_Hit(ui, pid, head);
+                    Rect hr = head;
+                    CutLeft(&hr, R(1.0));
+                    Draw_Icon(dl, icons_small, CutLeft(&hr, R(1.6)), rc->dim, cv->plan_folded ? Icon_ChevronRight : Icon_ChevronDown);
+                    Draw_TextIn(dl, bold, CutLeft(&hr, Min(Font_Measure(bold, S("Plan")) + R(0.8), RectW(hr))), rc->text, S("Plan"), 0);
+                    String count = Str_PushFormat(fa, "%d of %d done", done, ni);
+                    if (cv->plan_folded && current >= 0) count = Str_PushFormat(fa, "%d of %d done  \xC2\xB7  %.*s", done, ni, STR_ARG(tx[current]));
+                    Draw_TextIn(dl, small, hr, rc->dim, count, 0);
+                    Named(app, S("chat plan"), head);
+                    if (ps2.clicked) cv->plan_folded = !cv->plan_folded;
+                    for (s32 k = 0; k < shown && !cv->plan_folded; k++) {
+                        s32 ii = first + k;
+                        Rect ir = R4(col_x, card.y0 + head_h + k * item_h, col_x + text_w, card.y0 + head_h + (k + 1) * item_h);
+                        b32 is_done = Str_Equal(st[ii], S("completed")), is_now = Str_Equal(st[ii], S("in_progress"));
+                        String mark = is_done ? S("\xE2\x9C\x93") : is_now ? S("\xE2\x97\x8F") : S("\xE2\x97\x8B");   // ✓ ● ○
+                        Draw_TextIn(dl, small, CutLeft(&ir, R(1.8)), is_done ? r_plus : is_now ? rc->accent : rc->faint, mark, 0);
+                        u32 col = is_done ? rc->faint : is_now ? rc->text : rc->dim;
+                        Draw_TextIn(dl, is_now ? bold : font, ir, col, tx[ii], 0);
+                        if (is_done) {
+                            s32 w = Min(Font_Measure(font, tx[ii]), RectW(ir)), my = (ir.y0 + ir.y1) / 2;
+                            Draw_Rect(dl, R4(ir.x0, my, ir.x0 + w, my + Max(1, line_w)), rc->faint, 0);
+                        }
+                    }
+                }
+            }
             String q = searching ? TextEdit_String(&app->find_edit) : (String){0};
             if ((q.count > 0) != cv->unfold) { cv->unfold = q.count > 0; ChatRebuild(cv, 0); }   // searching opens every run of tools
-            // an article: one column (about 70 characters, centered), a serif to read, a sans for headings, a mono for code
-            Font *mono = &in->fonts[Font_Mono], *rfont = &in->fonts[Font_Read], *rbold = &in->fonts[Font_ReadBold], *rhead = &in->fonts[Font_ReadHead];
             s32 view_h = Max(1, RectH(hv));
             s32 bubble = R(1.2);   // a prompt's bubble: its text this far in
             s32 lh = R(1.55);
@@ -5092,23 +5463,28 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     cv->arena.used = pos;
                     cv->built_at.count = from;
                 }
-                // the messages, then the prompt just sent (until the transcript has it)
-                TermHistoryEntry pend = { 1, 1, {0}, { cv->pending, cv->pending_len } };
+                if (from >= 0 && (cv->sel_line[0] >= first_line || cv->sel_line[1] >= first_line)) cv->sel_on = cv->selecting = 0;   // its lines went
+                // the messages, then the prompts just sent (until the transcript has them; "queued" while claude works)
+                String queued[8];
+                b32 queued_busy[8] = {0};   // sent while claude worked
+                s32 queued_count = 0;
+                for (s32 p = 0; p < cv->pending_len && queued_count < 8;) {
+                    s32 e = p;
+                    while (e < cv->pending_len && cv->pending[e] > 1) e++;
+                    queued_busy[queued_count] = e < cv->pending_len && cv->pending[e] == 1;
+                    queued[queued_count++] = (String){ cv->pending + p, e - p };
+                    p = e + 1;
+                }
                 s64 run_end = 0;   // an open run of tools: where it ends (its rows indented under its own)
-                for (s64 i = from; i >= 0 && i <= cv->msgs.count; i++) {
+                for (s64 i = from; i >= 0 && i <= cv->msgs.count + queued_count; i++) {
                     *Array_Push(&cv->lists_arena, cv->built_at) = (ChatBuilt){ cv->lines.count, cv->blocks.count, cv->arena.used };
-                    if (i == cv->msgs.count && !cv->pending_len) break;
+                    if (i == cv->msgs.count + queued_count) break;
+                    TermHistoryEntry pend = { 1, 1, {0}, i >= cv->msgs.count ? queued[i - cv->msgs.count] : (String){0} };
                     const TermHistoryEntry *he = i < cv->msgs.count ? &cv->msgs.data[i].e : &pend;
                     // its time (ISO 8601, UTC) in local time: "Today 14:03", "Yesterday 09:12", "Oct 12 14:03"
-                    String when = {0};
-                    if (he->time.count >= 16) {
-                        const u8 *ts = he->time.data;
-                        s32 yy = (ts[0] - '0') * 1000 + (ts[1] - '0') * 100 + (ts[2] - '0') * 10 + (ts[3] - '0');
-                        s32 mo = (ts[5] - '0') * 10 + (ts[6] - '0'), dd = (ts[8] - '0') * 10 + (ts[9] - '0');
-                        s32 hh = (ts[11] - '0') * 10 + (ts[12] - '0'), mi = (ts[14] - '0') * 10 + (ts[15] - '0');
-                        s64 y = yy - (mo <= 2), era = (y >= 0 ? y : y - 399) / 400, yoe = y - era * 400;
-                        s64 doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + dd - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-                        s64 secs = (era * 146097 + doe - 719468) * 86400 + hh * 3600 + mi * 60 + (s64)in->utc_offset_minutes * 60;
+                    String when = i >= cv->msgs.count && cv->busy && queued_busy[i - cv->msgs.count] ? S("queued") : (String){0};
+                    if (he->time.count >= 19) {
+                        s64 secs = IsoToUnix(he->time) + (s64)in->utc_offset_minutes * 60;
                         s64 now_secs = (s64)(in->wall_time / 10000000ull) - 11644473600ll + (s64)in->utc_offset_minutes * 60;
                         s64 day = (secs >= 0 ? secs : secs - 86399) / 86400, today = (now_secs >= 0 ? now_secs : now_secs - 86399) / 86400;
                         s32 ly = 0, lm = 0, ld = 0, ty = 0, tm = 0, td = 0;
@@ -5119,6 +5495,148 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         else if (day == today - 1) when = Str_PushFormat(&cv->arena, "Yesterday %02d:%02d", lhr, lmin);
                         else if (ly == ty) when = Str_PushFormat(&cv->arena, "%s %d %02d:%02d", g_Months[(lm + 11) % 12], ld, lhr, lmin);
                         else when = Str_PushFormat(&cv->arena, "%s %d, %d %02d:%02d", g_Months[(lm + 11) % 12], ld, ly, lhr, lmin);
+                    }
+                    if (he->kind == 5) {
+                        // --- the plan, as claude made or changed it: a row ("Plan  2 of 5 done"); open, its items ---
+                        if (!cv->lines.count || cv->lines.data[cv->lines.count - 1].user) {
+                            HistLine *ch = Array_Push(&cv->lists_arena, cv->lines);
+                            ch->kind = HistLine_Claude;
+                            ch->text = Str_PushFormat(&cv->arena, "Claude  %.*s", STR_ARG(when));
+                        }
+                        String plan = Str_PushCopy(&cv->arena, he->text);
+                        s32 items = 0, done = 0;
+                        for (s64 at = 0; at < plan.count;) {
+                            s64 end = at;
+                            while (end < plan.count && plan.data[end] != '\n') end++;
+                            String item = { plan.data + at, end - at };
+                            at = end + 1;
+                            if (item.count > 7 && !memcmp(item.data, "deleted", 7)) continue;
+                            items++;
+                            done += item.count > 9 && !memcmp(item.data, "completed", 9);
+                        }
+                        HistLine *pl = Array_Push(&cv->lists_arena, cv->lines);
+                        pl->kind = HistLine_Tool;
+                        pl->marker = S("Plan");
+                        pl->text = Str_PushFormat(&cv->arena, "%d of %d done", done, items);
+                        pl->key = Hash_Bytes(he->time.data, (u64)he->time.count, 0x91A4 + cv->base + (u64)i);
+                        pl->msg = (s32)i;
+                        pl->first = ChatOpenIndex(cv, pl->key) >= 0;
+                        b32 first_item = 1;
+                        for (s64 at = 0; pl->first && at < plan.count;) {
+                            s64 end = at;
+                            while (end < plan.count && plan.data[end] != '\n') end++;
+                            String item = { plan.data + at, end - at };
+                            at = end + 1;
+                            s64 s1 = 0;
+                            while (s1 < item.count && item.data[s1] != 0x1F) s1++;
+                            s64 s2 = s1 + 1;
+                            while (s2 < item.count && item.data[s2] != 0x1F) s2++;
+                            String status = { item.data, s1 };
+                            if (Str_Equal(status, S("deleted")) || s1 >= item.count) continue;
+                            String what = { item.data + s1 + 1, Min(s2, item.count) - s1 - 1 };
+                            HistLine *bl = Array_Push(&cv->lists_arena, cv->lines);
+                            bl->kind = HistLine_ToolBody;
+                            bl->block = 5;   // a plan's item: its mark the status's
+                            bl->text = Str_PushFormat(&cv->arena, "%s %.*s", Str_Equal(status, S("completed")) ? "\xE2\x9C\x93" : Str_Equal(status, S("in_progress")) ? "\xE2\x97\x8F" : "\xE2\x97\x8B", STR_ARG(what));
+                            bl->first = first_item;
+                            first_item = 0;
+                        }
+                        if (cv->lines.data[cv->lines.count - 1].kind == HistLine_ToolBody) cv->lines.data[cv->lines.count - 1].last = 1;
+                        continue;
+                    }
+                    if (he->kind == 6) {
+                        // --- a turn's end: how long claude worked, and what the turn's edits changed ("+48 -12 in 3 files",
+                        //     a click opens them: each file, its edits as '-' / '+' lines) ---
+                        u64 ms = 0;
+                        for (s64 k = 0; k < he->text.count && he->text.data[k] >= '0' && he->text.data[k] <= '9'; k++) ms = ms * 10 + (u64)(he->text.data[k] - '0');
+                        u64 s = (ms + 500) / 1000;
+                        String worked = s >= 3600 ? Str_PushFormat(&cv->arena, "Worked %lluh %llum", (unsigned long long)(s / 3600), (unsigned long long)(s / 60 % 60)) :
+                                        s >= 60 ? Str_PushFormat(&cv->arena, "Worked %llum %llus", (unsigned long long)(s / 60), (unsigned long long)(s % 60)) :
+                                                  Str_PushFormat(&cv->arena, "Worked %llus", (unsigned long long)s);
+                        // the turn: back to its prompt
+                        s64 k0 = i;
+                        while (k0 > 0 && cv->msgs.data[k0 - 1].e.kind != 1) k0--;
+                        String files[32];
+                        s32 file_count = 0, plus = 0, minus = 0;
+                        for (s64 k = k0; k < i; k++) {
+                            const TermHistoryEntry *te = &cv->msgs.data[k].e;
+                            if (te->kind != 2) continue;
+                            String tf[3] = {0};
+                            String tr2 = te->text;
+                            for (s32 p = 0; p < 3; p++) {
+                                s64 sep = 0;
+                                while (sep < tr2.count && tr2.data[sep] != 0x1F) sep++;
+                                tf[p] = (String){ tr2.data, sep };
+                                tr2 = sep < tr2.count ? (String){ tr2.data + sep + 1, tr2.count - sep - 1 } : (String){0};
+                            }
+                            b32 write = Str_Equal(tf[0], S("Write"));
+                            if (!write && !Str_Equal(tf[0], S("Edit")) && !Str_Equal(tf[0], S("MultiEdit"))) continue;
+                            s32 fi = 0;
+                            while (fi < file_count && !Str_EqualNoCase(files[fi], tf[1])) fi++;
+                            if (fi == file_count && file_count < 32) files[file_count++] = tf[1];
+                            for (s64 at = 0; at < tf[2].count;) {
+                                s64 end = at;
+                                while (end < tf[2].count && tf[2].data[end] != '\n') end++;
+                                if (write) plus++;
+                                else if (tf[2].data[at] == '+') plus++;
+                                else if (tf[2].data[at] == '-') minus++;
+                                at = end + 1;
+                            }
+                        }
+                        HistLine *fl = Array_Push(&cv->lists_arena, cv->lines);
+                        fl->kind = HistLine_Footer;
+                        fl->text = file_count ? Str_PushFormat(&cv->arena, "%.*s  \xC2\xB7  +%d \xE2\x88\x92%d in %d file%s", STR_ARG(worked), plus, minus, file_count, file_count == 1 ? "" : "s") : worked;
+                        fl->block = (s32)worked.count;   // where the changes' part starts
+                        fl->key = Hash_Bytes(he->time.data, (u64)he->time.count, 0xF007 + cv->base + (u64)i);
+                        fl->msg = (s32)i;
+                        fl->first = file_count && ChatOpenIndex(cv, fl->key) >= 0;
+                        s32 budget = 600;
+                        for (s32 fi = 0; fl->first && fi < file_count && budget > 0; fi++) {
+                            HistLine *hd = Array_Push(&cv->lists_arena, cv->lines);
+                            hd->kind = HistLine_ToolBody;
+                            hd->block = 4;   // a file's name over its edits
+                            hd->text = Str_PushCopy(&cv->arena, files[fi]);
+                            hd->first = fi == 0;
+                            for (s64 k = k0; k < i && budget > 0; k++) {
+                                const TermHistoryEntry *te = &cv->msgs.data[k].e;
+                                if (te->kind != 2) continue;
+                                String tf[3] = {0};
+                                String tr2 = te->text;
+                                for (s32 p = 0; p < 3; p++) {
+                                    s64 sep = 0;
+                                    while (sep < tr2.count && tr2.data[sep] != 0x1F) sep++;
+                                    tf[p] = (String){ tr2.data, sep };
+                                    tr2 = sep < tr2.count ? (String){ tr2.data + sep + 1, tr2.count - sep - 1 } : (String){0};
+                                }
+                                b32 write = Str_Equal(tf[0], S("Write"));
+                                if ((!write && !Str_Equal(tf[0], S("Edit")) && !Str_Equal(tf[0], S("MultiEdit"))) || !Str_EqualNoCase(tf[1], files[fi])) continue;
+                                String body = Str_PushCopy(&cv->arena, tf[2]);
+                                for (s64 at = 0; at < body.count && budget > 0;) {
+                                    s64 end = at;
+                                    while (end < body.count && body.data[end] != '\n') end++;
+                                    String bl = { body.data + at, end - at };
+                                    if (bl.count && bl.data[bl.count - 1] == '\r') bl.count--;
+                                    if (write) bl = Str_PushFormat(&cv->arena, "+%.*s", STR_ARG(bl));
+                                    b32 wrapped = 0;
+                                    do {
+                                        s64 cut = bl.count ? Max((s64)1, Font_Fit(mono, bl, text_w - R(3))) : 0;
+                                        while (cut < bl.count && (bl.data[cut] & 0xC0) == 0x80) cut++;
+                                        HistLine *dline = Array_Push(&cv->lists_arena, cv->lines);
+                                        dline->kind = HistLine_ToolBody;
+                                        dline->block = 2;
+                                        dline->text = (String){ bl.data, cut };
+                                        dline->wrapped = wrapped;
+                                        wrapped = 1;
+                                        bl.data += cut;
+                                        bl.count -= cut;
+                                        budget--;
+                                    } while (bl.count && budget > 0);
+                                    at = end + 1;
+                                }
+                            }
+                        }
+                        if (cv->lines.data[cv->lines.count - 1].kind == HistLine_ToolBody) cv->lines.data[cv->lines.count - 1].last = 1;
+                        continue;
                     }
                     if (he->kind == 2 || he->kind == 4) {
                         // --- a tool claude used: a row (its name, what it worked on); open, its detail (an edit as a
@@ -5131,6 +5649,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             fields[k] = (String){ rest.data, sep };
                             rest = sep < rest.count ? (String){ rest.data + sep + 1, rest.count - sep - 1 } : (String){0};
                         }
+                        for (s64 k = 0; k < fields[3].count; k++) if (fields[3].data[k] == 0x1E) { fields[3].count = k; break; }   // a subagent's steps
                         // a turn that starts with a tool: its "Claude" line first
                         if (!cv->lines.count || cv->lines.data[cv->lines.count - 1].user) {
                             HistLine *ch = Array_Push(&cv->lists_arena, cv->lines);
@@ -5208,6 +5727,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                                     bline->block = part;           // 2 the detail, 3 the result
                                     bline->first = first_of_part;  // a result's first line: a rule over it
                                     bline->indent = tl->indent;
+                                    bline->wrapped = bl.data != body.data + at;
                                     first_of_part = 0;
                                     bl.data += cut;
                                     bl.count -= cut;
@@ -5236,6 +5756,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                                 HistLine *nt = Array_Push(&cv->lists_arena, cv->lines);
                                 nt->kind = HistLine_Note;
                                 nt->text = (String){ nl.data, cut };
+                                nt->wrapped = nl.data != note.data + at;
                                 nt->first = first_note;
                                 first_note = 0;
                                 nl.data += cut;
@@ -5294,6 +5815,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                                 cl->kind = HistLine_Code;
                                 cl->text = (String){ rest.data, cut };
                                 cl->block = (s32)cv->blocks.count;
+                                cl->wrapped = rest.data != raw.data;
                                 cl->first = first_of_block;
                                 if (first_of_block) cl->marker = code_lang;
                                 first_of_block = 0;
@@ -5353,7 +5875,13 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         b32 rule = trim.count >= 3;
                         for (s64 k = 0; k < trim.count; k++) rule &= trim.data[k] == trim.data[0] && strchr("-*_", trim.data[0]) != NULL;
                         if (rule) { Array_Push(&cv->lists_arena, cv->lines)->kind = HistLine_Rule; at = end + 1; continue; }
-                        // a heading, a list item, or a paragraph line
+                        // a heading, a list item, or a paragraph line (in a block quote: "> ", a bar at its left)
+                        b32 quote = trim.data[0] == '>';
+                        if (quote) {
+                            trim.data++; trim.count--;
+                            if (trim.count && trim.data[0] == ' ') { trim.data++; trim.count--; }
+                            if (!trim.count) { Array_Push(&cv->lists_arena, cv->lines)->kind = HistLine_Blank; at = end + 1; continue; }
+                        }
                         u32 kind = HistLine_Text;
                         b32 head_bold = 0;
                         String marker = {0};
@@ -5378,25 +5906,107 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             }
                         }
                         if (marker.count) indent = (lead / 2) * R(1.4) + R(1.6);
-                        // bold and code taken out of the text, kept as spans
-                        u8 *plain = Arena_PushArray(&cv->arena, u8, trim.count + 1);
+                        if (quote) indent += R(1.4);
+                        // --- bold, italic, `code` and links taken out of the text, kept as spans (a link's address with
+                        //     it; a `code` run naming a file is a path, opened with a click); quotes made curly ---
+                        u8 *plain = Arena_PushArray(&cv->arena, u8, trim.count * 3 + 1);
                         HistSpan *spans = Arena_PushArray(&cv->arena, HistSpan, trim.count / 2 + 2);
                         s32 span_count = 0, pn = 0;
                         u32 style = head_bold ? HistSpan_Bold : 0;
                         s32 span_from = 0;
                         for (s64 k = 0; k < trim.count; k++) {
+                            u8 ch = trim.data[k], prev = k ? trim.data[k - 1] : ' ', next = k + 1 < trim.count ? trim.data[k + 1] : ' ';
+                            b32 code = (style & HistSpan_Code) != 0;
                             u32 flip = 0;
-                            if (trim.data[k] == '`') flip = HistSpan_Code;
-                            else if (!(style & HistSpan_Code) && k + 1 < trim.count && trim.data[k] == '*' && trim.data[k + 1] == '*') { flip = HistSpan_Bold; k++; }
-                            if (!flip) { plain[pn++] = trim.data[k]; continue; }
-                            if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
+                            if (ch == '`') flip = HistSpan_Code;
+                            else if (!code && ch == '*' && next == '*') { flip = HistSpan_Bold; k++; }
+                            else if (!code && (ch == '*' || ch == '_')) {
+                                // italic opens before a word when it closes later in the line, and closes after one
+                                // (snake_case, __init__ and 2 * 3 stay as they are)
+                                b32 later = k + 2 < trim.count && memchr(trim.data + k + 2, ch, (size_t)(trim.count - k - 2)) != NULL;
+                                b32 opens = !(style & HistSpan_Italic) && later && (ch == '_' ? isalnum(next) : next != ' ' && next != '*') && strchr(" ([\"'", prev) != NULL;
+                                b32 closes = (style & HistSpan_Italic) && (ch == '_' ? isalnum(prev) : prev != ' ') && !isalnum(next);
+                                if (opens || closes) flip = HistSpan_Italic;
+                            }
+                            if (!flip && !code) {
+                                // a link: [text](address), or an address written out
+                                String shown = {0}, url = {0};
+                                s64 skip_to = k;
+                                if (ch == '[') {
+                                    s64 close = k + 1;
+                                    while (close < trim.count && trim.data[close] != ']') close++;
+                                    s64 paren = close + 1;
+                                    s64 end2 = paren + 1;
+                                    while (end2 < trim.count && trim.data[end2] != ')' && trim.data[end2] != ' ') end2++;
+                                    if (paren < trim.count && trim.data[paren] == '(' && end2 < trim.count && trim.data[end2] == ')' && close > k + 1) {
+                                        shown = (String){ trim.data + k + 1, close - k - 1 };
+                                        url = (String){ trim.data + paren + 1, end2 - paren - 1 };
+                                        skip_to = end2;
+                                    }
+                                } else if ((ch == 'h' && !isalnum(prev)) &&
+                                           ((trim.count - k > 8 && !memcmp(trim.data + k, "https://", 8)) || (trim.count - k > 7 && !memcmp(trim.data + k, "http://", 7)))) {
+                                    s64 end2 = k;
+                                    while (end2 < trim.count && !strchr(" <>\"`", trim.data[end2])) end2++;
+                                    while (end2 > k && strchr(".,;:!?)'", trim.data[end2 - 1])) end2--;
+                                    shown = url = (String){ trim.data + k, end2 - k };
+                                    skip_to = end2 - 1;
+                                }
+                                if (url.count) {
+                                    if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
+                                    memcpy(plain + pn, shown.data, (size_t)shown.count);
+                                    spans[span_count++] = (HistSpan){ pn, (s32)shown.count, style | HistSpan_Link, url };
+                                    pn += (s32)shown.count;
+                                    span_from = pn;
+                                    k = skip_to;
+                                    continue;
+                                }
+                            }
+                            if (!flip) {
+                                if (!code && (ch == '"' || ch == '\'')) {
+                                    // curly: opening after a space or a bracket, else closing (an apostrophe)
+                                    b32 open = strchr(" ([{\t", prev) != NULL;
+                                    memcpy(plain + pn, ch == '"' ? (open ? "\xE2\x80\x9C" : "\xE2\x80\x9D") : (open ? "\xE2\x80\x98" : "\xE2\x80\x99"), 3);
+                                    pn += 3;
+                                } else if (!code && ch == '-' && next == '-' && prev == ' ' && k + 2 < trim.count && trim.data[k + 2] == ' ') {
+                                    memcpy(plain + pn, "\xE2\x80\x94", 3);   // " -- " a dash
+                                    pn += 3;
+                                    k++;
+                                } else {
+                                    plain[pn++] = ch;
+                                }
+                                continue;
+                            }
+                            if (style && pn > span_from) {
+                                HistSpan sp = { span_from, pn - span_from, style };
+                                if (flip == HistSpan_Code && code) {
+                                    // a `code` run that names a file (a folder in it, or a source file's extension; no
+                                    // spaces, no address): a path
+                                    String run = { plain + span_from, pn - span_from };
+                                    b32 path = run.count >= 3 && !memchr(run.data, ' ', (size_t)run.count) && !ContainsNoCase(run, S("://")) && run.data[0] != '-';
+                                    if (path && !memchr(run.data, '/', (size_t)run.count) && !memchr(run.data, '\\', (size_t)run.count)) {
+                                        static const char *const exts[] = { ".c", ".h", ".cpp", ".hpp", ".cc", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".md",
+                                                                            ".txt", ".rs", ".go", ".java", ".cs", ".lua", ".bat", ".ps1", ".sh", ".toml", ".yaml",
+                                                                            ".yml", ".html", ".css" };
+                                        String name = run;
+                                        for (s64 c2 = 0; c2 < name.count; c2++) if (name.data[c2] == ':') { name.count = c2; break; }   // its :line
+                                        path = 0;
+                                        for (s32 x = 0; x < (s32)ArrayCount(exts) && !path; x++) {
+                                            s64 el = (s64)strlen(exts[x]);
+                                            path = name.count > el && Str_EqualNoCase((String){ name.data + name.count - el, el }, (String){ (u8 *)exts[x], el });
+                                        }
+                                    }
+                                    if (path) { sp.style |= HistSpan_Path; sp.url = run; }
+                                }
+                                spans[span_count++] = sp;
+                            }
                             style ^= flip;
                             span_from = pn;
                         }
                         if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
                         String para = { plain, pn };
-                        Font *pf = kind == HistLine_Heading ? rhead : he->from_user ? sans : rfont;
-                        Font *pbold = kind == HistLine_Heading ? rhead : he->from_user ? sans_bold : rbold;
+                        Font *pf = kind == HistLine_Heading ? rhead : quote ? rital : rfont;
+                        Font *pbold = kind == HistLine_Heading ? rhead : rbold;
+                        Font *pital = kind == HistLine_Heading ? rhead : quote ? rfont : rital;
                         s32 line_from = 0;
                         while (line_from < para.count || (!para.count && !line_from)) {
                             String rest = { para.data + line_from, para.count - line_from };
@@ -5411,7 +6021,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                                     else span_end = spans[k].start;
                                     break;
                                 }
-                                Font *rf = (st & HistSpan_Code) ? mono : st ? pbold : pf;
+                                Font *rf = (st & HistSpan_Code) ? mono : (st & HistSpan_Bold) ? pbold : (st & HistSpan_Italic) ? pital : pf;
                                 if (st & HistSpan_Code) used += R(0.4);
                                 String run = { para.data + fit_to, span_end - fit_to };
                                 s64 fit = Font_Fit(rf, run, msg_w - indent - used);
@@ -5430,11 +6040,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                             tl->kind = kind;
                             tl->text = (String){ rest.data, cut };
                             tl->indent = indent;
+                            tl->quote = quote;
+                            tl->wrapped = line_from > 0;
                             tl->marker = line_from == 0 ? marker : (String){0};
                             tl->spans = Arena_PushArray(&cv->arena, HistSpan, span_count + 1);
                             for (s32 k = 0; k < span_count; k++) {
                                 s32 a = Max(spans[k].start, line_from), b = Min(spans[k].start + spans[k].len, line_from + (s32)cut);
-                                if (b > a) tl->spans[tl->span_count++] = (HistSpan){ a - line_from, b - a, spans[k].style };
+                                if (b <= a) continue;
+                                HistSpan sp = spans[k];
+                                sp.start = a - line_from;
+                                sp.len = b - a;
+                                tl->spans[tl->span_count++] = sp;
                             }
                             line_from += (s32)cut;
                             if (!cut) break;
@@ -5479,6 +6095,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         il->user = he->from_user;
                     }
                 }
+                // each line's message (a reply's copy button, a new message fading in)
+                for (s64 k = Max(from, (s64)0); from >= 0 && k + 1 < cv->built_at.count; k++) {
+                    for (s64 li = cv->built_at.data[k].line; li < cv->built_at.data[k + 1].line; li++) cv->lines.data[li].msg = (s32)k;
+                }
                 // --- each line's place: its height by what it is, a gap before a message, a heading, a code block (from
                 //     the line before the first built again: how it ends depends on the next) ---
                 s64 place_from = from < 0 ? cv->lines.count : Max((s64)0, first_line - 1);
@@ -5494,7 +6114,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     else if (hl->kind == HistLine_Blank) h = R(0.9);
                     else if (hl->kind == HistLine_Rule) h = R(2.0);
                     else if (hl->kind == HistLine_Tool || hl->kind == HistLine_Group) { gap = li && cv->lines.data[li - 1].kind != HistLine_Tool && cv->lines.data[li - 1].kind != HistLine_ToolBody ? R(0.6) : R(0.15); h = R(2.3); }
-                    else if (hl->kind == HistLine_ToolBody) { gap = hl->first && hl->block == 2 ? R(0.3) : 0; h = (s32)(mono->line_h * 1.4f); }
+                    else if (hl->kind == HistLine_ToolBody) {
+                        gap = hl->first && hl->block != 3 ? R(0.3) : hl->block == 4 ? R(0.5) : 0;
+                        h = (s32)(mono->line_h * (hl->block == 4 ? 1.8f : 1.4f));
+                    }
+                    else if (hl->kind == HistLine_Footer) { gap = R(0.9); h = R(2.2); }
                     else if (hl->kind == HistLine_Note) { gap = hl->first ? R(1.0) : 0; h = (s32)(small->line_h * 1.5f); }
                     else if (hl->kind == HistLine_Image) {
                         s32 iw = 0;
@@ -5545,13 +6169,24 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 if (cv->current >= 0 && cv->current < mc) cv->scroll = (f32)cv->lines.data[cv->matches.data[cv->current].line].y - (f32)view_h / 2;
                 else if (!q.count) cv->scroll = 1e9f;
             }
-            Ui_Hit(ui, Ui_IdN(Ui_Id("History"), n->id), hv);
+            UiSignal hs = Ui_Hit(ui, Ui_IdN(Ui_Id("History"), n->id), hv);
+            if (hs.hovered) ui->cursor = Cursor_IBeam;
             if (in->input.wheel[1] && RectHas(hv, mouse_x, mouse_y) && !modal) cv->scroll -= (f32)in->input.wheel[1] / 120.0f * 3.0f * (f32)lh;
             f32 max_scroll = Max(0.0f, content_h - (f32)view_h);
             if (cv->scroll == cv->scroll_seen && cv->at_end) cv->scroll = max_scroll;   // not moved: a view at its end stays there
             cv->scroll = Clamp(cv->scroll, 0.0f, max_scroll);
             cv->at_end = cv->scroll >= max_scroll - (f32)lh;
             cv->scroll_seen = cv->scroll;
+            // the view eases to where it's going (at once when it hasn't been shown lately)
+            f32 dt = cv->scroll_us ? Min(0.1f, (f32)(now - cv->scroll_us) / 1e6f) : 1.0f;
+            cv->scroll_us = now;
+            cv->scroll_shown += (cv->scroll - cv->scroll_shown) * Min(1.0f, dt * 16.0f);
+            if (fabsf(cv->scroll - cv->scroll_shown) < 0.5f) cv->scroll_shown = cv->scroll;
+            else if (!out->wake_at_us || now + 8000 < out->wake_at_us) out->wake_at_us = now + 8000;
+            cv->scroll_shown = Clamp(cv->scroll_shown, 0.0f, max_scroll);
+            f32 scroll = cv->scroll_shown;
+            s32 sl0 = cv->sel_line[0], sb0 = cv->sel_byte[0], sl1 = cv->sel_line[1], sb1 = cv->sel_byte[1];   // the selection, in order
+            if (sl1 < sl0 || (sl1 == sl0 && sb1 < sb0)) { s32 tl2 = sl0, tb2 = sb0; sl0 = sl1; sb0 = sb1; sl1 = tl2; sb1 = tb2; }
             Draw_Rect(dl, hv, rc->bg, 0);
             Draw_PushClip(dl, hv);
             if (!cv->lines.count) {
@@ -5561,12 +6196,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s32 mi = 0;
             u32 shade = ColorMix(rc->bg, rc->text, 0.06f), edge = ColorMix(rc->bg, rc->text, 0.13f);
             for (s32 li = 0; li < (s32)cv->lines.count; li++) {
-                const HistLine *hl = &cv->lines.data[li];
-                s32 ly = hv.y0 + R(2) + hl->y - (s32)cv->scroll;
+                HistLine *hl = &cv->lines.data[li];
+                s32 ly = hv.y0 + R(2) + hl->y - (s32)scroll;
                 s32 lx = col_x + (hl->user && hl->kind != HistLine_User ? bubble : 0);
                 if (ly > hv.y1) break;
                 b32 seen = ly + hl->h + R(3) >= hv.y0;
-                Font *lf = hl->kind == HistLine_Heading ? rhead : hl->kind == HistLine_Code || hl->kind == HistLine_ToolBody || hl->kind == HistLine_Tool ? mono : hl->user ? sans : rfont;
+                Font *lf = hl->kind == HistLine_Heading ? rhead : hl->kind == HistLine_Code || hl->kind == HistLine_ToolBody || hl->kind == HistLine_Tool ? mono : hl->quote ? rital : rfont;
                 // the matches lit, the current one framed
                 s64 mark_count = 0;
                 for (s32 k = mi; k < mc && cv->matches.data[k].line == li; k++) mark_count += cv->matches.data[k].len;
@@ -5593,10 +6228,84 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     f32 rr[4] = { top ? radius_large : 0, top ? radius_large : 0, bottom ? radius_large : 0, bottom ? radius_large : 0 };
                     Draw_RectEx(dl, R4(col_x, ly - (top ? R(0.6) : 0), col_x + text_w, ly + hl->h + (bottom ? R(0.6) : 0)), r_bubble, 0, 0, 0, rr, 0, 0, 0);
                 }
+                // --- the text selected with the mouse (lines of text, code, notes): a wash behind it. Where each line's
+                //     text starts, and in what, is kept for the mouse ---
+                Font *sf = hl->kind == HistLine_Text || hl->kind == HistLine_Heading || hl->kind == HistLine_Code ? lf :
+                           hl->kind == HistLine_ToolBody ? (hl->block == 4 ? bold : mono) : hl->kind == HistLine_Note ? small : NULL;
+                s32 sx = hl->kind == HistLine_Text || hl->kind == HistLine_Heading ? lx + hl->indent : hl->kind == HistLine_Code ? lx + R(1.2) :
+                         hl->kind == HistLine_ToolBody ? lx + hl->indent + R(1.2) : lx + R(1.2);
+                hl->font = sf;
+                hl->text_x = sx - col_x;
+                if (sf && cv->sel_on && li >= sl0 && li <= sl1) {
+                    s64 from = li == sl0 ? Clamp(sb0, 0, (s32)hl->text.count) : 0, to = li == sl1 ? Clamp(sb1, 0, (s32)hl->text.count) : hl->text.count;
+                    s32 x0 = sx + Font_Measure(sf, (String){ hl->text.data, from }), x1 = sx + Font_Measure(sf, (String){ hl->text.data, to }) + (li < sl1 ? R(0.4) : 0);
+                    if (x1 > x0) Draw_Rect(dl, R4(x0, ly, x1, ly + hl->h), rc->selection, 0);
+                }
                 if (hl->kind == HistLine_Blank) continue;
                 if (hl->kind == HistLine_Rule) { Draw_Rect(dl, R4(lx, ly + hl->h / 2, lx + text_w, ly + hl->h / 2 + line_w), edge, 0); continue; }
                 if (hl->kind == HistLine_User || hl->kind == HistLine_Claude) {
                     Draw_Text(dl, small, lx, ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2, rc->dim, hl->text);
+                    if (hl->kind == HistLine_Claude && hl->msg < cv->msgs.count) {
+                        // --- the reply's copy button: its words as claude wrote them (markdown), every message of them
+                        //     to the next prompt ---
+                        Rect cb = R4(col_x + text_w - R(2.0), ly + (hl->h - R(1.8)) / 2, col_x + text_w, ly + (hl->h - R(1.8)) / 2 + R(1.8));
+                        UiSignal crs = IconButton(app, Ui_IdN(Ui_IdN(Ui_Id("CopyReply"), n->id), (u64)hl->msg + cv->base), cb, Icon_Copy, icons_small, rc->faint, rc->hover, radius_small,
+                                                  Str_PushFormat(fa, "copy reply %d", hl->msg + 1));
+                        if (crs.clicked) {
+                            TextBuilder tb = { fa, NULL, 0, 0 };
+                            b32 any = 0;
+                            for (s64 k = hl->msg; k < cv->msgs.count && cv->msgs.data[k].e.kind != 1; k++) {
+                                if (cv->msgs.data[k].e.kind != 0) continue;
+                                if (any) TB_Append(&tb, S("\n\n"));
+                                TB_Append(&tb, cv->msgs.data[k].e.text);
+                                any = 1;
+                            }
+                            out->clipboard_set = 1;
+                            out->clipboard_text = TB_String(&tb);
+                            cv->copied_msg = hl->msg + 1;
+                            cv->copied_us = now;
+                        }
+                        if (cv->copied_msg == hl->msg + 1 && now - cv->copied_us < 1500000) {
+                            Draw_TextIn(dl, small, R4(cb.x0 - R(5), cb.y0, cb.x0 - R(0.3), cb.y1), rc->accent, S("Copied"), 1);
+                            if (!out->wake_at_us || cv->copied_us + 1500000 < out->wake_at_us) out->wake_at_us = cv->copied_us + 1500000;
+                        }
+                    }
+                    continue;
+                }
+                if (hl->kind == HistLine_Footer) {
+                    // --- a turn's end: how long claude worked, then what it changed as a button (its counts green and
+                    //     red; open: the changes under it) ---
+                    s32 fty = ly + (hl->h - (s32)(small->line_h + 0.5f)) / 2;
+                    Draw_Rect(dl, R4(lx, ly + hl->h / 2, lx + R(1.6), ly + hl->h / 2 + Max(1, line_w)), edge, 0);
+                    s32 x = Draw_Text(dl, small, lx + R(2.2), fty, rc->dim, (String){ hl->text.data, hl->block });
+                    if (hl->text.count > hl->block + 6) {
+                        String changes = { hl->text.data + hl->block + 6, hl->text.count - hl->block - 6 };   // after "  ·  "
+                        x += R(1.0);
+                        Rect br = R4(x - R(0.6), ly + R(0.2), x + Font_Measure(small, changes) + R(2.4), ly + hl->h - R(0.2));
+                        u64 cid = Ui_IdN(Ui_IdN(Ui_Id("ChatChanges"), n->id), hl->key);
+                        UiSignal chs = Ui_Hit(ui, cid, br);
+                        Draw_Rect(dl, br, hl->first ? shade : HoverFill(app, cid, chs, rc->hover), radius_small);
+                        // "+48", "−12", then the rest
+                        s64 a1 = 0;
+                        while (a1 < changes.count && changes.data[a1] != ' ') a1++;
+                        s64 a2 = a1 + 1;
+                        while (a2 < changes.count && changes.data[a2] != ' ') a2++;
+                        a2 = Min(a2, changes.count);
+                        x = Draw_Text(dl, small, x, fty, r_plus, (String){ changes.data, a1 });
+                        x = Draw_Text(dl, small, x, fty, rc->dim, S(" "));
+                        if (a1 < changes.count) x = Draw_Text(dl, small, x, fty, r_minus, (String){ changes.data + a1 + 1, a2 - a1 - 1 });
+                        x = Draw_Text(dl, small, x, fty, rc->dim, (String){ changes.data + a2, changes.count - a2 });
+                        Draw_Icon(dl, icons_small, R4(x, ly, x + R(1.6), ly + hl->h), rc->dim, hl->first ? Icon_ChevronDown : Icon_ChevronRight);
+                        Named(app, Str_PushFormat(fa, "chat changes %.*s", STR_ARG(changes)), br);
+                        if (chs.clicked) {
+                            s32 oi = ChatOpenIndex(cv, hl->key);
+                            if (oi >= 0) cv->open[oi] = cv->open[--cv->open_count];
+                            else if (cv->open_count < (s32)ArrayCount(cv->open)) cv->open[cv->open_count++] = hl->key;
+                            ChatRebuild(cv, hl->msg);
+                            cv->at_end = 0;   // the row stays where it was clicked
+                            out->wake_at_us = now;
+                        }
+                    }
                     continue;
                 }
                 if (hl->kind == HistLine_Note) {
@@ -5665,8 +6374,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     if (hl->first && hl->block == 3) Draw_Rect(dl, R4(lx, ly, lx + text_w - hl->indent, ly + line_w), edge, 0);
                     u8 lead = hl->text.count ? hl->text.data[0] : 0;
                     u32 col = hl->block == 2 && lead == '+' ? r_plus : hl->block == 2 && lead == '-' ? r_minus :
-                              hl->block == 3 ? rc->dim : rc->text;
-                    Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, col, hl->text, marks, mark_count, r_mark);
+                              hl->block == 3 || hl->block == 5 ? rc->dim : rc->text;
+                    if (hl->block == 5 && lead == 0xE2 && hl->text.count > 2 && hl->text.data[2] == 0x93) col = r_plus;   // ✓ done
+                    Font *bf = hl->block == 4 ? bold : mono;   // a file's name over its changes
+                    Draw_TextMarked(dl, bf, lx + R(1.2), ly + (hl->h - (s32)(bf->line_h + 0.5f)) / 2, col, hl->text, marks, mark_count, r_mark);
                     continue;
                 }
                 if (hl->kind == HistLine_Image) {
@@ -5733,23 +6444,119 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 }
                 // a paragraph's, heading's or list item's line: its marker, then its runs (bold, `code` on a shade)
                 s32 tx = lx + hl->indent, ty = ly + (hl->h - (s32)(lf->line_h + 0.5f)) / 2;
+                u32 ink = hl->quote ? rc->dim : rc->text;
+                if (hl->quote) Draw_Rect(dl, R4(tx - R(1.4), ly, tx - R(1.4) + Max(2, R(0.2)), ly + hl->h), edge, 0);   // a block quote's bar
                 if (hl->marker.count) Draw_Text(dl, rfont, tx - Font_Measure(rfont, hl->marker) - R(0.6), ty, rc->dim, hl->marker);
-                if (mark_count || !hl->span_count) { Draw_TextMarked(dl, lf, tx, ty, rc->text, hl->text, marks, mark_count, r_mark); continue; }
+                if (mark_count || !hl->span_count) { Draw_TextMarked(dl, lf, tx, ty, ink, hl->text, marks, mark_count, r_mark); continue; }
                 s32 at = 0;
                 for (s32 k = 0; k <= hl->span_count; k++) {
                     s32 to = k < hl->span_count ? hl->spans[k].start : (s32)hl->text.count;
-                    if (to > at) tx = Draw_Text(dl, lf, tx, ty, rc->text, (String){ hl->text.data + at, to - at });
+                    if (to > at) tx = Draw_Text(dl, lf, tx, ty, ink, (String){ hl->text.data + at, to - at });
                     if (k == hl->span_count) break;
                     const HistSpan *sp = &hl->spans[k];
                     String run = { hl->text.data + sp->start, sp->len };
+                    s32 run_x = tx;
+                    Font *run_f = lf;
                     if (sp->style & HistSpan_Code) {
                         s32 w = Font_Measure(mono, run);
                         Draw_Rect(dl, R4(tx - R(0.2), ly + R(0.35), tx + w + R(0.2), ly + hl->h - R(0.35)), shade, radius_small);
+                        run_f = mono;
                         tx = Draw_Text(dl, mono, tx, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, rc->text, run);
                     } else {
-                        tx = Draw_Text(dl, hl->kind == HistLine_Heading ? rhead : hl->user ? sans_bold : rbold, tx, ty, rc->text, run);
+                        run_f = hl->kind == HistLine_Heading ? rhead : (sp->style & HistSpan_Bold) ? rbold : (sp->style & HistSpan_Italic) ? (hl->quote ? rfont : rital) : lf;
+                        tx = Draw_Text(dl, run_f, tx, ty, (sp->style & HistSpan_Link) ? rc->accent : ink, run);
+                    }
+                    if (sp->style & (HistSpan_Link | HistSpan_Path)) {
+                        // --- a link (opens in the browser; a path, with its program or the editor at its line): underlined
+                        //     under the mouse ---
+                        Rect lr = R4(run_x, ly, tx, ly + hl->h);
+                        u64 lid = Ui_IdN(Ui_IdN(Ui_Id("ChatLink"), n->id), (u64)li * 64 + (u64)k);
+                        UiSignal lks = Ui_Hit(ui, lid, lr);
+                        if (lks.hovered) {
+                            ui->cursor = Cursor_Hand;
+                            s32 uy = (run_f == mono ? ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2 : ty) + (s32)run_f->ascent + Max(1, R(0.12));
+                            Draw_Rect(dl, R4(run_x, uy, tx, uy + Max(1, line_w)), (sp->style & HistSpan_Link) ? rc->accent : rc->text, 0);
+                            Ui_Tooltip(ui, lid, sp->url);
+                        }
+                        Named(app, Str_PushFormat(fa, "chat link %.*s", STR_ARG(sp->url)), lr);
+                        if (lks.clicked) {
+                            b32 web = (sp->url.count > 7 && !memcmp(sp->url.data, "http://", 7)) || (sp->url.count > 8 && !memcmp(sp->url.data, "https://", 8));
+                            if (web) out->open_url = sp->url;
+                            else { out->open_path = sp->url; out->open_path_cwd = cst ? cst->cwd : (String){0}; }
+                            Logf("app", "chat: opened %.*s", STR_ARG(sp->url));
+                        }
                     }
                     at = sp->start + sp->len;
+                }
+            }
+            // --- messages just come fade in: a veil of the page's color going in 300 ms ---
+            for (s32 li = (s32)cv->lines.count - 1; li >= 0; li--) {
+                const HistLine *hl = &cv->lines.data[li];
+                s32 ly = hv.y0 + R(2) + hl->y - (s32)scroll;
+                if (ly + hl->h < hv.y0) break;
+                if (ly > hv.y1 || hl->msg < 0 || hl->msg >= cv->msgs.count) continue;
+                u64 arrived = cv->msgs.data[hl->msg].arrived_us;
+                if (!arrived || now >= arrived + 300000) continue;
+                f32 veil = 1.0f - (f32)(now - arrived) / 300000.0f;
+                Draw_Rect(dl, R4(hv.x0, hv.y0 + R(2) + hl->y0 - (s32)scroll, hv.x1, ly + hl->h + R(1)), ColorAlpha(rc->bg, veil), 0);
+                if (!out->wake_at_us || now + 16000 < out->wake_at_us) out->wake_at_us = now + 16000;
+            }
+            // --- while claude writes, a dot breathes under the last line ---
+            if (chat_shown && busy && cv->lines.count && !cv->pending_len) {
+                const HistLine *last = &cv->lines.data[cv->lines.count - 1];
+                s32 py = hv.y0 + R(2) + last->y + last->h - (s32)scroll + R(0.9), d = R(0.7);
+                f32 phase = (f32)((now / 60000) % 27) / 27.0f;   // in 60 ms steps (frames between them draw the same)
+                f32 glow = 0.25f + 0.55f * (0.5f - 0.5f * cosf(phase * 6.2831853f));
+                Draw_Rect(dl, R4(col_x, py, col_x + d, py + d), ColorAlpha(rc->accent, glow), (f32)d / 2);
+                u64 next = (now / 60000 + 1) * 60000;
+                if (!out->wake_at_us || next < out->wake_at_us) out->wake_at_us = next;
+            }
+            // --- selecting with the mouse: pressed on the page's text (not a row, a button or a link: they take their own
+            //     clicks), dragged (the view scrolls at its edges); let go, it's copied (settings: copy on select). A
+            //     double click takes a word, a triple one the line; a click lets the selection go ---
+            if ((hs.pressed && hs.button == Mouse_Left) || cv->selecting) {
+                s32 pl = -1, pb = 0;
+                for (s32 li = 0; li < (s32)cv->lines.count; li++) {
+                    if (hv.y0 + R(2) + cv->lines.data[li].y - (s32)scroll > mouse_y) break;
+                    pl = li;
+                }
+                if (pl >= 0) {
+                    const HistLine *hl = &cv->lines.data[pl];
+                    s32 ly = hv.y0 + R(2) + hl->y - (s32)scroll;
+                    if (mouse_y >= ly + hl->h) pb = (s32)hl->text.count;
+                    else if (hl->font) {
+                        pb = (s32)Font_Fit(hl->font, hl->text, mouse_x - (col_x + hl->text_x));
+                        pb = Clamp(pb, 0, (s32)hl->text.count);
+                    } else pb = mouse_x > col_x + text_w / 2 ? (s32)hl->text.count : 0;
+                } else pl = 0;
+                if (hs.pressed && hs.button == Mouse_Left) {
+                    cv->sel_line[0] = cv->sel_line[1] = pl;
+                    cv->sel_byte[0] = cv->sel_byte[1] = pb;
+                    cv->sel_on = 0;
+                    cv->selecting = 1;
+                    if (hs.clicks >= 2 && pl < cv->lines.count) {
+                        String lt = cv->lines.data[pl].text;
+                        s32 s0 = pb, s1 = pb;
+                        if (hs.clicks == 2) {
+                            while (s0 > 0 && (isalnum(lt.data[s0 - 1]) || lt.data[s0 - 1] == '_' || lt.data[s0 - 1] >= 0x80)) s0--;
+                            while (s1 < lt.count && (isalnum(lt.data[s1]) || lt.data[s1] == '_' || lt.data[s1] >= 0x80)) s1++;
+                        } else { s0 = 0; s1 = (s32)lt.count; }
+                        cv->sel_byte[0] = s0;
+                        cv->sel_byte[1] = s1;
+                        cv->sel_on = s1 > s0;
+                        cv->selecting = 0;
+                        if (cv->sel_on && !app->copy_on_select_off) { out->clipboard_set = 1; out->clipboard_text = ChatSelectionText(fa, cv); }
+                    }
+                } else if (in->input.button[Mouse_Left].down) {
+                    cv->sel_line[1] = pl;
+                    cv->sel_byte[1] = pb;
+                    cv->sel_on = cv->sel_line[0] != pl || cv->sel_byte[0] != pb;
+                    if (mouse_y < hv.y0 + R(1)) cv->scroll -= (f32)R(1.2);
+                    if (mouse_y > hv.y1 - R(1)) cv->scroll += (f32)R(1.2);
+                    out->wake_at_us = now + 16000;
+                } else {
+                    cv->selecting = 0;
+                    if (cv->sel_on && !app->copy_on_select_off) { out->clipboard_set = 1; out->clipboard_text = ChatSelectionText(fa, cv); }
                 }
             }
             Draw_PopClip(dl);

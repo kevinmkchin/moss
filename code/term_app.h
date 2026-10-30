@@ -10,7 +10,7 @@
 #include "term_types.h"
 
 // The UI's fonts, made by the platform for the window's DPI (term_font.cpp): Segoe UI, Segoe Fluent Icons.
-enum { Font_Ui = 0, Font_UiSmall = 1, Font_UiBold = 2, Font_Icon = 3, Font_IconSmall = 4, Font_Mono = 5, Font_Read = 6, Font_ReadBold = 7, Font_ReadHead = 8, Font_ReadSans = 9, Font_ReadSansBold = 10, Font_Count = 11 };
+enum { Font_Ui = 0, Font_UiSmall = 1, Font_UiBold = 2, Font_Icon = 3, Font_IconSmall = 4, Font_Mono = 5, Font_Read = 6, Font_ReadBold = 7, Font_ReadHead = 8, Font_ReadItalic = 9, Font_Count = 10 };
 
 typedef struct AppPlace { String name, path; } AppPlace;
 // A picture for the image viewer, decoded (scaled down to fit 4K) and on the GPU; failed: it couldn't be read.
