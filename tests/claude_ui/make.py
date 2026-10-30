@@ -66,6 +66,14 @@ for sid, project, prompt, text, age in sessions:
             f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:07.000Z',
                                 'message': {'role': 'user', 'content': [{'type': 'text', 'text': '[Request interrupted by user]'}]}},
                                separators=(',', ':')) + '\n')
+            # a skill's /command and one as typed (notes, not prompts), then a prompt typed while claude worked, taken
+            # in mid-turn (an attachment, not a user line)
+            for content in ['<command-message>simplify</command-message>\n<command-name>/simplify</command-name>', '/compact keep the plan']:
+                f.write(json.dumps({'type': 'user', 'cwd': cwd, 'sessionId': sid, 'timestamp': '2026-06-15T10:00:08.000Z',
+                                    'message': {'role': 'user', 'content': content}}, separators=(',', ':')) + '\n')
+            f.write(json.dumps({'parentUuid': 'x', 'isSidechain': False, 'attachment': {'type': 'queued_command', 'prompt': 'Also check the tests',
+                                'commandMode': 'prompt', 'timestamp': '2026-06-15T10:00:09.000Z'}, 'type': 'attachment',
+                                'timestamp': '2026-06-15T10:00:09.000Z', 'cwd': cwd, 'sessionId': sid}, separators=(',', ':')) + '\n')
     os.utime(path, (now - age, now - age))
 with open(os.path.join(cfg, '.claude.json'), 'w') as f:
     json.dump({'oauthAccount': {'emailAddress': 'tester@example.com', 'organizationName': 'Example Org'}}, f, indent=2)

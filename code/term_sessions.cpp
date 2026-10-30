@@ -311,6 +311,15 @@ struct history_cache
     u64 UsedMs;               // asked for last (unused ones go)
 };
 
+// A prompt that is a /command as typed ("/compact keep the plan"): a name, no path ("/src/a.c why?" is words)
+static bool32 TypedCommand(const std::string& Text)
+{
+    if(Text.size() < 2 || Text[0] != '/' || Text.size() > 4096) { return false; }
+    size_t I = 1;
+    while(I < Text.size() && (isalnum((unsigned char)Text[I]) || Text[I] == '-' || Text[I] == '_' || Text[I] == ':')) { I++; }
+    return I > 1 && (I == Text.size() || Text[I] == ' ' || Text[I] == '\n');
+}
+
 static volatile LONG g_HistoryVersion;
 
 // What was written to SessionId's transcript since the last read; another session or a shorter file starts over.
@@ -411,8 +420,18 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                     Changed = true;
                     continue;
                 }
-                if(!E.Text.compare(0, 14, "<command-name>") || !E.Text.compare(0, 22, "<local-command-stdout>")) { Note = E.Text; }
+                // a /command (built in, or a skill's: <command-message> first, or as typed) and its output: notes
+                if(!E.Text.compare(0, 14, "<command-name>") || !E.Text.compare(0, 17, "<command-message>") ||
+                   !E.Text.compare(0, 22, "<local-command-stdout>") || TypedCommand(E.Text)) { Note = E.Text; }
                 else if(!E.Text.empty() && E.Text[0] == '<') { continue; } // a hook's or reminder's wrapper, not words
+            }
+            else if(Line.find("\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"") != std::string::npos && Line.find("\"commandMode\":\"prompt\"") != std::string::npos)
+            {
+                // a prompt typed while claude worked, taken in mid-turn (one taken after the turn is a user line)
+                E.Kind = 1;
+                size_t At = Line.find("\"attachment\":{\"type\":\"queued_command\",\"prompt\":\"");
+                JsonDecodeString(Line, At + 48, E.Text);
+                if(TypedCommand(E.Text)) { Note = E.Text; }
             }
             else if(Line.find("\"role\":\"user\",\"content\":[") != std::string::npos && Line.find("\"type\":\"tool_result\"") == std::string::npos)
             {
@@ -430,6 +449,8 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                     E.Text += Part;
                 }
                 if(!E.Text.compare(0, 20, "[Request interrupted")) { Note = "Interrupted"; }
+                else if(!E.Text.compare(0, 14, "<command-name>") || !E.Text.compare(0, 17, "<command-message>") ||
+                        TypedCommand(E.Text)) { Note = E.Text; }
                 else if(!E.Text.empty() && E.Text[0] == '<') { continue; }
             }
             else if(Line.find("\"role\":\"assistant\"") != std::string::npos)

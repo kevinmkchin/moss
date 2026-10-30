@@ -3136,7 +3136,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         if (key != cv->key) { cv->key = key; cv->stable = 0; cv->version = 0; cv->asked_us = 0; cv->pending_len = 0; }
         const TermGrid *vg = FindGrid(in, vt->term_id);
         b32 busy = (st && (st->flags & TermTab_Busy)) || ClaudeWorking(vg, ClaudePromptBox(vg));
-        if (cv->pending_len && now > cv->sent_us + 20000000) { cv->pending_len = 0; ChatRebuild(cv, cv->msgs.count); }   // never came: let it go
+        // never came: let it go (a prompt sent during a turn waits for it: claude takes it in mid-turn or after)
+        if (cv->pending_len && !busy && now > Max(cv->sent_us, cv->ended_us) + 20000000) { cv->pending_len = 0; ChatRebuild(cv, cv->msgs.count); }
         // every 400 ms while a turn runs, 4 s after a send, a change or the turn's end (its last reply can land in the
         // transcript a moment after claude's screen says it's done); else every 5 s, for anything missed
         if (cv->busy && !busy) cv->ended_us = now;

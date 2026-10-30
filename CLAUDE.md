@@ -281,8 +281,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   of a paste: `SendLine`, `App.enters`, also the model picker's `/model` and the composer; an Enter still on its way to
   the tab goes before the next line), Shift+Enter is a new line, Esc stops a turn (win32-input-mode's Esc key
   when asked), Shift+Tab claude's mode, PgUp/PgDn and Ctrl+Home/End scroll, Ctrl+V a picture's path, files dropped and
-  Ctrl+Shift+V pastes go in. The prompt shows at once (`Chat.pending`) until the transcript has it (20 s at most; never
-  for /commands). While claude works (its title's spinner, or "esc to interrupt" on its mode line: `ClaudeWorking`): a
+  Ctrl+Shift+V pastes go in. The prompt shows at once (`Chat.pending`) until the transcript has it (a `!` command's tool row
+  counts; 20 s at most once claude isn't working, so one queued during a turn stays; never for /commands). While claude works (its title's spinner, or "esc to interrupt" on its mode line: `ClaudeWorking`): a
   ◐◓◑◒ spinner and claude's own status line (the row over its box, its mark dropped; else "Working…") above the box, a
   stop button. The wheel scrolls anywhere over the view (rows and code blocks take the hover).
 - Live: the window asks for the history (`AppOutput.history_asks`: tab, from, have) when it shows, every 400 ms while
@@ -323,10 +323,13 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   (`HistLine.y/h`: gaps before a message, a heading, a block); headers in local time ("Today 14:03"); code blocks in a
   container with a header (the fence's language, the copy button); tables padded, the header row on a shade.
 - Notes (`MSG_HISTORY` kind 3, `HistLine_Note`: small, dim, a hairline at the left): a /command and its output (system
-  `local_command` lines, or user lines wrapping `<command-name>` / `<local-command-stdout>`; colors and tags out),
+  `local_command` lines, or user lines, as a string or blocks, wrapping `<command-name>` / `<local-command-stdout>`, a
+  skill's starting `<command-message>`, or "/name args" as typed: `TypedCommand`; colors and tags out),
   notices (`informational`: usage limit reset, unknown command), "Conversation compacted", "Interrupted". A shell command
   typed after `!` (`<bash-input>`, `<bash-stdout>`) is a tool row named `!`. A prompt sent as blocks keeps its text
-  (`[Image]` for a picture).
+  (`[Image]` for a picture). A prompt typed while claude worked and taken in mid-turn is only an `attachment` line
+  (`queued_command`, `commandMode` prompt); one taken after the turn is a user line. Claude Code moves a session's
+  transcript to another project folder when it enters or leaves a worktree: a failed open finds it again by id.
 - Pictures a message names show under it, as Claude Desktop's do (`HistLine_Image`): an absolute path (`C:\...`, spaces
   allowed) ending in a picture's extension (`g_PictureTypes`): a screenshot claude took, one pasted into a prompt; 8 a
   message, each once. Decoded once in view (`AppOutput.image_wants`, the picture view's decoder), fitted to the column

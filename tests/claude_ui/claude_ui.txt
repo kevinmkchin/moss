@@ -56,6 +56,9 @@ cmd zoom_reset
 sleep 300
 waitidle
 # the tools it used in a row, folded into one row; open, each opens: its command and its output; the edit as a diff
+key Ctrl+Home
+sleep 300
+waitidle
 cursorui tools Ran 1 command, edited 1 file, ran 1 search (1 failed)
 lmb down
 lmb up
