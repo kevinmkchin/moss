@@ -23,5 +23,3 @@ Next:
 - Each turn's changed files as real diffs in the tab's files face (chat mode shows the transcript's edits now).
 - Preview HTML claude writes in a web tab, refreshed as it changes.
 - Permission prompts answered from the tray notification (Allow / Deny send the key).
-- Plan limits per account (5 h, weekly) in the manager and account line: needs the user's OK first, since moss would
-  call api.anthropic.com/api/oauth/usage with each account's login token (the only source; not on disk).
