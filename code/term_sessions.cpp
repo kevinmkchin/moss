@@ -319,14 +319,17 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
     // versions start from the clock, so a window's from before a server restart isn't taken for one of this server's
     if(!g_HistoryVersion) { InterlockedCompareExchange(&g_HistoryVersion, (LONG)(GetTickCount() & 0x0FFFFFFF) + 1, 0); }
     bool32 Reset = SessionId != C.SessionId;
-    if(Reset || C.Path.empty())
+    HANDLE File = Reset || C.Path.empty() ? INVALID_HANDLE_VALUE :
+                  CreateFileW(C.Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
+    if(File == INVALID_HANDLE_VALUE)
     {
+        // none yet, another session, or it moved (Claude Code moves a session's transcript when it enters a worktree)
         std::wstring Path = SessionFilePath(ConfigDir, SessionId);
         Reset |= Path != C.Path;
         C.Path = Path;
+        File = C.Path.empty() ? INVALID_HANDLE_VALUE :
+               CreateFileW(C.Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
     }
-    HANDLE File = C.Path.empty() ? INVALID_HANDLE_VALUE :
-                  CreateFileW(C.Path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0, OPEN_EXISTING, 0, 0);
     LARGE_INTEGER Size = {};
     if(File != INVALID_HANDLE_VALUE) { GetFileSizeEx(File, &Size); }
     if((u64)Size.QuadPart < C.Offset || !C.Version) { Reset = true; }

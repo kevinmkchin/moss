@@ -3101,7 +3101,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             m->e = r->entries[k];
             m->e.time = Str_PushCopy(&cv->msg_arena, r->entries[k].time);
             m->e.text = Str_PushCopy(&cv->msg_arena, r->entries[k].text);
-            if (m->e.kind == 1 && r->from + (u32)k >= cv->pending_at) cv->pending_len = 0;   // the prompt sent is in now
+            // the prompt sent is in now (a "!" command comes in as a tool row named "!")
+            b32 bang = m->e.kind == 2 && m->e.text.count >= 2 && m->e.text.data[0] == '!' && m->e.text.data[1] == 0x1f;
+            if ((m->e.kind == 1 || bang) && r->from + (u32)k >= cv->pending_at) cv->pending_len = 0;
         }
         cv->version = r->version;
         cv->stable = r->stable;
