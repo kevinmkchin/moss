@@ -110,7 +110,7 @@ static const CommandDef g_Commands[Cmd_Count] = {
 // --- settings: the palette's settings mode (Ctrl+,), a row each; a change applies at once and goes to settings.txt ---
 enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
-    Setting_DimUnfocused,
+    Setting_DimUnfocused, Setting_KeepActive,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
     Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_SidebarHide, Setting_GoodProgrammer, Setting_ReaderTheme, Setting_ReaderSize, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
     Setting_Count
@@ -130,6 +130,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_Cursor]        = { "Appearance", "Cursor", "when the program asks for none", SettingKind_Choice },
     [Setting_CursorBlink]   = { "Appearance", "Cursor blinks", "", SettingKind_Bool },
     [Setting_DimUnfocused]  = { "Appearance", "Dim the panes not in focus", "the focused one stands out", SettingKind_Bool },
+    [Setting_KeepActive]    = { "More", "Keep me active", "while moss is in front, Slack and the like don't go away (the light by the window buttons)", SettingKind_Bool },
     [Setting_CopyOnSelect]  = { "Terminal", "Copy on select", "a finished selection goes to the clipboard", SettingKind_Bool },
     [Setting_Agent]         = { "Agents", "Agent command", "what Ctrl+Shift+A starts", SettingKind_Text },
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
@@ -260,7 +261,8 @@ enum { App_MaxNamed = 512, App_MaxPanes = 64 };
 enum { HistLine_Text = 0, HistLine_User, HistLine_Claude, HistLine_Blank, HistLine_Heading, HistLine_Code, HistLine_Table, HistLine_Rule,
        HistLine_Tool, HistLine_ToolBody,     // a tool claude used (a row that opens), a line of its detail or result
        HistLine_Note,                        // a note's line (a /command and its output, an interruption, a notice)
-       HistLine_Group };                     // tools used in a row, folded into one ("Ran 3 commands, read 2 files")
+       HistLine_Group,                       // tools used in a row, folded into one ("Ran 3 commands, read 2 files")
+       HistLine_Image };                     // a picture a message names (its path the text), shown under it
 enum { HistSpan_Bold = 1, HistSpan_Code = 2 };
 typedef struct HistSpan { s32 start, len; u32 style; } HistSpan;   // a bold or `code` run in a line's text
 typedef struct HistLine {
@@ -484,6 +486,7 @@ struct App {
     b32 ligatures;
     b32 copy_on_select_off;
     b32 dim_unfocused_off;    // settings.txt `dim_unfocused = off`
+    b32 keep_active_off;      // settings.txt `keep_active = off`
     b32 broadcast;            // keys typed go to every terminal shown in the window
     b32 explorer_menu;        // Explorer has "Open in moss"
     b32 start_with_windows;   // the server starts at sign-in
@@ -1014,6 +1017,7 @@ static void ApplySettings(App *app, const AppInit *init)
     app->chat_off = init->claude_chat_off;
     app->reader_pt = init->reader_pt > 0 ? Clamp(init->reader_pt, 8, 28) : 12;
     app->reader_theme = init->reader_theme;
+    app->keep_active_off = init->keep_active_off;
     app->paste_warning_off = init->paste_warning_off;
     app->win32_input_off = init->win32_input_off;
     // --- key bindings: the defaults, then settings.txt's `key.<command> = <keys>` lines ("ctrl+shift+d", "none") ---
@@ -1272,6 +1276,22 @@ static PaneTab *RequestTab(App *app, Frame *f, PaneNode *leaf, u32 kind, String 
 static String FocusedCwd(App *app);
 
 // A tool's row in a conversation: open (its index in Chat.open), else -1.
+// A picture the conversation names, as its column shows it: fitted to max_w by max_h, never above its own size at the
+// window's DPI (*w its width). Not decoded yet (*img NULL): a placeholder's height; can't be read: a line's.
+static s32 ChatImageH(App *app, const AppFrameInput *in, String path, s32 max_w, s32 max_h, s32 *w, const AppImage **img)
+{
+    f32 em = app->em;
+    *img = NULL;
+    *w = 0;
+    for (s32 i = 0; i < in->image_count && !*img; i++) if (Str_EqualNoCase(in->images[i].path, path)) *img = &in->images[i];
+    if (!*img) return R(12);
+    if ((*img)->failed || (*img)->full_w <= 0 || (*img)->full_h <= 0) return R(2.2);
+    f32 s = Min((f32)max_w / (f32)(*img)->full_w, (f32)max_h / (f32)(*img)->full_h);
+    s = Min(s, (f32)in->dpi / 96.0f);
+    *w = Max(1, (s32)((f32)(*img)->full_w * s));
+    return Max(1, (s32)((f32)(*img)->full_h * s));
+}
+
 static s32 ChatOpenIndex(Chat *cv, u64 key)
 {
     for (s32 i = 0; i < cv->open_count; i++) if (cv->open[i] == key) return i;
@@ -4222,7 +4242,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Rect row = strip;
             row.y0 += pad_t;   // tabs and buttons the strip's full height (below the window's resize border)
             CutLeft(&row, R(0.5));
-            if (n == top_right) CutRight(&row, R(3.4) * 3);
+            if (n == top_right) CutRight(&row, R(3.4) * 3 + (app->keep_active_off ? 0 : R(2.4)));
             s32 button_w = RectH(row) - line_w;
             // --- right: the zoom's way back and the files / shell button ---
             if (t) {
@@ -5399,6 +5419,34 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     }
                     for (s64 k = msg_first; he->from_user && k < cv->lines.count; k++) cv->lines.data[k].user = 1;
                     while (cv->lines.count > msg_first && cv->lines.data[cv->lines.count - 1].kind == HistLine_Blank) cv->lines.count--;
+                    // --- the pictures it names (an absolute path ending in a picture's extension: a screenshot claude
+                    //     took, one pasted into the prompt), each under it, once; 8 at most ---
+                    s64 images_first = cv->lines.count;
+                    for (s64 at = 0; at + 3 < text.count && cv->lines.count - images_first < 8; at++) {
+                        u8 d = text.data[at] | 0x20, before = at ? text.data[at - 1] | 0x20 : ' ';
+                        if (d < 'a' || d > 'z' || text.data[at + 1] != ':' || (text.data[at + 2] != '\\' && text.data[at + 2] != '/')) continue;
+                        if ((before >= 'a' && before <= 'z') || (before >= '0' && before <= '9')) continue;   // inside a word
+                        // the path runs until its extension is a picture's and what follows ends it (spaces may be in it)
+                        String path = {0};
+                        s64 end = at + 3;
+                        while (end < text.count && !path.count && !strchr("`\"'<>|*?\r\n", text.data[end])) {
+                            end++;
+                            b32 ends = end >= text.count || strchr(" `\"'<>|*?\r\n),;", text.data[end]) ||
+                                       (text.data[end] == '.' && (end + 1 >= text.count || strchr(" \r\n", text.data[end + 1])));
+                            String so_far = { text.data + at, end - at };
+                            if (ends && HasExtension(so_far, g_PictureTypes)) path = so_far;
+                        }
+                        if (!path.count) continue;
+                        at = end;
+                        b32 seen_before = 0;
+                        for (s64 k = images_first; k < cv->lines.count && !seen_before; k++) seen_before = Str_EqualNoCase(cv->lines.data[k].text, path);
+                        if (seen_before) continue;
+                        HistLine *il = Array_Push(&cv->lists_arena, cv->lines);
+                        il->kind = HistLine_Image;
+                        il->text = path;
+                        il->msg = (s32)i;
+                        il->user = he->from_user;
+                    }
                 }
                 // --- each line's place: its height by what it is, a gap before a message, a heading, a code block (from
                 //     the line before the first built again: how it ends depends on the next) ---
@@ -5417,6 +5465,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     else if (hl->kind == HistLine_Tool || hl->kind == HistLine_Group) { gap = li && cv->lines.data[li - 1].kind != HistLine_Tool && cv->lines.data[li - 1].kind != HistLine_ToolBody ? R(0.6) : R(0.15); h = R(2.3); }
                     else if (hl->kind == HistLine_ToolBody) { gap = hl->first && hl->block == 2 ? R(0.3) : 0; h = (s32)(mono->line_h * 1.4f); }
                     else if (hl->kind == HistLine_Note) { gap = hl->first ? R(1.0) : 0; h = (s32)(small->line_h * 1.5f); }
+                    else if (hl->kind == HistLine_Image) {
+                        s32 iw = 0;
+                        const AppImage *img = NULL;
+                        gap = R(0.8);
+                        h = ChatImageH(app, in, hl->text, text_w - (hl->user ? 2 * bubble : 0), R(30), &iw, &img);
+                    }
                     if (hl->user && hl->kind != HistLine_User && li && !cv->lines.data[li - 1].user) gap += R(0.4);   // the bubble's top
                     y += gap;
                     hl->y = y;
@@ -5582,6 +5636,32 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     u32 col = hl->block == 2 && lead == '+' ? r_plus : hl->block == 2 && lead == '-' ? r_minus :
                               hl->block == 3 ? rc->dim : rc->text;
                     Draw_TextMarked(dl, mono, lx + R(1.2), ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, col, hl->text, marks, mark_count, r_mark);
+                    continue;
+                }
+                if (hl->kind == HistLine_Image) {
+                    // --- a picture the message names: decoded once it's in view (laid out again when its size comes); a
+                    //     click shows it in the tab's picture view (Esc comes back here) ---
+                    s32 max_w = text_w - (hl->user ? 2 * bubble : 0), iw = 0;
+                    const AppImage *img = NULL;
+                    s32 ih = ChatImageH(app, in, hl->text, max_w, R(30), &iw, &img);
+                    if (ih != hl->h) { ChatRebuild(cv, hl->msg); out->wake_at_us = now; }
+                    if (out->image_want_count < (s32)ArrayCount(out->image_wants)) out->image_wants[out->image_want_count++] = hl->text;
+                    Rect ir = R4(lx, ly, lx + (iw ? iw : max_w), ly + hl->h);
+                    u64 iid = Ui_IdN(Ui_IdN(Ui_Id("ChatImage"), n->id), (u64)li);
+                    UiSignal is = Ui_Hit(ui, iid, ir);
+                    String name = hl->text;
+                    for (s64 k = name.count; k > 0; k--) if (name.data[k - 1] == '\\' || name.data[k - 1] == '/') { name = (String){ name.data + k, name.count - k }; break; }
+                    if (img && img->texture) {
+                        Draw_Image(dl, ir, img->texture, 0xFFFFFFFFu);
+                        Draw_RectEx(dl, ir, 0, is.hovered ? rc->accent : edge, (f32)line_w, 0, NULL, 0, 0, 0);
+                        if (is.hovered) ui->cursor = Cursor_Hand;
+                        if (is.clicked && t) { OpenViewer(app, t, hl->text, 0); Panes_Select(panes, t); }
+                    } else {
+                        Draw_Rect(dl, ir, shade, radius_small);
+                        Draw_TextIn(dl, small, RectShrink(ir, R(0.8)), rc->dim, img ? Str_PushFormat(fa, "%.*s can't be read", STR_ARG(name)) : Str_PushFormat(fa, "%.*s ...", STR_ARG(name)), img ? 0 : 0.5f);
+                    }
+                    Ui_Tooltip(ui, iid, hl->text);
+                    Named(app, Str_PushFormat(fa, "chat image %.*s", STR_ARG(name)), ir);
                     continue;
                 }
                 if (hl->kind == HistLine_Code) {
@@ -6032,6 +6112,21 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         Named(app, S("close window"), rclose);
         if (cls.clicked) out->window_command = AppWindow_Close;
         for (s32 k = 0; k < 3 && caption_rect_count < App_MaxCaptionClientRects; k++) caption_rects[caption_rect_count++] = k == 0 ? rmin : k == 1 ? rmax : rclose;
+        if (!app->keep_active_off) {
+            // --- keep active's light, left of the window buttons: green while moss keeps the user active (the window in
+            //     front: the platform nudges the mouse when Windows' idle time passes 2 minutes), grey while it doesn't ---
+            b32 keeping = in->foreground || app->headless;   // headless runs draw as if in front, as the buttons do
+            Rect lr = R4(rmin.x0 - R(2.4), 0, rmin.x0, caption_h);
+            UiSignal ls = Ui_Hit(ui, Ui_Id("KeepActive"), lr);
+            Rect dot = RectCenter(lr, R(0.8), R(0.8));
+            if (keeping) Draw_RectEx(dl, RectCenter(lr, R(1.6), R(1.6)), 0x405AD26Eu, 0, 0, (f32)R(0.8), NULL, 0, 0, (f32)R(0.5));   // a soft glow
+            Draw_RectEx(dl, dot, keeping ? 0xFF5AD26Eu : c->faint, 0, 0, (f32)R(0.4), NULL, 0, 0, 0);
+            Ui_Tooltip(ui, Ui_Id("KeepActive"), keeping ? S("Keeping you active: Slack and the like stay green while moss is in front")
+                                                     : S("Keeps you active while moss is in front (Slack and the like stay green)"));
+            Named(app, S("keep active"), lr);
+            if (ls.clicked) RunCommand(app, &f, Cmd_Settings);
+            if (caption_rect_count < App_MaxCaptionClientRects) caption_rects[caption_rect_count++] = lr;
+        }
     }
 
     // --- the find bar: top right of its pane, under the tab strip. Its text, how many matches and which is current,
@@ -6684,7 +6779,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (k == Setting_Agents) value = app->agents.count ? app->agents : S("the usual ones");
             if (k == Setting_SidebarHide) value = app->side_hide.count ? app->side_hide : S("none");
             b32 on = k == Setting_HiddenFiles ? !app->hide_hidden : k == Setting_FolderSizes ? !app->folder_sizes_off : k == Setting_CursorBlink ? app->cursor_blink : k == Setting_Ligatures ? app->ligatures :
-                     k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ClaudeChat ? !app->chat_off : k == Setting_ExplorerMenu ? app->explorer_menu :
+                     k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ClaudeChat ? !app->chat_off : k == Setting_KeepActive ? !app->keep_active_off : k == Setting_ExplorerMenu ? app->explorer_menu :
                      k == Setting_StartWithWindows ? app->start_with_windows : k == Setting_Notifications ? !app->notifications_off :
                      k == Setting_VsEnv ? !app->vs_env_off : k == Setting_GoodProgrammer ? app->good_programmer : 0;
             b32 clicked_value = 0;
@@ -6840,6 +6935,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             } else if (act == Setting_CopyOnSelect) {
                 app->copy_on_select_off = !app->copy_on_select_off;
                 key = S("copy_on_select"); val = app->copy_on_select_off ? S("off") : S("on");
+            } else if (act == Setting_KeepActive) {
+                app->keep_active_off = !app->keep_active_off;
+                key = S("keep_active"); val = app->keep_active_off ? S("off") : S("on");
             } else if (act == Setting_DimUnfocused) {
                 app->dim_unfocused_off = !app->dim_unfocused_off;
                 key = S("dim_unfocused"); val = app->dim_unfocused_off ? S("off") : S("on");
@@ -7058,6 +7156,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     } else if (app->web_hist_dirty && !app->headless && (!out->wake_at_us || app->web_hist_saved_us + 10000000 < out->wake_at_us)) {
         out->wake_at_us = app->web_hist_saved_us + 10000000;
     }
+    out->keep_active = !app->keep_active_off;
     if (app->paths_dirty) {
         // --- recents and bookmarks changed: paths.txt again ---
         app->paths_dirty = 0;

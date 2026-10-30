@@ -182,6 +182,11 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 
 - Scrollbar: a thin thumb at a terminal's right edge while scrolled back, with the mouse near it, or dragged
   (built before the terminal so it wins the hover; `App.sb_*` keeps the offset asked for while the grid catches up).
+- Keep active (clod's; settings "Keep me active", `keep_active = off` turns it off): while a moss window is in front,
+  Windows' idle timer (what Slack's "away" goes by) never runs out: a 20 s timer (`Keep_Timer`) nudges the mouse a
+  pixel and back once there's been no input for 2 minutes (`SendInput`; never in headless or test runs). Its light sits
+  left of the window buttons: green while the window is in front (headless runs draw it so), grey otherwise; a click
+  opens the settings.
 - Summon key: the main window registers settings `summon` (default Win+\`; `off` = none) with `RegisterHotKey`; it
   brings the window up from anywhere, or minimizes it when it's in front.
 - Key bindings: settings.txt `key.<command> = <keys>` ("ctrl+shift+d", "none"; names as `dump commands` lists
@@ -323,6 +328,11 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   notices (`informational`: usage limit reset, unknown command), "Conversation compacted", "Interrupted". A shell command
   typed after `!` (`<bash-input>`, `<bash-stdout>`) is a tool row named `!`. A prompt sent as blocks keeps its text
   (`[Image]` for a picture).
+- Pictures a message names show under it, as Claude Desktop's do (`HistLine_Image`): an absolute path (`C:\...`, spaces
+  allowed) ending in a picture's extension (`g_PictureTypes`): a screenshot claude took, one pasted into a prompt; 8 a
+  message, each once. Decoded once in view (`AppOutput.image_wants`, the picture view's decoder), fitted to the column
+  (30 em high at most, never above its own size: `ChatImageH`); a placeholder until then, the lines laid out again when
+  its size comes. A click shows it in the tab's picture view (Esc comes back).
 - Tools used in a row (no text between) fold into one row, as Claude Desktop's ("Ran 3 commands, read 2 files (1
   failed)": `HistLine_Group`, by kind in order of first use); open, each tool's row under it, indented. Unlike Desktop's
   (anthropics/claude-code#90425) text between tools is never folded. A rebuild inside a run starts at the run.

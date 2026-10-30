@@ -66,6 +66,7 @@ typedef struct AppInit {
     b32 claude_chat_off;        // settings.txt `claude_chat = off`: claude tabs show their terminal, not their conversation
     f32 reader_pt;              // settings.txt `reader_size` (the conversation's text, pt; 0 = 12)
     u8 reader_theme;            // settings.txt `reader_theme`: 0 paper, 1 evening, 2 the window's
+    b32 keep_active_off;        // settings.txt `keep_active = off`: Windows' idle timer runs out while moss is in front
     b32 paste_warning_off;      // settings.txt `paste_warning = off`
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
     b32 explorer_menu;          // Explorer has "Open in moss" (registered for this user)
@@ -225,6 +226,7 @@ typedef struct AppOutput {
     u32 link_tab, link_id;      // an OSC 8 link Ctrl+clicked: the server sends its URI to open (TermClient_TakeLink)
     String session_text;        // non-empty: save the layout
     String paths_text;          // non-empty: save paths.txt (recent folders, bookmarks)
+    b32 keep_active;            // keep the user active (Slack and the like stay green) while the window is in front
     String web_history_text;    // non-empty: save web-history.txt (pages web tabs went to)
     b32 set_window_placement;   // the saved window place (first frame after a restored layout)
     s32 placement_rect[4];      // x, y, w, h

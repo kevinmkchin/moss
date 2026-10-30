@@ -30,6 +30,7 @@
 enum { Platform_MaxEvents = 256, Platform_TextBytes = 4096, Platform_CursorCount = 5 };
 enum { Wake_Files = WM_APP + 1 };   // the lister or the watcher has something
 enum { Test_Command = WM_APP + 3 }; // a test window runs the next of MOSS_TEST_COMMAND's commands (names, ; between)
+enum { Keep_Timer = 77 };          // keep active's check, every 20 s
 
 typedef struct Platform {
     HWND hwnd;
@@ -176,6 +177,7 @@ typedef struct Platform {
     Arena scratch;
     WString session_path;         // NUL-terminated
     WString paths_path;           // paths.txt (recents, bookmarks), NUL-terminated; empty: not saved
+    b32 keep_active;              // the app's: keep the user active while the window is in front (Keep_Timer)
     WString web_history_path;     // web-history.txt (pages web tabs went to), the same way
     WString sessions_meta_path;   // sessions.txt (the sidebar's names, pins, archived); empty: not saved
     String sessions_meta_text;    // as read at start, handed to the first frame
@@ -944,6 +946,7 @@ static void ReadSettings(Platform *p, AppInit *init, b32 headless)
         init->reader_pt = reader_size.count ? (f32)atof((const char *)Str_PushCopy(&p->arena, reader_size).data) : 0;
         init->reader_theme = Str_EqualNoCase(reader_theme, S("evening")) ? 1 : Str_EqualNoCase(reader_theme, S("window")) ? 2 : 0;
         p->reader_pt = init->reader_pt;
+        init->keep_active_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "keep_active"), S("off"));
         init->paste_warning_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
         init->win32_input_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "win32_input"), S("off"));
         String backdrop = Term_ReadSetting(&p->arena, "backdrop");
@@ -1319,6 +1322,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     if (out.sessions_meta_text.count && p->sessions_meta_path.count) Term_WriteFileAtomic((const wchar_t *)p->sessions_meta_path.data, out.sessions_meta_text);
     if (out.account_theme_name.count) SetAccountTheme(p, out.account_theme_name, out.account_theme);
     if (out.paths_text.count && p->paths_path.count) Term_WriteFileAtomic((const wchar_t *)p->paths_path.data, out.paths_text);
+    p->keep_active = out.keep_active && !p->headless && !p->test_window;
     if (out.web_history_text.count && p->web_history_path.count) Term_WriteFileAtomic((const wchar_t *)p->web_history_path.data, out.web_history_text);
     for (s32 i = 0; i < out.setting_count && !p->headless; i++) {
         char key[64] = {0};
@@ -1670,6 +1674,26 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         break;
     case WM_ACTIVATE:
         p->wake_frame = p->frame;
+        break;
+    case WM_TIMER:
+        // --- keep active (settings `keep_active`): while this window is in front, Windows' idle timer (what Slack's
+        //     "away" goes by) never reaches its limit: past 2 minutes with no input, a one-pixel nudge and back. Nothing
+        //     happens with another window in front or the machine locked (no foreground window then) ---
+        if (wparam == Keep_Timer && p->keep_active && GetForegroundWindow() == hwnd) {
+            LASTINPUTINFO last = { sizeof(last), 0 };
+            GetLastInputInfo(&last);
+            if (GetTickCount() - last.dwTime > 2 * 60 * 1000) {
+                INPUT nudge[2] = {0};
+                nudge[0].type = INPUT_MOUSE;
+                nudge[0].mi.dx = 1;
+                nudge[0].mi.dwFlags = MOUSEEVENTF_MOVE;
+                nudge[1] = nudge[0];
+                nudge[1].mi.dx = -1;
+                SendInput(2, nudge, sizeof(INPUT));
+                Logf("window", "keep active: idle %lu s, nudged the mouse", (GetTickCount() - last.dwTime) / 1000);
+            }
+            return 0;
+        }
         break;
     case WM_COPYDATA: {
         // another `moss -d DIR [-- command]` handing its tab to this window: cwd \0 command (UTF-8)
@@ -2755,6 +2779,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
             if (vk && !RegisterHotKey(hwnd, 1, mods, vk)) Logf("window", "the summon key is taken by another program (%lu)", GetLastError());
         }
         SetPropW(hwnd, L"moss.id", (HANDLE)(uintptr_t)p->id_atom);
+        SetTimer(hwnd, Keep_Timer, 20000, NULL);
         p->dpi = GetDpiForWindow(hwnd);
         if (!p->dpi) p->dpi = 96;
         UpdateMonitor(p);
