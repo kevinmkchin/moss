@@ -201,15 +201,14 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - Paste (Ctrl+Shift+V, right-click) goes through the app: it asks for the clipboard (`read_clipboard`), types it
   (`PasteBytes`: line ends as Enter, bracketed when the program asked), and asks first ("Paste N lines?",
   `ConfirmBox`) when several lines would go to a program that didn't ask for bracketed paste (settings
-  `paste_warning = off`). Headless runs have their own clipboard (`clipboard TEXT` in a script, `
-` for line breaks).
+  `paste_warning = off`). Headless runs have their own clipboard (`clipboard TEXT` in a script, `\n` for line breaks).
 
 ## From outside: `moss -d DIR [-- command]`, Explorer
 
 - `moss -d DIR` (or `--cwd`) opens a tab there (`-- command line` is ignored for now: no profiles). With a main
-  window running, the new process hands it over (`WM_COPYDATA`, cwd   command, UTF-8) and exits; otherwise the
+  window running, the new process hands it over (`WM_COPYDATA`, cwd \0 command, UTF-8) and exits; otherwise the
   tab opens once the server's tabs are in (`AppFrameInput.open_request` until `open_taken`; the first-tab rule waits).
-- Settings "\"Open in moss\" in Explorer" registers (HKCU `Software\Classes\Directory[\Background]\shell	erm`,
+- Settings "\"Open in moss\" in Explorer" registers (HKCU `Software\Classes\Directory[\Background]\shell\term`,
   `moss.exe -d "%1"` / `"%V"`) or removes it; its state is read from the registry at start.
 - Alt+Shift+arrows move the focused pane's edge (the nearest split that way) by 5%. Ctrl over a web address
   underlines it (`TermPalette.underline_*`).
@@ -508,7 +507,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   are `File_Cloud`: a cloud mark in their row, and nothing opens them unless the user does (opening downloads).
   The sizer never enters them, nor any reparse point (its listing has no reparse tags to tell links from cloud
   folders), so a OneDrive folder gets no size. Test: `tests/cloud` (offline attributes set by hand).
-- Network: a mapped drive is listed like any other (sizes off: not a local SSD). A share path (`\servershare`)
+- Network: a mapped drive is listed like any other (sizes off: not a local SSD). A share path (`\\server\share`)
   is one crumb and its own root (up from it is This PC); the shell follows to one with `pushd` (cmd can't `cd` to
   a share; pushd maps it a drive letter).
 - Dates: "Today 14:03", "Oct 12", "Mar 1, 2024"; headless runs use a fixed clock (2026-06-15 12:00 UTC).

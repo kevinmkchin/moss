@@ -242,6 +242,7 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_ReadBold], &p->atlas, lists[1], r * 1.06f, 700);
     Font_Create(&p->fonts[Font_ReadHead], &p->atlas, lists[2], r * 1.55f, 600);
     Font_Create(&p->fonts[Font_ReadSans], &p->atlas, ui, r * 0.92f, 400);   // the user's prompts and the prompt box
+    Font_Create(&p->fonts[Font_ReadSansBold], &p->atlas, ui, r * 0.92f, 600);
     // Caslon's hairlines are thinner than a pixel at reading sizes: its coverage darkened, as DirectWrite's own does
     p->fonts[Font_Read].contrast = p->fonts[Font_ReadBold].contrast = p->fonts[Font_ReadHead].contrast = 1.5f;
     p->fonts_dpi = p->dpi;

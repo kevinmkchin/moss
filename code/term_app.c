@@ -4977,7 +4977,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             const Chrome *rc = &reader_c;
             // --- a claude tab's conversation: its transcript as an article over the prompt box, while claude waits at its
             //     own prompt box (a question or a menu shows its terminal instead); or its history searched ---
-            Font *sans = &in->fonts[Font_ReadSans];
+            Font *sans = &in->fonts[Font_ReadSans], *sans_bold = &in->fonts[Font_ReadSansBold];
             const TermTab *cst = FindServerTab(app, t->term_id);
             b32 busy = (cst && (cst->flags & TermTab_Busy)) || ClaudeWorking(box_grid, box_row);
             Rect hv = content;
@@ -5352,12 +5352,17 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         if (rule) { Array_Push(&cv->lists_arena, cv->lines)->kind = HistLine_Rule; at = end + 1; continue; }
                         // a heading, a list item, or a paragraph line
                         u32 kind = HistLine_Text;
+                        b32 head_bold = 0;
                         String marker = {0};
                         s32 indent = 0;
                         if (trim.data[0] == '#') {
                             s64 k = 0;
                             while (k < trim.count && trim.data[k] == '#') k++;
-                            if (k <= 6 && k < trim.count && trim.data[k] == ' ') { kind = HistLine_Heading; trim.data += k + 1; trim.count -= k + 1; }
+                            if (k <= 6 && k < trim.count && trim.data[k] == ' ') {
+                                trim.data += k + 1; trim.count -= k + 1;
+                                if (he->from_user) head_bold = 1;   // a prompt's: bold, in the bubble's own type
+                                else kind = HistLine_Heading;
+                            }
                         } else if (trim.count >= 2 && strchr("-*+", trim.data[0]) && trim.data[1] == ' ') {
                             marker = S("\xE2\x80\xA2");
                             trim.data += 2; trim.count -= 2;
@@ -5374,7 +5379,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         u8 *plain = Arena_PushArray(&cv->arena, u8, trim.count + 1);
                         HistSpan *spans = Arena_PushArray(&cv->arena, HistSpan, trim.count / 2 + 2);
                         s32 span_count = 0, pn = 0;
-                        u32 style = 0;
+                        u32 style = head_bold ? HistSpan_Bold : 0;
                         s32 span_from = 0;
                         for (s64 k = 0; k < trim.count; k++) {
                             u32 flip = 0;
@@ -5388,10 +5393,30 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         if (style && pn > span_from) spans[span_count++] = (HistSpan){ span_from, pn - span_from, style };
                         String para = { plain, pn };
                         Font *pf = kind == HistLine_Heading ? rhead : he->from_user ? sans : rfont;
+                        Font *pbold = kind == HistLine_Heading ? rhead : he->from_user ? sans_bold : rbold;
                         s32 line_from = 0;
                         while (line_from < para.count || (!para.count && !line_from)) {
                             String rest = { para.data + line_from, para.count - line_from };
-                            s64 cut = Font_Fit(pf, rest, msg_w - indent);
+                            // what fits: each run measured in the font it's drawn in (bold, `code` on its shade)
+                            s32 fit_to = line_from, used = 0;
+                            while (fit_to < para.count) {
+                                u32 st = 0;
+                                s32 span_end = (s32)para.count;
+                                for (s32 k = 0; k < span_count; k++) {
+                                    if (spans[k].start + spans[k].len <= fit_to) continue;
+                                    if (spans[k].start <= fit_to) { st = spans[k].style; span_end = spans[k].start + spans[k].len; }
+                                    else span_end = spans[k].start;
+                                    break;
+                                }
+                                Font *rf = (st & HistSpan_Code) ? mono : st ? pbold : pf;
+                                if (st & HistSpan_Code) used += R(0.4);
+                                String run = { para.data + fit_to, span_end - fit_to };
+                                s64 fit = Font_Fit(rf, run, msg_w - indent - used);
+                                if (fit < run.count) { fit_to += (s32)fit; break; }
+                                used += Font_Measure(rf, run);
+                                fit_to = span_end;
+                            }
+                            s64 cut = fit_to - line_from;
                             if (cut < rest.count) {
                                 s64 space = cut;
                                 while (space > 0 && rest.data[space - 1] != ' ') space--;
@@ -5418,7 +5443,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         if (cv->lines.data[cv->lines.count - 1].kind == HistLine_Code) cv->lines.data[cv->lines.count - 1].last = 1;
                     }
                     for (s64 k = msg_first; he->from_user && k < cv->lines.count; k++) cv->lines.data[k].user = 1;
-                    while (cv->lines.count > msg_first && cv->lines.data[cv->lines.count - 1].kind == HistLine_Blank) cv->lines.count--;
+                    while (cv->lines.count > msg_first && cv->lines.data[cv->lines.count - 1].kind == HistLine_Blank) {
+                        cv->lines.count--;
+                        memset(&cv->lines.data[cv->lines.count], 0, sizeof(HistLine));   // pushed again: zero, as new (a prompt's `user` stayed)
+                    }
                     // --- the pictures it names (an absolute path ending in a picture's extension: a screenshot claude
                     //     took, one pasted into the prompt), each under it, once; 8 at most ---
                     s64 images_first = cv->lines.count;
@@ -5716,7 +5744,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         Draw_Rect(dl, R4(tx - R(0.2), ly + R(0.35), tx + w + R(0.2), ly + hl->h - R(0.35)), shade, radius_small);
                         tx = Draw_Text(dl, mono, tx, ly + (hl->h - (s32)(mono->line_h + 0.5f)) / 2, rc->text, run);
                     } else {
-                        tx = Draw_Text(dl, hl->kind == HistLine_Heading ? rhead : rbold, tx, ty, rc->text, run);
+                        tx = Draw_Text(dl, hl->kind == HistLine_Heading ? rhead : hl->user ? sans_bold : rbold, tx, ty, rc->text, run);
                     }
                     at = sp->start + sp->len;
                 }
