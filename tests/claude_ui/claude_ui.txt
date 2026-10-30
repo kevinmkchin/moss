@@ -164,4 +164,27 @@ waitgone session Tidy the enclosure list
 sleep 300
 waitidle
 capture out/sidebar_menu.png
+# --- a folder whose sessions the sidebar leaves out (settings `sidebar_hide`), unless the focused shell is in it ---
+key Ctrl+,
+waitlabel setting Theme
+type left out
+waitgone setting Theme
+key Enter
+type C:\Users\kevinchin\AppData\Local\Temp\term-tests\claude_ui\projects\plain
+key Enter
+key Escape
+waitgone session Rename the build step
+key Ctrl+Tab
+sleep 300
+cursorpane 0
+wait 1
+lmb down
+lmb up
+sleep 200
+type cd projects\plain
+key Enter
+waitlabel session Rename the build step
+sleep 300
+waitidle
+capture out/sidebar_here.png
 exit

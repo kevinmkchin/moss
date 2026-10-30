@@ -145,6 +145,12 @@ static Glyph DrawGlyph(Font* F, u32 Cp)
     {
         std::vector<u8> Bits((size_t)W * H);
         Analysis->CreateAlphaTexture(DWRITE_TEXTURE_ALIASED_1x1, &B, Bits.data(), (UINT32)Bits.size());
+        if(F->contrast > 0)
+        {
+            // thin strokes darker (light ones barely there on a light page otherwise)
+            f32 K = F->contrast;
+            for(u8& A : Bits) { f32 C = A / 255.0f; A = (u8)(C * (K + 1) / (C * K + 1) * 255.0f + 0.5f); }
+        }
         for(s32 Row = 0; Row < H; ++Row)
         {
             memcpy(F->atlas->pixels + (size_t)(Y + Row) * F->atlas->w + X, Bits.data() + (size_t)Row * W, (size_t)W);

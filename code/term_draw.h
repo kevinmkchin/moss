@@ -33,6 +33,7 @@ typedef struct Font {
     void *native;        // the platform's (DirectWrite)
     FontAtlas *atlas;
     f32 size_px, ascent, descent, line_h;
+    f32 contrast;        // coverage darkened (DirectWrite's enhanced contrast: a' = a(k+1) / (ak+1)); 0 = as drawn
     s32 glyph_count, glyph_cap;
     Glyph *glyphs;       // open addressing by codepoint (cap a power of two)
 } Font;

@@ -101,7 +101,7 @@ static const CommandDef g_Commands[Cmd_Count] = {
     [Cmd_ClearScrollback] = { "clear_scrollback", "Clear the scrollback", Key_A + 'K' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_GoTo]          = { "go_to", "Go to a folder", Key_A + 'G' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_Bookmark]      = { "bookmark", "Bookmark this folder (again: not)", 0, 0 },
-    [Cmd_Reader]        = { "reader", "Claude tab: its conversation or its terminal", Key_A + 'R' - 'A', Mod_Ctrl | Mod_Shift },
+    [Cmd_Reader]        = { "chat_mode", "Claude tab: chat mode or its terminal", Key_A + 'R' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_Compose]       = { "compose", "Write a prompt (Ctrl+Enter sends it to the terminal)", Key_A + 'I' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_FocusMode]     = { "focus_mode", "Focus: this pane alone, nothing else (again: back)", Key_A + 'F' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_NewWebTab]     = { "new_web_tab", "New web tab", Key_A + 'B' - 'A', Mod_Ctrl | Mod_Shift },
@@ -112,7 +112,7 @@ enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
     Setting_DimUnfocused,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
-    Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_GoodProgrammer, Setting_ReaderTheme, Setting_ReaderSize, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
+    Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_SidebarHide, Setting_GoodProgrammer, Setting_ReaderTheme, Setting_ReaderSize, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
     Setting_Count
 };
 enum { SettingKind_Choice, SettingKind_Bool, SettingKind_Text, SettingKind_Action };
@@ -133,10 +133,11 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_CopyOnSelect]  = { "Terminal", "Copy on select", "a finished selection goes to the clipboard", SettingKind_Bool },
     [Setting_Agent]         = { "Agents", "Agent command", "what Ctrl+Shift+A starts", SettingKind_Text },
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
-    [Setting_ClaudeChat]    = { "Agents", "Claude tabs as a conversation", "the transcript to read and a prompt box; Ctrl+Shift+R flips a tab", SettingKind_Bool },
+    [Setting_SidebarHide]   = { "Agents", "Sessions left out of the sidebar", "in these folders (; between), unless a shell is in one", SettingKind_Text },
+    [Setting_ClaudeChat]    = { "Agents", "Claude tabs in chat mode", "the conversation to read and a prompt; Ctrl+Shift+R flips a tab", SettingKind_Bool },
     [Setting_GoodProgrammer] = { "Agents", "Be a good programmer", "your principles (good-programmer.md) in every Claude Code session", SettingKind_Bool },
-    [Setting_ReaderTheme]   = { "Reader", "Colors", "Claude's conversation: Paper, Evening, or the window's", SettingKind_Choice },
-    [Setting_ReaderSize]    = { "Reader", "Text size", "Ctrl+= / Ctrl+- over a conversation", SettingKind_Choice },
+    [Setting_ReaderTheme]   = { "Chat mode", "Colors", "Paper, Evening, or the window's", SettingKind_Choice },
+    [Setting_ReaderSize]    = { "Chat mode", "Text size", "Ctrl+= / Ctrl+- in chat mode", SettingKind_Choice },
     [Setting_HiddenFiles]   = { "Files", "Show hidden files", "Ctrl+H", SettingKind_Bool },
     [Setting_FolderSizes]   = { "Files", "Folder sizes", "local SSDs, measured in the background", SettingKind_Bool },
     [Setting_Notifications] = { "Shell", "Notifications", "when a tab off screen wants you", SettingKind_Bool },
@@ -429,6 +430,8 @@ struct App {
     u8 agent_buf[256];
     String agents;            // the server's agent names (settings.txt `agents`), in agents_buf
     u8 agents_buf[256];
+    String side_hide;         // folders whose sessions the sidebar leaves out (settings.txt `sidebar_hide`), in side_hide_buf
+    u8 side_hide_buf[1024];
     String term_font;         // the terminal font family, in term_font_buf
     u8 term_font_buf[128];
     b32 notifications_off;
@@ -995,6 +998,7 @@ static void ApplySettings(App *app, const AppInit *init)
     app->opacity = init->opacity > 0 ? Clamp(init->opacity, 0.2f, 1.0f) : 1.0f;
     app->agent_command = CopyInto(app->agent_buf, sizeof(app->agent_buf), init->agent_command);
     app->agents = CopyInto(app->agents_buf, sizeof(app->agents_buf), init->agents);
+    app->side_hide = CopyInto(app->side_hide_buf, sizeof(app->side_hide_buf), init->sidebar_hide);
     app->term_font = CopyInto(app->term_font_buf, sizeof(app->term_font_buf), init->term_font);
     app->hide_hidden = init->hide_hidden;
     app->folder_sizes_off = init->folder_sizes_off;
@@ -3258,12 +3262,39 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
         }
         b32 hits_now = want.count >= 3 && Str_Equal(in->session_hits_text, want);
+        String here = FocusedCwd(app);
         for (s32 pass = 0; pass < 2; pass++) {   // the pinned first
             for (s64 i = 0; i < in->session_count; i++) {
                 const TermSession *ss = &in->sessions[i];
                 s32 mi = SessionMetaIndex(app, ss->id, 0);
                 b32 pinned = mi >= 0 && app->side_meta[mi].pin, archived = mi >= 0 && app->side_meta[mi].archive;
                 if (pinned != (pass == 0) || (archived && !want.count)) continue;
+                // --- left out: a session in one of settings `sidebar_hide`'s folders, unless the focused shell is in it ---
+                b32 hidden = 0;
+                for (s64 at = 0; at < app->side_hide.count && !hidden;) {
+                    s64 end = at;
+                    while (end < app->side_hide.count && app->side_hide.data[end] != ';') end++;
+                    String folder = { app->side_hide.data + at, end - at };
+                    at = end + 1;
+                    while (folder.count && (folder.data[0] == ' ' || folder.data[0] == '\t')) { folder.data++; folder.count--; }
+                    while (folder.count && (folder.data[folder.count - 1] == ' ' || folder.data[folder.count - 1] == '\\' || folder.data[folder.count - 1] == '/')) folder.count--;
+                    if (!folder.count) continue;
+                    b32 under[2] = {0};
+                    String paths[2] = { ss->cwd, here };
+                    for (s32 k = 0; k < 2; k++) {
+                        String pth = paths[k];
+                        b32 same = pth.count >= folder.count;
+                        for (s64 c2 = 0; same && c2 < folder.count; c2++) {
+                            u8 a = pth.data[c2], b = folder.data[c2];
+                            a = a == '/' ? '\\' : a >= 'A' && a <= 'Z' ? (u8)(a + 32) : a;
+                            b = b == '/' ? '\\' : b >= 'A' && b <= 'Z' ? (u8)(b + 32) : b;
+                            same = a == b;
+                        }
+                        under[k] = same && (pth.count == folder.count || pth.data[folder.count] == '\\' || pth.data[folder.count] == '/');
+                    }
+                    hidden = under[0] && !under[1];
+                }
+                if (hidden) continue;
                 String name = mi >= 0 ? (String){ app->side_meta[mi].name, app->side_meta[mi].name_len } : (String){0};
                 b32 hit = 0;
                 for (s64 h = 0; hits_now && h < in->session_hit_count && !hit; h++) hit = Str_Equal(in->session_hits[h].id, ss->id);
@@ -4941,33 +4972,32 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s32 text_w = Max(R(10), Min(pw - 2 * R(3), (s32)(R(64) * app->reader_pt / 12)));
             s32 col_x = px0 + (pw - text_w) / 2;
             if (chat_shown) {
-                // --- the prompt box: the column's width and a little more, as tall as its text (a line to 40% of the
-                //     pane); under the text the keys and the send button (stop, while a turn runs and nothing's written) ---
-                s32 slh = (s32)(sans->line_h + 0.5f), pad = R(1.0), foot_h = R(2.2);
-                s32 box_w = Max(R(10), Min(RectW(content) - 2 * R(1.5), text_w + 2 * R(2)));
-                s32 lines = Clamp(TextArea_Lines(ui, &cv->draft, sans, box_w - 2 * pad), 1, Max(1, (RectH(content) * 2 / 5 - 2 * pad - foot_h) / Max(1, slh)));
-                Rect dock = CutBottom(&hv, Min(RectH(hv), lines * slh + 2 * pad + foot_h + R(2.2)));
-                s32 bx = px0 + (pw - box_w) / 2;
-                Rect box = R4(bx, dock.y0 + R(0.4), bx + box_w, dock.y1 - R(1.8));
+                // --- the prompt: written on the page itself, in the column's type and width, under a hairline (darker
+                //     while it has the keyboard), as tall as its text (a line to 40% of the pane); under it the keys, faint,
+                //     and on the right "Send" (or "Stop", while claude works and nothing's written), a word in the accent ---
+                Font *ink = &in->fonts[Font_Read];
+                s32 ilh = (s32)(ink->line_h + 0.5f), foot_h = R(2.0);
+                s32 lines = Clamp(TextArea_Lines(ui, &cv->draft, ink, text_w), 1, Max(1, (RectH(content) * 2 / 5 - foot_h - R(3)) / Max(1, ilh)));
+                Rect dock = CutBottom(&hv, Min(RectH(hv), lines * ilh + foot_h + R(3.2)));
+                Rect box = R4(col_x, dock.y0 + R(1.1), col_x + text_w, dock.y1 - R(0.7));
                 b32 typing = focused_pane && !modal && !(app->find_open && app->find_focus) && !app->side_focus;
                 Ui_Hit(ui, Ui_IdN(Ui_Id("ChatBox"), n->id), box);
-                Draw_RectEx(dl, box, rc->surface, typing ? ColorMix(rc->line, rc->accent, 0.4f) : rc->line, (f32)Max(1, R(0.1)), radius_large, NULL, 0, 0, (f32)R(1));
-                Rect inner = RectShrink(box, pad);
+                Draw_Rect(dl, R4(col_x, dock.y0, col_x + text_w, dock.y0 + Max(1, line_w)), typing ? ColorMix(rc->line, rc->text, 0.35f) : rc->line, 0);
+                Rect inner = box;
                 Rect foot = CutBottom(&inner, foot_h);
-                Ui_TextArea(ui, Ui_IdN(Ui_Id("ChatDraft"), n->id), &cv->draft, inner, sans, typing,
-                            busy ? S("Write the next prompt: it goes once Claude is done") : S("Reply to Claude..."), rc->text, rc->dim, rc->selection);
+                Ui_TextArea(ui, Ui_IdN(Ui_Id("ChatDraft"), n->id), &cv->draft, inner, ink, typing,
+                            busy ? S("Write the next prompt; it goes once Claude is done") : S("Write to Claude"), rc->text, rc->faint, rc->selection);
                 b32 stop = busy && !cv->draft.count;
-                Rect sb = RectCenter(CutRight(&foot, R(2.4)), R(2.2), R(2.2));
+                b32 live = stop || cv->draft.count;
+                String act = stop ? S("Stop  \xC2\xB7  Esc") : S("Send  \xE2\x86\xB5");
+                Rect sb = CutRight(&foot, Font_Measure(small, act) + R(1.0));
                 u64 sid = Ui_IdN(Ui_Id("ChatSend"), n->id);
                 UiSignal ss = Ui_Hit(ui, sid, sb);
-                b32 live = stop || cv->draft.count;
-                Draw_Rect(dl, sb, live ? (ss.hovered ? ColorMix(rc->accent, 0xFFFFFFFFu, 0.12f) : rc->accent) : ColorMix(rc->surface, rc->text, 0.08f), (f32)R(1.1));
-                Draw_Icon(dl, icons_small, sb, live ? rc->on_accent : rc->dim, stop ? Icon_Stop : Icon_Up);
+                if (ss.hovered && live) ui->cursor = Cursor_Hand;
+                Draw_TextIn(dl, small, sb, live ? (ss.hovered ? rc->text : rc->accent) : rc->faint, act, 1);
                 Named(app, stop ? S("chat stop") : S("chat send"), sb);
-                Ui_Tooltip(ui, sid, stop ? S("Stop Claude   Esc") : S("Send   Enter"));
-                if (ss.clicked) ChatSend(app, &f, cv, stop);
-                Draw_TextIn(dl, small, foot, rc->dim, busy ? S("Enter sends  \xC2\xB7  Shift+Enter a new line  \xC2\xB7  Esc stops Claude") :
-                            S("Enter sends  \xC2\xB7  Shift+Enter a new line  \xC2\xB7  Ctrl+Shift+R its terminal"), 0);
+                if (ss.clicked && live) ChatSend(app, &f, cv, stop);
+                Draw_TextIn(dl, small, foot, rc->faint, S("Shift+Enter a new line  \xC2\xB7  Ctrl+Shift+R the terminal"), 0);
                 Named(app, S("chat prompt"), box);
                 // --- while claude works: a spinner and its own status line (the row over its prompt box: what it's
                 //     doing, for how long; its spinner mark dropped), else "Working" ---
@@ -6652,6 +6682,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (k == Setting_BackgroundStrength) value = app->background_strength ? Str_PushFormat(fa, "%d%%", app->background_strength) : S("Off");
             if (k == Setting_Agent) value = app->agent_command.count ? app->agent_command : S("claude");
             if (k == Setting_Agents) value = app->agents.count ? app->agents : S("the usual ones");
+            if (k == Setting_SidebarHide) value = app->side_hide.count ? app->side_hide : S("none");
             b32 on = k == Setting_HiddenFiles ? !app->hide_hidden : k == Setting_FolderSizes ? !app->folder_sizes_off : k == Setting_CursorBlink ? app->cursor_blink : k == Setting_Ligatures ? app->ligatures :
                      k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ClaudeChat ? !app->chat_off : k == Setting_ExplorerMenu ? app->explorer_menu :
                      k == Setting_StartWithWindows ? app->start_with_windows : k == Setting_Notifications ? !app->notifications_off :
@@ -6678,7 +6709,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Rect er = RectCenter(CutRight(&in_row, R(18)), R(18), R(1.9));
                 Draw_RectEx(dl, er, c->bg, c->accent, 1, radius_small, NULL, 0, 0, 0);
                 Ui_TextEdit(ui, Ui_Id("SettingEdit"), &app->setting_edit, R4(er.x0 + R(0.4), er.y0, er.x1 - R(0.4), er.y1), font, 1,
-                            k == Setting_Agent ? S("claude") : S("codex gemini aider ..."), c->text, c->dim, c->selection);
+                            k == Setting_Agent ? S("claude") : k == Setting_Agents ? S("codex gemini aider ...") : S("C:\\dev; D:\\work"), c->text, c->dim, c->selection);
             } else if (sd->kind == SettingKind_Text) {
                 CutRight(&in_row, R(0.3));
                 Draw_TextIn(dl, font, CutRight(&in_row, Min(Font_Measure(font, value), R(18))), c->dim, value, 1);
@@ -6838,15 +6869,16 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 key = Str_FromCStr(act == Setting_HiddenFiles ? "hidden_files" : act == Setting_FolderSizes ? "folder_sizes" : act == Setting_Notifications ? "notifications" : "vs_env");
                 val = *off ? S("off") : S("on");
             } else if (kind == SettingKind_Text && step == 0) {
-                TextEdit_Set(&app->setting_edit, act == Setting_Agent ? app->agent_command : app->agents);
+                TextEdit_Set(&app->setting_edit, act == Setting_Agent ? app->agent_command : act == Setting_Agents ? app->agents : app->side_hide);
                 app->setting_editing = act + 1;
             } else if (kind == SettingKind_Text && step == 2) {
                 String edited = TextEdit_String(&app->setting_edit);
                 if (act == Setting_Agent) app->agent_command = CopyInto(app->agent_buf, sizeof(app->agent_buf), edited);
-                else app->agents = CopyInto(app->agents_buf, sizeof(app->agents_buf), edited);
+                else if (act == Setting_Agents) app->agents = CopyInto(app->agents_buf, sizeof(app->agents_buf), edited);
+                else app->side_hide = CopyInto(app->side_hide_buf, sizeof(app->side_hide_buf), edited);
                 app->setting_editing = 0;
-                key = Str_FromCStr(act == Setting_Agent ? "agent" : "agents");
-                val = act == Setting_Agent ? app->agent_command : app->agents;
+                key = Str_FromCStr(act == Setting_Agent ? "agent" : act == Setting_Agents ? "agents" : "sidebar_hide");
+                val = act == Setting_Agent ? app->agent_command : act == Setting_Agents ? app->agents : app->side_hide;
             } else if (act == Setting_Background && step == 0) {
                 out->choose_background = 1;
             } else if (act == Setting_BackgroundStrength) {

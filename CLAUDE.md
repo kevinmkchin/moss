@@ -263,14 +263,16 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   match color, the current one framed and scrolled to the middle.
 ## Claude tabs made comfortable: the conversation, the composer, clean copy
 
-- A claude tab shows its conversation (`Chat`, one per claude tab shown lately, `App.chats[8]`): the transcript as an
-  article above a prompt box, not claude's TUI. Settings "Claude tabs as a conversation" (`claude_chat = off`) turns
-  that the other way; Ctrl+Shift+R (`reader`) flips one tab (`PaneTab.chat_flip`). Only while claude sits at its own
+- Chat mode: a claude tab shows its conversation (`Chat`, one per claude tab shown lately, `App.chats[8]`): the
+  transcript as an article above a prompt, not claude's TUI. Settings "Claude tabs in chat mode" (`claude_chat = off`)
+  turns that the other way; Ctrl+Shift+R (`chat_mode`) flips one tab (`PaneTab.chat_flip`). Only while claude sits at its own
   prompt box (`ClaudePromptBox`: a rule, the `❯` line (a no-break space after it), a rule, the lowest rule within the
   bottom 12 rows written, nothing under it but the mode line and notices such as a usage warning: no other rule, no
   `❯ 1.` choice): a question, a permission, a menu (/model) or the start shows the terminal, and the conversation comes back
   once it's answered there.
-- Its box (`Chat.draft`, a `Ui_TextArea` in `Font_ReadSans`, Segoe UI 11 pt): Enter sends (`ChatSend`: as typed, or a
+- Its prompt (`Chat.draft`, a `Ui_TextArea`) is written on the page itself: the column's width and reading type
+  (`Font_Read`), under a hairline (darker while it has the keyboard), no box; under it the keys, faint, and "Send ↵" /
+  "Stop · Esc" as a word in the accent. Enter sends (`ChatSend`: as typed, or a
   bracketed paste when it has lines; Enter goes 120 ms later on its own, as the key, so claude doesn't take it as part
   of a paste: `SendLine`, `App.enters`, also the model picker's `/model` and the composer; an Enter still on its way to
   the tab goes before the next line), Shift+Enter is a new line, Esc stops a turn (win32-input-mode's Esc key
@@ -308,10 +310,11 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   12 pt), Libre Caslon Text to read (`Font_Read`, `Font_ReadBold`), Libre Caslon Display headings (`Font_ReadHead`), the
   user's prompts in Segoe UI (`Font_ReadSans`) in a soft rounded bubble, Cascadia Mono code. moss ships the Caslons
   (`vendor\fonts`, SIL OFL, copied to `fonts\` next to moss.exe; Georgia when they're missing): `Font_Create` takes a
-  font file's full path as a family. Its text size is its own (settings `reader_size`, "Reader > Text size"; Ctrl+= /
-  Ctrl+- / Ctrl+0 over a conversation, `App.reader_pt` -> `AppOutput.reader_pt`: the platform makes the reader's fonts
+  font file's full path as a family. Caslon's hairlines are thinner than a pixel at reading sizes, so the reader's fonts
+  darken their coverage as DirectWrite's enhanced contrast does (`Font.contrast` 1.5: a' = a(k+1) / (ak+1)). Its text size is its own (settings `reader_size`, "Chat mode > Text size"; Ctrl+= /
+  Ctrl+- / Ctrl+0 in chat mode, `App.reader_pt` -> `AppOutput.reader_pt`: the platform makes the reader's fonts
   again, and the lines are laid out again once the new fonts are in). Its colors are its own too (settings
-  `reader_theme`, "Reader > Colors", `ReaderTheme_*`): Paper (warm white, ink, an oxblood accent; the default), Evening
+  `reader_theme`, "Chat mode > Colors", `ReaderTheme_*`): Paper (warm white, ink, an oxblood accent; the default), Evening
   (the same at night) or the window's theme; the pane's account line and strip stay the window's; each line has its own height and place
   (`HistLine.y/h`: gaps before a message, a heading, a block); headers in local time ("Today 14:03"); code blocks in a
   container with a header (the fence's language, the copy button); tables padded, the header row on a shade.
@@ -401,6 +404,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   prompt's attachment: Claude Code 2.1 copies its system prompt and CLAUDE.md there) (`SessionsSearchThread`; a newer search stops it;
   logs "sessions search: N of M sessions, MB, ms"), and answers `MSG_SESSION_HITS` (each hit's id and the JSON string
   around the match). Hits join the filter's rows with their snippet in the accent.
+- Settings `sidebar_hide` ("Sessions left out of the sidebar"; folders, `;` between): sessions in them and below aren't
+  listed, unless the focused tab's folder is in one (a shell cd'd there shows that folder's).
 - The sidebar's own notes (`%LOCALAPPDATA%\moss\sessions.txt`: `name <id> = <name>`, `pin <id>`, `archive <id>`; headless
   and test runs: none): a right-click on a row's menu renames (in the row: Enter keeps, empty = its first prompt), pins
   (first, under "Pinned") or archives it (left out unless something's typed; marked "archived").

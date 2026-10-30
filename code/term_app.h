@@ -50,6 +50,7 @@ typedef struct AppInit {
     f32 opacity;                // settings.txt `opacity` (20-100 %, as 0..1): terminals' default backgrounds
     String term_font;           // settings.txt `font`: the terminal font family
     String agents;              // settings.txt `agents` (the server's agent names; empty = its defaults)
+    String sidebar_hide;        // settings.txt `sidebar_hide`: folders (';' between) whose sessions the sidebar leaves out
     b32 hide_hidden;            // settings.txt `hidden_files = off`
     b32 folder_sizes_off;       // settings.txt `folder_sizes = off`
     b32 notifications_off;      // settings.txt `notifications = off`

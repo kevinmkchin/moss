@@ -240,6 +240,8 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_ReadBold], &p->atlas, lists[1], r * 1.06f, 700);
     Font_Create(&p->fonts[Font_ReadHead], &p->atlas, lists[2], r * 1.55f, 600);
     Font_Create(&p->fonts[Font_ReadSans], &p->atlas, ui, r * 0.92f, 400);   // the user's prompts and the prompt box
+    // Caslon's hairlines are thinner than a pixel at reading sizes: its coverage darkened, as DirectWrite's own does
+    p->fonts[Font_Read].contrast = p->fonts[Font_ReadBold].contrast = p->fonts[Font_ReadHead].contrast = 1.5f;
     p->fonts_dpi = p->dpi;
     p->fonts_reader_pt = p->reader_pt;
 }
@@ -920,6 +922,7 @@ static void ReadSettings(Platform *p, AppInit *init, b32 headless)
         if (opacity.count) init->opacity = (f32)atof((const char *)opacity.data) / 100.0f;
         init->term_font = Term_ReadSetting(&p->arena, "font");
         init->agents = Term_ReadSetting(&p->arena, "agents");
+        init->sidebar_hide = Term_ReadSetting(&p->arena, "sidebar_hide");
         init->hide_hidden = Str_Equal(Term_ReadSetting(&p->arena, "hidden_files"), S("off"));
         init->folder_sizes_off = Str_Equal(Term_ReadSetting(&p->arena, "folder_sizes"), S("off"));
         String strength = Term_ReadSetting(&p->arena, "background_strength");
