@@ -325,6 +325,57 @@ static bool32 TypedCommand(const std::string& Text)
     return I > 1 && (I == Text.size() || Text[I] == ' ' || Text[I] == '\n');
 }
 
+// A picture a transcript carries as base64 (a Read tool's result, a pasted prompt's block) at At, where its
+// "type":"image" is: written once to %TEMP%\moss-chat\<hash>.<ext>, its path back ("" when there's none). The
+// chat shows a picture under a message that names its path.
+static std::string SavePictureBlock(const std::string& Line, size_t At)
+{
+    size_t Media = Line.find("\"media_type\":\"", At), Data = Line.find("\"data\":\"", At);
+    if(Media == std::string::npos || Data == std::string::npos || Data < Media) { return std::string(); }
+    std::string Type;
+    JsonDecodeString(Line, Media + 14, Type);
+    const char* Ext = Type == "image/png" ? "png" : Type == "image/jpeg" ? "jpg" : Type == "image/gif" ? "gif" : Type == "image/webp" ? "webp" : 0;
+    size_t Begin = Data + 8, End = Line.find('"', Begin);
+    if(!Ext || End == std::string::npos) { return std::string(); }
+
+    // --- the name: a hash of the base64 text, so a picture read again is written once ---
+    u64 Hash = 1469598103934665603ull;
+    for(size_t I = Begin; I < End; I++) { Hash = (Hash ^ (u8)Line[I]) * 1099511628211ull; }
+    wchar_t Temp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, Temp);
+    std::wstring Dir = std::wstring(Temp) + L"moss-chat";
+    CreateDirectoryW(Dir.c_str(), 0);
+    char Name[32];
+    snprintf(Name, sizeof(Name), "%016llx.%s", (unsigned long long)Hash, Ext);
+    std::wstring Path = Dir + L"\\" + Utf8ToWide(Name);
+    if(GetFileAttributesW(Path.c_str()) != INVALID_FILE_ATTRIBUTES) { return WideToUtf8(Path); }
+
+    // --- decode the base64 (its characters only; the line's quotes and marks skipped) and write it ---
+    std::string Bytes;
+    u32 Bits = 0;
+    s32 Count = 0;
+    for(size_t I = Begin; I < End; I++)
+    {
+        char C = Line[I];
+        u32 V = 0;
+        if(C >= 'A' && C <= 'Z') { V = C - 'A'; }
+        else if(C >= 'a' && C <= 'z') { V = C - 'a' + 26; }
+        else if(C >= '0' && C <= '9') { V = C - '0' + 52; }
+        else if(C == '+') { V = 62; }
+        else if(C == '/') { V = 63; }
+        else { continue; }
+        Bits = ((Bits << 6) | V) & 0xFFFFFF;
+        Count += 6;
+        if(Count >= 8) { Count -= 8; Bytes += (char)((Bits >> Count) & 0xFF); }
+    }
+    HANDLE File = CreateFileW(Path.c_str(), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+    if(File == INVALID_HANDLE_VALUE) { return std::string(); }
+    DWORD Written = 0;
+    WriteFile(File, Bytes.data(), (DWORD)Bytes.size(), &Written, 0);
+    CloseHandle(File);
+    return WideToUtf8(Path);
+}
+
 static volatile LONG g_HistoryVersion;
 
 // What was written to SessionId's transcript since the last read; another session or a shorter file starts over.
@@ -460,7 +511,14 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                 size_t Blocks = Line.find("\"role\":\"user\",\"content\":[");
                 for(size_t At = Line.find("\"type\":\"", Blocks); At != std::string::npos; At = Line.find("\"type\":\"", At + 1))
                 {
-                    if(!Line.compare(At, 14, "\"type\":\"image\"")) { E.Text += E.Text.empty() ? "[Image]" : "\n[Image]"; continue; }
+                    if(!Line.compare(At, 14, "\"type\":\"image\""))
+                    {
+                        // the picture's path (the chat shows it), or [Image] when it can't be read
+                        std::string Pic = SavePictureBlock(Line, At);
+                        std::string Mark = Pic.empty() ? std::string("[Image]") : Pic;
+                        E.Text += E.Text.empty() ? Mark : "\n" + Mark;
+                        continue;
+                    }
                     if(Line.compare(At, 13, "\"type\":\"text\"")) { continue; }
                     size_t T = Line.find("\"text\":\"", At + 13);
                     std::string Part;
@@ -628,6 +686,17 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
                     Text += Out;
                     Changed = true;
                     C.Pending.erase(P);
+                    // a picture the result carries (a Read of an image): a claude line of its own, its path
+                    size_t Image = Block.find("\"type\":\"image\"");
+                    std::string Pic = Image == std::string::npos ? std::string() : SavePictureBlock(Block, Image);
+                    if(!Pic.empty())
+                    {
+                        history_entry I = {};
+                        I.Kind = 0;
+                        I.Text = Pic;
+                        JsonFindString(Line, "timestamp", true, I.Time);
+                        C.Entries.push_back(I);
+                    }
                 }
                 continue;
             }
