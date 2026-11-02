@@ -299,6 +299,7 @@ static std::string ConfigLogin(const std::string& Dir)
 // .claude.json's oauthAccount and approved keys, .credentials.json's subscriptionType (nothing else is taken from
 // it), settings.json, and the model of the transcript's last reply. Secrets read on the way are wiped. Empty when a
 // file was caught mid-write (not whole JSON): unknown, not a change.
+#pragma comment(lib, "version.lib")   // GetFileVersionInfoW: a new claude's version
 static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const std::string& Cwd)
 {
     std::wstring Env = ProcessEnvironment(Pid);
@@ -373,7 +374,7 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
 
     // --- the model: the transcript's last reply's (projects\<cwd, every other character a dash>\<id>.jsonl), else
     //     what it was started with: --model, ANTHROPIC_MODEL, settings.json ---
-    std::string Model;
+    std::string Model, Version;
     u64 Context = 0;   // tokens in its context at the last reply (its input, cached or not)
     if(!SessionId.empty() && !Cwd.empty())
     {
@@ -385,6 +386,7 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
             std::string M;
             if(JsonDecodeString(Tail, At + 9, M) && !M.empty() && M[0] != '<') { Model = M; } // not "<synthetic>" (errors)
         }
+        JsonFindString(Tail, "version", true, Version);   // Claude Code's, on each line it writes
         // the last reply's usage: what it was given (fresh, cache written, cache read) is what the context held
         size_t Usage = Tail.rfind("\"usage\":{");
         for(const char* Field : {"\"input_tokens\":", "\"cache_creation_input_tokens\":", "\"cache_read_input_tokens\":"})
@@ -429,8 +431,28 @@ static std::string ClaudeAccount(DWORD Pid, const std::string& SessionId, const 
         if(Ok) { Model = Pretty; }
     }
     if(Model.empty()) { Model = "Default"; }
+    if(Version.empty())
+    {
+        // --- no transcript yet (a new session): the program's own version (its file's) ---
+        HANDLE Proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Pid);
+        wchar_t Image[MAX_PATH] = {0};
+        DWORD Len = MAX_PATH;
+        if(Proc && QueryFullProcessImageNameW(Proc, 0, Image, &Len) && Len >= 10 && !_wcsicmp(Image + Len - 10, L"claude.exe"))
+        {
+            DWORD Ignored = 0, Size = GetFileVersionInfoSizeW(Image, &Ignored);
+            std::vector<u8> Info(Size ? Size : 1);
+            VS_FIXEDFILEINFO* Fixed = 0;
+            UINT FixedLen = 0;
+            if(Size && GetFileVersionInfoW(Image, 0, Size, Info.data()) && VerQueryValueW(Info.data(), L"\\", (void**)&Fixed, &FixedLen) && Fixed)
+            {
+                Version = std::to_string(HIWORD(Fixed->dwFileVersionMS)) + "." + std::to_string(LOWORD(Fixed->dwFileVersionMS)) + "." +
+                          std::to_string(HIWORD(Fixed->dwFileVersionLS));
+            }
+        }
+        if(Proc) { CloseHandle(Proc); }
+    }
     return Method + "\n" + (ClaudeAi ? Org : std::string()) + "\n" + (ClaudeAi ? Email : std::string()) + "\n" + Model + "\n" +
-           (Context ? std::to_string(Context) : std::string());
+           (Context ? std::to_string(Context) : std::string()) + "\n" + Version;
 }
 
 // A settings.txt list of program names (separated by spaces or commas), lowercase; Default when unset.
@@ -2281,6 +2303,14 @@ static int ServerMain()
                     T->PromptSeen = true;
                     T->AtPrompt = true;
                     T->Term.Cwd.clear();
+                }
+                // ... and cmd taking a command line (after that prompt, or one typed ahead) that something runs now
+                if(T->Term.Ran)
+                {
+                    T->Term.Ran = false;
+                    T->AtPrompt = false;
+                    T->EnterAtMs = GetTickCount64();
+                    T->Running = T->PromptSeen && T->SessionId.empty();
                 }
             }
             // cmd ending (exit typed in the shell) ends the tab.

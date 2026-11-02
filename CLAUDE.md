@@ -210,7 +210,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 
 ## From outside: `moss -d DIR [-- command]`, Explorer
 
-- `moss -d DIR` (or `--cwd`) opens a tab there (`-- command line` is ignored for now: no profiles). With a main
+- `moss -d DIR` (or `--cwd`) opens a tab there; `-- command line` has its shell run it first (`TermNewTab.command`). With a main
   window running, the new process hands it over (`WM_COPYDATA`, cwd \0 command, UTF-8) and exits; otherwise the
   tab opens once the server's tabs are in (`AppFrameInput.open_request` until `open_taken`; the first-tab rule waits).
 - Settings "\"Open in moss\" in Explorer" registers (HKCU `Software\Classes\Directory[\Background]\shell\term`,
@@ -397,6 +397,9 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   `subscriptionType` (nothing else is taken from it; secrets read on the way are wiped), and the model of the
   transcript's last reply (else `--model`, `ANTHROPIC_MODEL`, settings.json, "Default"). Organization and email only
   for a claude.ai login. Test: `tests/sessions` (a made-up Max login).
+- Its 6th field is Claude Code's version (the transcript's lines say it; a new session's, before it has one, from
+  claude.exe's file version). Chat mode heads the conversation with it as claude's own start does: "Claude Code v2.1.309",
+  the model and plan, the folder (`Chat.head_h` over the first message).
 - Its 5th field is the context's size: the last reply's usage (input, cache written, cache read) in the transcript tail;
   the hold compares login, organization and email only. On the line's right: "Mode" (claude's permission mode read off
   its screen's bottom 4 rows: plan, accept edits, auto, bypass permissions, else default; a click sends Shift+Tab) and
@@ -522,7 +525,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   Later opens stay where the browser was unless the shell moved since.
 - A shell is running something while its cmd has a child (not clink's background git status, recognised by
   `GIT_OPTIONAL_LOCKS=0` in its command line), from the Enter of a command line on, and no more the moment its
-  prompt is back (OSC 9;9; `tab::AtPrompt`). Type-ahead can leave it idle until the next scan (1-3 s).
+  prompt is back (OSC 9;9; `tab::AtPrompt`). A line typed ahead has no Enter of its own once the prompt is back, so
+  `clink-moss\running.lua` says when cmd takes a line (OSC 7777;run, `vt_terminal::Ran`): running from then too.
 - Moving while the tab is idle at its prompt makes the shell follow when the browser closes (`cd "sub"` or
   `cd /d "C:\..."`, typed into the shell). Busy = `TabBusy`: a program running, an agent open (even idle), a
   claude turn. Busy means read-only: browsing anywhere, the shell stays; delete, rename, new folder and paste

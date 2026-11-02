@@ -71,6 +71,7 @@ struct vt_terminal
     std::string PassThrough;
     std::string Notify; // latest OSC 9 / OSC 777 notification text, cleared by the reader
     std::string View;   // OSC 7777;view;<path> from `clod view`: an image file to show, cleared by the reader
+    bool32 Ran;         // OSC 7777;run (clink took a command line) since the last prompt's OSC 9;9; cleared by the reader
     std::string Cwd;    // OSC 9;9;<path> from the prompt: the shell's folder, cleared by the reader
     // Where prompts began (OSC 9;9): absolute lines (ScrollbackPushed + row), and the folder the prompt shows first.
     // ConPTY passes the OSC through ahead of (or behind) the text around it, so Line is near the prompt, not on it,
@@ -755,6 +756,7 @@ static void VtOscDispatch(vt_terminal& T)
             if(strncmp(Arg, "9;", 2) == 0)
             {
                 T.Cwd = Arg + 2;
+                T.Ran = false;   // the prompt after it: whatever ran has ended
                 u64 Line = T.ScrollbackPushed + (u64)T.CursorY;
                 if(!T.AltActive && (T.Marks.empty() || T.Marks.back().Line != Line)) { T.Marks.push_back({Line, T.Cwd, false}); }
                 while(T.Marks.size() > 4096) { T.Marks.pop_front(); }
@@ -771,6 +773,8 @@ static void VtOscDispatch(vt_terminal& T)
         {
             // OSC 7777;view;<absolute path>: clod's own, sent by `clod view` running in this tab.
             if(strncmp(Arg, "view;", 5) == 0) { T.View = Arg + 5; }
+            // OSC 7777;run: clink-moss\running.lua, cmd took a command line (one typed ahead has no Enter of its own)
+            if(strcmp(Arg, "run") == 0) { T.Ran = true; }
         } break;
     }
 }

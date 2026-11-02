@@ -352,6 +352,7 @@ typedef struct Chat {
     b32 sel_on, selecting;
     s32 copied_msg;           // the reply copied last (1-based message), when: "Copied" for a moment
     s32 agents_running;       // subagents still at work (asked for often meanwhile; shown over the prompt)
+    s32 head_h;               // the session's heading over the first message (its version, model, plan, folder), px
 } Chat;
 
 // A question claude asks on its screen (a permission, a choice, a menu: numbered choices, one marked "❯"), read as a
@@ -2923,6 +2924,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     if (in->open_request && in->connected && app->tabs_seen) {
         PaneTab *ft = panes->selected;
         RequestTab(app, &f, ft ? ft->node : panes->root, TermNew_Shell, in->open_cwd);
+        if (in->open_command.count) f.new_tabs.data[f.new_tabs.count - 1].command = Str_PushCopy(f.fa, in->open_command);   // its shell runs it first
         out->open_taken = 1;
         app->first_requested = 1;
     }
@@ -3371,7 +3373,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     f32 to = -1;
                     for (s64 li = 0; li < cv->lines.count; li++) {
                         if (cv->lines.data[li].kind != HistLine_User) continue;
-                        f32 y = (f32)cv->lines.data[li].y - (f32)R(0.6);
+                        f32 y = (f32)(cv->lines.data[li].y + cv->head_h) - (f32)R(0.6);
                         if (e->key == Key_Up && y < cv->scroll - 2) to = y;
                         if (e->key == Key_Down && y > cv->scroll + 2) { to = y; break; }
                     }
@@ -6215,11 +6217,19 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 cv->current = Min(cv->current, (s32)cv->matches.count - 1);
                 END_TIMED_BLOCK(ChatBuild);
             }
-            f32 content_h = (f32)(cv->total_h + R(4));
+            // --- the session's heading, over its first message, as claude's own start shows it: Claude Code's version,
+            //     the model and the plan, the folder ---
+            String head_version = cst ? AccountPart(cst->account, 5) : (String){0}, head_model = cst ? AccountPart(cst->account, 3) : (String){0};
+            String head_plan = cst ? AccountPart(cst->account, 0) : (String){0};
+            if (head_plan.count > 8 && Str_Equal((String){ head_plan.data + head_plan.count - 8, 8 }, S(" account"))) head_plan.count -= 8;   // "Claude Max account"
+            s32 head_line = R(1.75);
+            s32 head_h = cst && cst->account.count ? 3 * head_line + R(2.4) : 0;
+            cv->head_h = head_h;
+            f32 content_h = (f32)(cv->total_h + R(4) + head_h);
             s32 mc = (s32)cv->matches.count;
             if (cv->follow) {
                 cv->follow = 0;
-                if (cv->current >= 0 && cv->current < mc) cv->scroll = (f32)cv->lines.data[cv->matches.data[cv->current].line].y - (f32)view_h / 2;
+                if (cv->current >= 0 && cv->current < mc) cv->scroll = (f32)(cv->lines.data[cv->matches.data[cv->current].line].y + head_h) - (f32)view_h / 2;
                 else if (!q.count) cv->scroll = 1e9f;
             }
             UiSignal hs = Ui_Hit(ui, Ui_IdN(Ui_Id("History"), n->id), hv);
@@ -6241,15 +6251,26 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s32 sl0 = cv->sel_line[0], sb0 = cv->sel_byte[0], sl1 = cv->sel_line[1], sb1 = cv->sel_byte[1];   // the selection, in order
             if (sl1 < sl0 || (sl1 == sl0 && sb1 < sb0)) { s32 tl2 = sl0, tb2 = sb0; sl0 = sl1; sb0 = sb1; sl1 = tl2; sb1 = tb2; }
             Draw_PushClip(dl, hv);
+            if (head_h) {
+                s32 hx = col_x, hy = hv.y0 + R(2) - (s32)scroll;
+                Draw_TextIn(dl, bold, R4(hx, hy, col_x + text_w, hy + head_line), rc->text,
+                            head_version.count ? Str_PushFormat(fa, "Claude Code v%.*s", STR_ARG(head_version)) : S("Claude Code"), 0);
+                String who = head_plan.count ? Str_PushFormat(fa, "%.*s  \xC2\xB7  %.*s", STR_ARG(head_model), STR_ARG(head_plan)) : head_model;
+                Draw_TextIn(dl, font, R4(hx, hy + head_line, col_x + text_w, hy + 2 * head_line), rc->dim, who, 0);
+                Draw_TextIn(dl, font, R4(hx, hy + 2 * head_line, col_x + text_w, hy + 3 * head_line), rc->dim, cst->cwd, 0);
+                s32 rule_y = hy + 3 * head_line + R(1.0);
+                Draw_Rect(dl, R4(hx, rule_y, hx + R(3), rule_y + Max(1, line_w)), rc->line, 0);
+                Named(app, S("chat heading"), R4(hx, hy, col_x + text_w, hy + 3 * head_line));
+            }
             if (!cv->lines.count) {
                 String msg = !cv->version ? S("reading the conversation...") : chat_shown ? S("Claude is ready: write a prompt below") : S("no history yet");
-                Draw_TextIn(dl, font, R4(hv.x0, hv.y0 + R(4), hv.x1, hv.y0 + R(6)), rc->dim, msg, 0.5f);
+                Draw_TextIn(dl, font, R4(hv.x0, hv.y0 + R(4) + head_h, hv.x1, hv.y0 + R(6) + head_h), rc->dim, msg, 0.5f);
             }
             s32 mi = 0;
             u32 shade = ColorMix(rc->bg, rc->text, 0.06f), edge = ColorMix(rc->bg, rc->text, 0.13f);
             for (s32 li = 0; li < (s32)cv->lines.count; li++) {
                 HistLine *hl = &cv->lines.data[li];
-                s32 ly = hv.y0 + R(2) + hl->y - (s32)scroll;
+                s32 ly = hv.y0 + R(2) + head_h + hl->y - (s32)scroll;
                 s32 lx = col_x + (hl->user && hl->kind != HistLine_User ? bubble : 0);
                 if (ly > hv.y1) break;
                 b32 seen = ly + hl->h + R(3) >= hv.y0;
@@ -6544,19 +6565,19 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             // --- messages just come fade in: a veil of the page's color going in 300 ms ---
             for (s32 li = (s32)cv->lines.count - 1; li >= 0; li--) {
                 const HistLine *hl = &cv->lines.data[li];
-                s32 ly = hv.y0 + R(2) + hl->y - (s32)scroll;
+                s32 ly = hv.y0 + R(2) + head_h + hl->y - (s32)scroll;
                 if (ly + hl->h < hv.y0) break;
                 if (ly > hv.y1 || hl->msg < 0 || hl->msg >= cv->msgs.count) continue;
                 u64 arrived = cv->msgs.data[hl->msg].arrived_us;
                 if (!arrived || now >= arrived + 300000) continue;
                 f32 veil = 1.0f - (f32)(now - arrived) / 300000.0f;
-                Draw_Rect(dl, R4(hv.x0, hv.y0 + R(2) + hl->y0 - (s32)scroll, hv.x1, ly + hl->h + R(1)), ColorAlpha(rc->bg, veil * page_alpha), 0);
+                Draw_Rect(dl, R4(hv.x0, hv.y0 + R(2) + head_h + hl->y0 - (s32)scroll, hv.x1, ly + hl->h + R(1)), ColorAlpha(rc->bg, veil * page_alpha), 0);
                 if (!out->wake_at_us || now + 16000 < out->wake_at_us) out->wake_at_us = now + 16000;
             }
             // --- while claude writes, a dot breathes under the last line ---
             if (chat_shown && busy && cv->lines.count && !cv->pending_len) {
                 const HistLine *last = &cv->lines.data[cv->lines.count - 1];
-                s32 py = hv.y0 + R(2) + last->y + last->h - (s32)scroll + R(0.9), d = R(0.7);
+                s32 py = hv.y0 + R(2) + head_h + last->y + last->h - (s32)scroll + R(0.9), d = R(0.7);
                 f32 phase = (f32)((now / 60000) % 27) / 27.0f;   // in 60 ms steps (frames between them draw the same)
                 f32 glow = 0.25f + 0.55f * (0.5f - 0.5f * cosf(phase * 6.2831853f));
                 Draw_Rect(dl, R4(col_x, py, col_x + d, py + d), ColorAlpha(rc->accent, glow), (f32)d / 2);
@@ -6569,12 +6590,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if ((hs.pressed && hs.button == Mouse_Left) || cv->selecting) {
                 s32 pl = -1, pb = 0;
                 for (s32 li = 0; li < (s32)cv->lines.count; li++) {
-                    if (hv.y0 + R(2) + cv->lines.data[li].y - (s32)scroll > mouse_y) break;
+                    if (hv.y0 + R(2) + head_h + cv->lines.data[li].y - (s32)scroll > mouse_y) break;
                     pl = li;
                 }
                 if (pl >= 0) {
                     const HistLine *hl = &cv->lines.data[pl];
-                    s32 ly = hv.y0 + R(2) + hl->y - (s32)scroll;
+                    s32 ly = hv.y0 + R(2) + head_h + hl->y - (s32)scroll;
                     if (mouse_y >= ly + hl->h) pb = (s32)hl->text.count;
                     else if (hl->font) {
                         pb = (s32)Font_Fit(hl->font, hl->text, mouse_x - (col_x + hl->text_x));
