@@ -23,10 +23,10 @@ if "%1"=="debug" set OPT=/Od /MTd
 if "%1"=="release" set INTERNAL=0
 set COMMON=/nologo /utf-8 /W4 /wd4100 /wd4505 /wd4201 /Zi /FC /DUNICODE /D_UNICODE /DTERM_INTERNAL=%INTERNAL% %OPT%
 
-rem --- icon: drawn by tools\make_icon.cpp, then compiled into a resource for the exe ---
-cl /nologo /std:c++20 /EHsc /O2 /MT "%ROOT%tools\make_icon.cpp" /Fe:make_icon.exe /link /INCREMENTAL:NO user32.lib gdi32.lib
+rem --- icon: tools\icon\moss-icon-1024.png scaled to each size by tools\make_icon.cpp, then compiled into a resource for the exe ---
+cl /nologo /std:c++20 /EHsc /O2 /MT "%ROOT%tools\make_icon.cpp" /Fe:make_icon.exe /link /INCREMENTAL:NO windowscodecs.lib ole32.lib
 if errorlevel 1 (set ERR=1& goto :done)
-"%ROOT%build\make_icon.exe" moss.ico "%ROOT%vendor\stix\STIXTwoText-SemiBold.otf"
+"%ROOT%build\make_icon.exe" moss.ico "%ROOT%tools\icon\moss-icon-1024.png"
 if errorlevel 1 (set ERR=1& goto :done)
 rc /nologo /i "%ROOT%build" /i "%ROOT%code" /fo moss.res "%ROOT%code\term.rc"
 if errorlevel 1 (set ERR=1& goto :done)
