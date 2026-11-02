@@ -22,6 +22,7 @@ static const struct { u8 key; const char *name; } g_KeyNames[] = {
     { 12, "PgDn" }, { 13, "Home" }, { 14, "End" }, { 15, "Left" }, { 16, "Right" }, { 17, "Up" }, { 18, "Down" },
     { 19, ";" }, { 20, "=" }, { 21, "-" }, { 22, "." }, { 23, "," }, { 24, "/" }, { 25, "\\" }, { 26, "`" }, { 27, "'" },
     { 28, "[" }, { 29, "]" }, { 46, "Insert" }, { 9, "Del" }, { 10, "Escape" }, { 11, "PageUp" }, { 12, "PageDown" },
+    { 3, "RAlt" },
 };
 
 // Segoe Fluent Icons (Windows 11; Segoe MDL2 Assets on 10).
@@ -44,7 +45,7 @@ enum {
     Cmd_Palette, Cmd_Profile, Cmd_DebugOverlay, Cmd_CloseWindow, Cmd_ToggleBrowser, Cmd_PrevCommand, Cmd_NextCommand, Cmd_Sessions, Cmd_Settings, Cmd_TearOff,
     Cmd_Find, Cmd_Search, Cmd_RenameTab, Cmd_ZoomPane, Cmd_ClearScrollback, Cmd_CopyAll, Cmd_Broadcast, Cmd_Topmost, Cmd_Duplicate,
     Cmd_ResizeLeft, Cmd_ResizeRight, Cmd_ResizeUp, Cmd_ResizeDown, Cmd_GoTo, Cmd_Bookmark, Cmd_FocusMode, Cmd_NewWebTab,
-    Cmd_NewClaudeAs, Cmd_AddAccount, Cmd_Compose, Cmd_Reader,
+    Cmd_NewClaudeAs, Cmd_AddAccount, Cmd_Compose, Cmd_Reader, Cmd_Voice,
     Cmd_Count
 };
 
@@ -105,6 +106,7 @@ static const CommandDef g_Commands[Cmd_Count] = {
     [Cmd_Compose]       = { "compose", "Write a prompt (Ctrl+Enter sends it to the terminal)", Key_A + 'I' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_FocusMode]     = { "focus_mode", "Focus: this pane alone, nothing else (again: back)", Key_A + 'F' - 'A', Mod_Ctrl | Mod_Shift },
     [Cmd_NewWebTab]     = { "new_web_tab", "New web tab", Key_A + 'B' - 'A', Mod_Ctrl | Mod_Shift },
+    [Cmd_Voice]         = { "voice", "Dictate into the chat prompt or composer (hold the key)", Key_RAlt, Mod_Alt },
 };
 
 // --- settings: the palette's settings mode (Ctrl+,), a row each; a change applies at once and goes to settings.txt ---
@@ -112,7 +114,7 @@ enum {
     Setting_Theme, Setting_Font, Setting_FontSize, Setting_Ligatures, Setting_Opacity, Setting_Backdrop, Setting_Background, Setting_BackgroundStrength, Setting_Cursor, Setting_CursorBlink,
     Setting_DimUnfocused, Setting_KeepActive,
     Setting_CopyOnSelect, Setting_Notifications, Setting_VsEnv, Setting_HiddenFiles, Setting_FolderSizes,
-    Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_SidebarHide, Setting_GoodProgrammer, Setting_ReaderTheme, Setting_ReaderSize, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
+    Setting_Agent, Setting_Agents, Setting_ClaudeChat, Setting_ReadAloud, Setting_SidebarHide, Setting_GoodProgrammer, Setting_ReaderTheme, Setting_ReaderSize, Setting_StartWithWindows, Setting_ExplorerMenu, Setting_OpenFolder, Setting_Reset,
     Setting_Count
 };
 enum { SettingKind_Choice, SettingKind_Bool, SettingKind_Text, SettingKind_Action };
@@ -136,6 +138,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_Agents]        = { "Agents", "Agent programs", "tabs running these show as agents", SettingKind_Text },
     [Setting_SidebarHide]   = { "Agents", "Sessions left out of the sidebar", "in these folders (; between), unless a shell is in one", SettingKind_Text },
     [Setting_ClaudeChat]    = { "Agents", "Claude tabs in chat mode", "the conversation to read and a prompt; Ctrl+Shift+R flips a tab", SettingKind_Bool },
+    [Setting_ReadAloud]     = { "Agents", "Read replies aloud", "a finished reply of a claude tab in chat mode, spoken (Windows' voice)", SettingKind_Bool },
     [Setting_GoodProgrammer] = { "Agents", "Be a good programmer", "your principles (good-programmer.md) in every Claude Code session", SettingKind_Bool },
     [Setting_ReaderTheme]   = { "Chat mode", "Colors", "Paper, Evening, or the window's", SettingKind_Choice },
     [Setting_ReaderSize]    = { "Chat mode", "Text size", "Ctrl+= / Ctrl+- in chat mode", SettingKind_Choice },
@@ -317,6 +320,8 @@ typedef struct Chat {
     u64 sent_us;
     u64 changed_us;           // when a reply last changed them (more may follow)
     u64 ended_us;             // when its claude's turn last ended
+    b32 speak_pending;        // the turn just ended: its reply is read aloud once the transcript has it (read_aloud)
+    u32 spoken;               // read aloud: the absolute index + 1 of the last reply read (0: none)
     // --- laid out: the lines' text in arena (each message's from where built_at says, so a message and those after it
     //     are built again alone), the lists in lists_arena, the matches in match_arena ---
     Arena arena, lists_arena, match_arena;
@@ -536,6 +541,14 @@ struct App {
     Chat chats[8];            // claude tabs' conversations (Chat)
     struct { u32 term; u64 at_us; } enters[8];   // Enter for a prompt typed a moment ago (claude would take it as part of a paste)
     b32 chat_off;             // settings.txt `claude_chat = off`: claude tabs show their terminal (Ctrl+Shift+R flips one)
+    b32 read_aloud;           // settings.txt `read_aloud = on`: a finished reply of a claude tab in chat mode is read out
+    // --- voice mode: the dictation key is held (voice_held), its text goes to the chat prompt of voice_term (voice_chat)
+    //     or the composer open on it; an error shows a few seconds ---
+    b32 voice_held, voice_chat;
+    u32 voice_term;
+    u8 voice_error_buf[160];
+    String voice_error;
+    u64 voice_error_until_us;
     f32 reader_pt;            // the conversation's text size (settings `reader_size`; Ctrl+= / Ctrl+- / Ctrl+0 on one)
     u8 reader_theme;          // ReaderTheme_*
     // --- Claude accounts (accounts.txt): [0] is the default one (Claude Code's own); a claude tab's account is the one
@@ -1031,6 +1044,7 @@ static void ApplySettings(App *app, const AppInit *init)
     app->copy_on_select_off = init->copy_on_select_off;
     app->dim_unfocused_off = init->dim_unfocused_off;
     app->chat_off = init->claude_chat_off;
+    app->read_aloud = init->read_aloud;
     app->reader_pt = init->reader_pt > 0 ? Clamp(init->reader_pt, 8, 28) : 12;
     app->reader_theme = init->reader_theme;
     app->keep_active_off = init->keep_active_off;
@@ -1587,6 +1601,7 @@ static void ChatSend(App *app, Frame *f, Chat *cv, b32 stop)
     String text = TextArea_String(&cv->draft);
     if (!text.count) return;
     SendLine(app, f, cv->term, text);
+    f->out->speak_stop = 1;
     if (text.data[0] != '/') {
         // a command (/clear, /model) isn't a prompt the transcript keeps; a prompt sent while others wait goes after them
         s32 len = (s32)Min(text.count, (s64)sizeof(cv->pending) - cv->pending_len - 1);
@@ -2377,6 +2392,24 @@ static void SplitFocused(App *app, Frame *f, b32 vertical)
     RequestTab(app, f, n, TermNew_Shell, FocusedCwd(app));
 }
 
+// Dictated text at the caret: a space first when a word comes before it.
+static void VoiceInsert(TextArea *ta, String text)
+{
+    u8 before = ta->cursor > 0 ? ta->buffer[ta->cursor - 1] : ' ';
+    if (before != ' ' && before != '\n') TextArea_Insert(ta, S(" "));
+    TextArea_Insert(ta, text);
+}
+
+// What a prompt's keys line says while it's the one dictating (empty when it isn't, or nothing to say).
+static String VoiceHint(App *app, const AppFrameInput *in, u32 term, b32 chat, u64 now)
+{
+    if (app->voice_term != term || app->voice_chat != chat) return (String){0};
+    if (in->voice_state == VoiceState_Listening) return S("Listening...  let go of the key to insert");
+    if (in->voice_state == VoiceState_Finishing) return S("Writing it down...");
+    if (now < app->voice_error_until_us) return app->voice_error;
+    return (String){0};
+}
+
 static void RunCommand(App *app, Frame *f, u32 cmd)
 {
     PaneTab *t = app->panes.selected;
@@ -2517,6 +2550,17 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         Chat *cv = ChatFor(app, t->term_id);
         if (cv) cv->scroll = 1e9f;
     } break;
+    case Cmd_Voice:
+        // held: dictation into the chat prompt the tab shows, else the composer open over it (none: nothing starts)
+        if (app->voice_held || !t || !t->term_id) break;
+        if (ChatShows(app, f->in, t)) app->voice_chat = 1;
+        else if (app->compose_open && app->compose_term == t->term_id) app->voice_chat = 0;
+        else break;
+        app->voice_held = 1;
+        app->voice_term = t->term_id;
+        f->out->voice_start = 1;
+        f->out->speak_stop = 1;
+        break;
     case Cmd_Compose:
         // the composer over the focused terminal (again: away, the draft kept); a conversation has its own box
         if (!t || !t->term_id || t->browsing || t->viewing || ChatWanted(app, t)) break;
@@ -3116,6 +3160,20 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
     }
     for (s32 i = 0; i < app->queued_count; i++) RunCommand(app, &f, app->queued[i]);
     app->queued_count = 0;
+    // --- voice mode: the dictation key never reaches the program; its release ends the dictation (losing the keyboard
+    //     too: no release comes, so it ends here) ---
+    for (s64 i = 0; i < event_count; i++) {
+        if (events[i].key != Key_RAlt) continue;
+        consumed[i] = ui->consumed[i] = 1;
+        if (!events[i].up || !app->voice_held) continue;
+        app->voice_held = 0;
+        out->voice_stop = 1;
+    }
+    if (app->voice_held && !in->focused) { app->voice_held = 0; out->voice_stop = 1; }
+    if (in->voice_message.count) {
+        app->voice_error = CopyInto(app->voice_error_buf, sizeof(app->voice_error_buf), in->voice_message);
+        app->voice_error_until_us = now + 5000000;
+    }
     if (app->palette_open || app->confirm_tab || app->paste_confirm || app->reset_confirm || app->tab_menu) {
         for (s64 i = 0; i < event_count; i++) consumed[i] = 1;   // the popup takes the keyboard
     }
@@ -3296,7 +3354,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         if (cv->pending_len && !busy && now > Max(cv->sent_us, cv->ended_us) + 20000000) { cv->pending_len = 0; ChatRebuild(cv, cv->msgs.count); }
         // every 400 ms while a turn runs, 4 s after a send, a change or the turn's end (its last reply can land in the
         // transcript a moment after claude's screen says it's done); else every 5 s, for anything missed
-        if (cv->busy && !busy) cv->ended_us = now;
+        if (cv->busy && !busy) { cv->ended_us = now; cv->speak_pending = app->read_aloud; }
         if (cv->busy != busy && cv->pending_len) ChatRebuild(cv, cv->msgs.count);   // "queued" comes and goes
         b32 polling = busy || cv->pending_len || now < cv->sent_us + 4000000 || now < cv->changed_us + 4000000 || now < cv->ended_us + 4000000;
         u64 every = polling ? 400000 : 5000000;
@@ -3306,6 +3364,54 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         }
         cv->busy = busy;
         if (!out->wake_at_us || cv->asked_us + every < out->wake_at_us) out->wake_at_us = cv->asked_us + every;
+        // --- read aloud: a turn that ended is read once, its last reply, when the transcript has it (asked for 4 s on) ---
+        if (cv->speak_pending) {
+            s64 last = cv->msgs.count - 1;
+            while (last >= 0 && (cv->msgs.data[last].e.from_user || cv->msgs.data[last].e.kind != 0)) last--;
+            if (last >= 0 && (s64)cv->base + last + 1 > (s64)cv->spoken) {
+                // --- markdown to speech: a code block is "Code block.", a link its text, table rules and addresses go ---
+                String text = cv->msgs.data[last].e.text;
+                u8 *speech = Arena_PushArray(fa, u8, 1516);
+                s64 said = 0;
+                b32 in_code = 0;
+                for (s64 at = 0; at < text.count && said < 1500;) {
+                    s64 end = at;
+                    while (end < text.count && text.data[end] != '\n') end++;
+                    String line = { text.data + at, end - at };
+                    at = end + 1;
+                    while (line.count && line.data[0] == ' ') { line.data++; line.count--; }
+                    if (line.count >= 3 && !memcmp(line.data, "```", 3)) {
+                        if (!in_code && said < 1490) { memcpy(speech + said, "Code block.", 11); said += 11; }
+                        in_code = !in_code;
+                        continue;
+                    }
+                    if (in_code) continue;
+                    b32 rule = line.count > 0;
+                    for (s64 k = 0; k < line.count; k++) rule &= line.data[k] == '|' || line.data[k] == '-' || line.data[k] == ':' || line.data[k] == ' ';
+                    if (rule) continue;
+                    while (line.count && (line.data[0] == '#' || line.data[0] == '>' || line.data[0] == ' ')) { line.data++; line.count--; }
+                    if (line.count >= 2 && (line.data[0] == '-' || line.data[0] == '*' || line.data[0] == '+') && line.data[1] == ' ') { line.data += 2; line.count -= 2; }
+                    for (s64 k = 0; k < line.count && said < 1500; k++) {
+                        u8 ch = line.data[k];
+                        if (ch == '*' || ch == '`' || ch == '[') continue;
+                        if (ch == ']' && k + 1 < line.count && line.data[k + 1] == '(') { while (k < line.count && line.data[k] != ')') k++; continue; }
+                        if (ch == '|') ch = ' ';
+                        if (line.count - k >= 7 && (!memcmp(line.data + k, "http://", 7) || (line.count - k >= 8 && !memcmp(line.data + k, "https://", 8)))) {
+                            while (k < line.count && line.data[k] != ' ') k++;   // a bare address: not read
+                            k--;
+                            continue;
+                        }
+                        speech[said++] = ch;
+                    }
+                    if (said < 1500) speech[said++] = '\n';
+                }
+                out->speak_text = (String){ speech, said };
+                cv->spoken = (u32)(cv->base + last + 1);
+                cv->speak_pending = 0;
+            } else if (now >= cv->ended_us + 4000000) {
+                cv->speak_pending = 0;
+            }
+        }
     }
     // --- Enter for a prompt typed a moment ago: on its own, as the key, so claude takes it as sending ---
     for (s32 k = 0; k < (s32)ArrayCount(app->enters); k++) {
@@ -3328,6 +3434,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         if (cv && in->pasted_image.count) {
             b32 quote = memchr(in->pasted_image.data, ' ', (size_t)in->pasted_image.count) != NULL;
             TextArea_Insert(&cv->draft, Str_PushFormat(fa, quote ? "\"%.*s\" " : "%.*s ", STR_ARG(in->pasted_image)));
+        }
+        // --- dictation (voice mode): at the caret of the prompt it was started on ---
+        if (in->voice_text.count) {
+            Chat *vc = app->voice_chat ? ChatFor(app, app->voice_term) : NULL;
+            if (vc) VoiceInsert(&vc->draft, in->voice_text);
+            else if (!app->voice_chat && app->compose_open && app->compose_term == app->voice_term) VoiceInsert(&app->compose, in->voice_text);
         }
         if (cv && !modal && !(app->find_open && app->find_focus) && !app->side_focus) {
             const TermTab *st = FindServerTab(app, ct->term_id);
@@ -5272,7 +5384,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Draw_TextIn(dl, small, pr, tone, pct, 1);
                     Named(app, S("chat context"), pr);
                 }
-                Draw_TextIn(dl, small, foot, rc->faint, S("Shift+Enter a new line  \xC2\xB7  Ctrl+Shift+R the terminal"), 0);
+                String voice = VoiceHint(app, in, cv->term, 1, now);
+                Draw_TextIn(dl, small, foot, voice.count ? rc->accent : rc->faint, voice.count ? voice : S("Shift+Enter a new line  \xC2\xB7  Ctrl+Shift+R the terminal"), 0);
                 Named(app, S("chat prompt"), box);
                 // --- while claude works: a spinner and its own status line (the row over its prompt box: what it's
                 //     doing, for how long; its spinner mark dropped), else "Working" ---
@@ -6811,7 +6924,8 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Rect keys = CutBottom(&body, keys_h);
             Ui_TextArea(ui, Ui_IdN(Ui_Id("ComposeText"), n->id), &app->compose, body, font, focused_pane && !modal,
                         S("Write a prompt..."), c->text, c->dim, c->selection);
-            Draw_TextIn(dl, small, keys, c->dim, S("Ctrl+Enter sends  \xC2\xB7  Enter a new line  \xC2\xB7  Ctrl+V text or a picture  \xC2\xB7  drop files  \xC2\xB7  Esc away"), 0);
+            String voice = VoiceHint(app, in, t->term_id, 0, now);
+            Draw_TextIn(dl, small, keys, voice.count ? c->accent : c->dim, voice.count ? voice : S("Ctrl+Enter sends  \xC2\xB7  Enter a new line  \xC2\xB7  Ctrl+V text or a picture  \xC2\xB7  drop files  \xC2\xB7  Esc away"), 0);
             Named(app, S("composer"), box);
         }
         // --- the panes not in focus a shade darker (settings `dim_unfocused = off`: not), when more than one shows ---
@@ -7617,7 +7731,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             if (k == Setting_Agents) value = app->agents.count ? app->agents : S("the usual ones");
             if (k == Setting_SidebarHide) value = app->side_hide.count ? app->side_hide : S("none");
             b32 on = k == Setting_HiddenFiles ? !app->hide_hidden : k == Setting_FolderSizes ? !app->folder_sizes_off : k == Setting_CursorBlink ? app->cursor_blink : k == Setting_Ligatures ? app->ligatures :
-                     k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ClaudeChat ? !app->chat_off : k == Setting_KeepActive ? !app->keep_active_off : k == Setting_ExplorerMenu ? app->explorer_menu :
+                     k == Setting_CopyOnSelect ? !app->copy_on_select_off : k == Setting_DimUnfocused ? !app->dim_unfocused_off : k == Setting_ClaudeChat ? !app->chat_off : k == Setting_ReadAloud ? app->read_aloud : k == Setting_KeepActive ? !app->keep_active_off : k == Setting_ExplorerMenu ? app->explorer_menu :
                      k == Setting_StartWithWindows ? app->start_with_windows : k == Setting_Notifications ? !app->notifications_off :
                      k == Setting_VsEnv ? !app->vs_env_off : k == Setting_GoodProgrammer ? app->good_programmer : 0;
             b32 clicked_value = 0;
@@ -7782,6 +7896,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             } else if (act == Setting_ClaudeChat) {
                 app->chat_off = !app->chat_off;
                 key = S("claude_chat"); val = app->chat_off ? S("off") : S("on");
+            } else if (act == Setting_ReadAloud) {
+                app->read_aloud = !app->read_aloud;
+                if (!app->read_aloud) out->speak_stop = 1;
+                key = S("read_aloud"); val = app->read_aloud ? S("on") : S("off");
             } else if (act == Setting_Backdrop) {
                 app->backdrop = (u8)((app->backdrop + (step < 0 ? 2 : 1)) % 3);
                 key = S("backdrop"); val = app->backdrop == 1 ? S("acrylic") : app->backdrop == 2 ? S("mica") : S("none");

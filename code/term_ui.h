@@ -12,7 +12,7 @@ extern "C" {
 
 // Key codes (the platform's VK table).
 enum {
-    Key_Space = 5, Key_Tab = 6, Key_Enter = 7, Key_Backspace = 8, Key_Delete = 9, Key_Escape = 10, Key_PageUp = 11,
+    Key_RAlt = 3, Key_Space = 5, Key_Tab = 6, Key_Enter = 7, Key_Backspace = 8, Key_Delete = 9, Key_Escape = 10, Key_PageUp = 11,
     Key_PageDown = 12, Key_Home = 13, Key_End = 14, Key_Left = 15, Key_Right = 16, Key_Up = 17, Key_Down = 18,
     Key_Equals = 20, Key_Minus = 21, Key_Comma = 23, Key_Slash = 24, Key_KeypadEnter = 32, Key_Insert = 46, Key_0 = 48,
     Key_A = 65, Key_F1 = 94,

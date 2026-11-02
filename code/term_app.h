@@ -64,6 +64,7 @@ typedef struct AppInit {
     b32 copy_on_select_off;     // settings.txt `copy_on_select = off`
     b32 dim_unfocused_off;      // settings.txt `dim_unfocused = off`: the panes not in focus aren't darkened
     b32 claude_chat_off;        // settings.txt `claude_chat = off`: claude tabs show their terminal, not their conversation
+    b32 read_aloud;             // settings.txt `read_aloud = on`: a claude's finished reply is read out
     f32 reader_pt;              // settings.txt `reader_size` (the conversation's text, pt; 0 = 12)
     u8 reader_theme;            // settings.txt `reader_theme`: 0 paper, 1 evening, 2 the window's
     b32 keep_active_off;        // settings.txt `keep_active = off`: Windows' idle timer runs out while moss is in front
@@ -79,6 +80,8 @@ typedef struct AppInit {
     String paths_text;          // paths.txt: `recent <path>` (newest first) and `bookmark <path>` lines
     String web_history_text;    // web-history.txt: `<last visit, s> <visits> <url>\t<title>` lines, newest first
 } AppInit;
+
+enum { VoiceState_Idle, VoiceState_Listening, VoiceState_Finishing };   // dictation (term_voice.cpp)
 
 typedef struct AppFrameInput {
     UiInput input;
@@ -101,6 +104,9 @@ typedef struct AppFrameInput {
     b32 tabs_received;          // the server has sent its tab list since the window connected
     String clipboard_text;      // only when the app asked for it last frame (AppOutput.read_clipboard)
     String pasted_image;        // the clipboard's picture saved as a PNG (AppOutput.save_clipboard_image): its path
+    u8 voice_state;             // VoiceState_*: dictation listening (the key held) or finishing
+    String voice_text;          // what was dictated, once, when it's done
+    String voice_message;       // a dictation error, once
     s64 session_count;          // Claude Code's sessions, newest first (while AppOutput.want_sessions)
     const TermSession *sessions;
     String session_hits_text;   // the last search of every transcript (AppOutput.session_search): its text, and its hits
@@ -219,6 +225,10 @@ typedef struct AppOutput {
     // --- other side effects ---
     b32 read_clipboard;         // put the clipboard text in the next frame's input
     b32 save_clipboard_image;   // the clipboard's picture, when it has one and no text, as a PNG (AppFrameInput.pasted_image)
+    b32 voice_start;            // start dictating (the key went down); the text comes back in AppFrameInput.voice_text
+    b32 voice_stop;             // the key came up: finish what was heard
+    b32 speak_stop;             // stop reading aloud
+    String speak_text;          // read this aloud (replaces what's being read)
     b32 clipboard_set;          String clipboard_text;
     String open_url;            // ShellExecute an http(s) link
     String open_path;           // a path Ctrl+clicked in a terminal (maybe with :line:col), relative to open_path_cwd

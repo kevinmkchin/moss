@@ -1,0 +1,14 @@
+# Voice mode: holding Right Alt starts a dictation into the composer open on the tab, and the text it hears lands at the
+# caret. Headless runs have no microphone: "voice TEXT" stands in for what a dictation heard; the log shows the key's
+# press and release (listening, done).
+waitfor λ
+key Ctrl+Shift+I
+waitidle
+type first
+key Alt+ralt
+waitidle
+voice hello from voice
+waitidle
+waitidle
+capture out/voice.png
+exit

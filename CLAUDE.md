@@ -406,6 +406,19 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   win32-input-mode key events decoded), and a submitted line starting `/log` (/login, /logout) makes an account change
   within 10 minutes that tab's own (`tab::LoginAtMs`); the other claudes on the same config folder are still held.
 
+## Voice mode (dictation into the prompt, reading replies aloud)
+
+- Hold Right Alt (`key.voice`, `Cmd_Voice`; the key's `ralt` name) and speak: the text lands at the caret of the chat
+  prompt the tab shows, else the composer open on it. Release to finish. Windows' speech recognition
+  (`code/term_voice.cpp`, WinRT `SpeechRecognizer`, its default dictation constraint); the key never reaches the program.
+  Needs Settings > Privacy > Microphone (desktop apps) and online speech recognition on (Settings > Privacy > Speech).
+- settings `read_aloud = on` ("Read replies aloud", Agents): a claude tab's finished reply in chat mode is read out once
+  (`Chat.speak_pending`, `Chat.spoken`; the markdown is turned to speech in App_Frame; code blocks say "Code block.").
+  A prompt sent or the key held stops it.
+- Platform side is window-only (no protocol change): `AppOutput.voice_start/voice_stop/speak_text/speak_stop`,
+  `AppFrameInput.voice_state/voice_text/voice_message` (`Voice_*` in term_platform.h). Headless: `voice TEXT` in a
+  script stands in for a dictation (tests/voice).
+
 ## Claude accounts and work folders — the billing safety net, don't weaken it
 
 - The user bills a personal account and an Enterprise one; Enterprise must only ever be billed for work, which lives
