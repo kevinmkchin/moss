@@ -58,7 +58,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   conhost, which was the throughput limit (64 MiB `type` in a pane: 3.1 s with conhost, 0.45 s with OpenConsole; Windows Terminal 0.67 s;
   `tools/bench`). `MOSS_CONPTY=system` goes back to conhost. OpenConsole doesn't repaint on resize: it asks where
   the cursor went (`ESC [ 6n`) and expects the terminal to have reflowed, so `VtResize` reflows the main screen
-  when the width changes (the scrollback stays as it was). `MOSS_PTY_CAPTURE=<folder>` writes each tab's raw
+  and its scrollback when the width changes (one run of lines, the scrollback's first row keeps its number, the marks
+  move with their rows). `MOSS_PTY_CAPTURE=<folder>` writes each tab's raw
   console host output to `<folder>\pty-<thread>.bin` (to compare the hosts' VT).
 - The window (`moss.exe`) owns the layout and draws. Two unity builds:
   - C (`term_c.c`): `term_core` (arenas, strings, UTF-8, hashing), `term_draw` (the DrawList), `term_ui`
@@ -223,7 +224,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - Alt+drag selects a rectangle (`Selection.block`, `TermCellsDraw.sel_block`, the shader's `SelBlock`).
 - Rows whose line went on in the next carry `CELL_WRAPPED` on their last cell: copying (a selection, "Copy
   everything") joins them into one line, and a web address that wraps opens whole.
-- Settings "Ligatures" (`ligatures = on`, `TermPalette.ligatures`): up to four programming symbols of the same look
+- Settings "Ligatures" (`ligatures = on`, `TermPalette.ligatures`): up to eight programming symbols of the same look
   go to DirectWrite as one run across their cells, so a font's ligatures show (Cascadia Code).
 
 ## Keys to console programs: win32-input-mode
@@ -279,7 +280,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   bottom 12 rows written, nothing under it but the mode line and notices such as a usage warning: no other rule, no
   `❯ 1.` choice), or asks something that can be read off its screen (`ClaudeDialog`: numbered rows "1." .. "N." in the
   bottom 30, one marked `❯`, the question's rows over them up to a rule): a card where the prompt was, its choices
-  mirrored from the screen (a click types the number; keys go to claude as they are). Anything else (`ChatShows`: the
+  mirrored from the screen (a click types the number; keys go to claude as they are). A list with a `❯` cursor and no
+  numbers (/resume's sessions, a picker) is a card of its screen rows as they are (`ChatDialog.rows`: from under the rule
+  over it, 16 at most; an item starts where the cursor's text does): keys go to claude, a click on an item sends the
+  arrows to it, then Enter. Anything else (`ChatShows`: the
   start, a free-text answer) shows the terminal, and the conversation comes back once it's answered there.
 - Its prompt (`Chat.draft`, a `Ui_TextArea`) is written on the page itself: the column's width and reading type
   (`Font_Read`), under a hairline (darker while it has the keyboard), no box; under it the keys, faint, and "Send ↵" /
@@ -296,8 +300,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   last message, a tool with no result yet: "Running <command>", how long by the tool's time) and a subagent's last three
   steps under it. The wheel scrolls anywhere over the view (rows and code blocks take the hover); the view eases to
   where it's going (`scroll_shown`). Ctrl+Up / Ctrl+Down put the user's previous / next prompt at the top. Under the
-  prompt, a hairline filled as far as the context is used and "62% of context" (the account line's tokens over 200k;
-  1M for a `[1m]` model or once past 200k).
+  prompt, a hairline filled as far as the context is used and "62% of context" (the account line's tokens over the
+  model's window: 1M, 200k for Haiku before 5 and Sonnet / Opus before 4.6 unless `[1m]` or once past 200k).
 - The plan (TodoWrite, or TaskCreate / TaskUpdate numbered from 1; `MSG_HISTORY` kind 5: a line per item, status \x1f
   text \x1f active form; the last one replaced while nothing came between) is a "Plan  2 of 5 done" row that opens to its
   items, and while its turn goes on (no turn's end after it) and something isn't done, a card pinned over the prompt:
@@ -318,7 +322,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   a turn runs or 4 s after a send, a change or the turn's end (its last reply can land in the transcript a moment
   after claude's screen says it's done), else every 5 s. The server keeps each tab's transcript read
   so far (`history_cache` in term_sessions.cpp: `ReadHistoryMore` reads only what was written since, the first time
-  the last 16 MB; another session or a shorter file starts over; versions count server-wide from the clock) and
+  the last 16 MB, with a note over them that earlier messages aren't shown; another session or a shorter file starts over; versions count server-wide from the clock) and
   answers `MSG_HISTORY` with the messages from `from` on, or nothing if unchanged (protocol 18; 19: kinds 3 and 4). `Stable`: the messages
   before it won't change (the last may go on, a tool waits for its result). Its size comes from an open handle (the
   folder entry lags while claude keeps the file open). Lines starting `{"type":"api-request` (Claude Code 2.1's copies
@@ -493,7 +497,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - "Reset to moss's defaults" asks first (`App.reset_confirm`), then `AppOutput.reset_settings`: settings.txt becomes the
   shipped `shell\settings.txt` (the old one kept as settings-old.txt; `Term_ResetSettings`), the platform reads it again
   (`ReadSettings`, as at start) and hands it over once (`AppFrameInput.settings`, `ApplySettings`, as `App_Create`).
-  The summon key and the editor stay as they were until the next start; Explorer's menu and start with Windows aren't
+  The summon key and the editor follow it (`RegisterSummon`, `FindEditor`); Explorer's menu and start with Windows aren't
   settings.txt's and stay. accounts.txt isn't settings.txt's either: accounts, themes and folder rules stay.
 - "Be a good programmer" (clod's, carried over) puts `~\.moss\good-programmer.md` into the global
   `<CLAUDE_CONFIG_DIR or ~\.claude>\CLAUDE.md` between moss's markers, for every Claude Code session on the machine;
@@ -502,8 +506,16 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 
 ## The file browser (each tab's other face)
 
-- Barebones on purpose: list, sort, filter, select, open, copy / delete / rename / new folder / paste, drag in
-  and out, folder sizes. No preview yet; features come back one by one as the user decides (`wishlist.txt`).
+- Barebones on purpose: list, sort, filter, select, open, copy / cut / delete / rename / new folder / paste, undo,
+  properties, drag in and out, folder sizes, a preview. Features come back one by one as the user decides (`wishlist.txt`).
+- Preview (Space with no filter typed, or F3; again or Esc closes): the file under the cursor over the whole tab, a
+  caption under it (name, n / count, size, keys; `PaneCaption`, the picture view's too). The arrows step through the
+  folder (it follows the cursor), PgUp / PgDn / Home / End and the wheel scroll, Enter opens. One browser previews at a
+  time (`App.preview_tab`). A picture comes from the picture view's decoder (`image_wants`); anything else is asked of
+  the platform (`AppOutput.preview_want` + the entry's modified time -> `AppFrameInput.preview_*`: its first 256 KB,
+  binary when its first 8 KB have a 0 byte): text numbered in mono, markdown laid out by the chat view as a document
+  (`App.preview_chat`: one message of kind 7, no "Claude" heading; built again when the file or its time changes).
+  Folders, drives, binary and online-only files (never read) get their name and a word. Test: `tests/preview`.
 - Ctrl+Shift+E (`toggle_browser`) flips the focused tab between its shell and a browser of its folder
   (`PaneTab::browsing`, state in `Browser`, `term_app.c`). `term_files_win32.c` lists folders on a worker thread
   (`Files_Request`; "" is This PC, its drives with labels and free space for local ones) and watches the shown
@@ -535,7 +547,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   the filter), typing filters (its characters in order: "ix" finds index.html, matches lit), Esc clears the filter, then back to the shell. F2
   renames inline, Ctrl+Shift+N new folder, Delete to the Recycle Bin, Ctrl+V pastes Explorer's copied or cut
   files (`FileOp` -> `RunFileOps` in `term_win32.c`; deletes and pastes on their own thread via
-  SHFileOperation; headless runs delete for good, never show dialogs, never paste).
+  SHFileOperation; headless runs delete for good, never show dialogs, never paste). Ctrl+X cuts (the clipboard's
+  preferred drop effect says move, as Explorer's does; not while busy), Alt+Enter shows Windows' Properties, Ctrl+Z
+  takes back the last delete or rename (`App.undo_*`; a delete comes back from the Recycle Bin: `RestoreFromRecycleBin`
+  finds the newest `$I` file naming the path in `<drive>\$Recycle.Bin\<SID>` and moves its `$R` back).
 - Rows (and buttons, tabs, menu and palette rows) fade their hover in fast and out slower (`HoverFill`).
 - Column heads sort every browser (`App.browse_sort`: 0 name, 2 modified, 4 size, +1 the other way round; folders first, names A-Z,
   dates and sizes biggest first); Ctrl+H leaves hidden files out. Shift+arrows/click select from the anchor,
@@ -623,10 +638,12 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
 - Notifications: allowed for every page (the permission), shown by moss, not WebView2: one while its tab isn't in front
   (another tab, the window behind) goes to the tray (`AppOutput.notify_title/body` -> `MSG_NOTIFY` -> the server's
   `TrayNotify`; settings `notifications = off`: none) and puts a dot on the tab until it's shown. Other permissions
-  (camera, microphone, ...) are WebView2's own prompt for now.
+  (camera, microphone, location, ...) are held (`PermissionRequested`'s deferral) and asked in the tab: a bar over the
+  page, "<site> wants your camera", Block and Allow (`AppWebState.ask_kind` -> `AppWeb.answer`); a second one while one
+  waits is WebView2's own prompt.
 - Zoom: Ctrl+= / Ctrl+- / Ctrl+0 (the text size commands, on a web tab) and Ctrl+wheel over the page step its zoom
-  (`PaneTab.web_zoom`, Chrome's steps `g_WebZooms`; `AppWeb.zoom` -> put_ZoomFactor); WebView2's own zoom is off. Not
-  kept in the layout. A chip in the address row shows it when it isn't 100% (a click puts it back).
+  (`PaneTab.web_zoom`, Chrome's steps `g_WebZooms`; `AppWeb.zoom` -> put_ZoomFactor); WebView2's own zoom is off. Kept
+  in layout.txt (the tab line's 5th number). A chip in the address row shows it when it isn't 100% (a click puts it back).
 - Torn off (a drag out of the window, "Move tab to a new window") a web tab's page loads again in the other window: a
   page can't move between processes (every moss window is one), so a video starts over. A new window gets it with
   `--web URL` (`AppFrameInput.open_web`); the tab here goes once it's there (`AppFrameInput.web_torn_off`). A window with
@@ -663,7 +680,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   the captured PNGs. The window path itself: `tools/window_test.ps1` (an off-screen window that never takes
   the foreground, posted keys, `-Clicks "x,y"` posted clicks at window pixels, PrintWindow capture; a test
   window takes the mouse from the posted messages, not the real cursor).
-- Test sets: `tests/run_all.sh` (smoke, layout, terminal, browser, settings, find, tabs, links, shells, agents, sessions, session, windows, accounts, claude_ui); each runs in a temp folder outside
+- Test sets: `tests/run_all.sh` (smoke, layout, terminal, browser, preview, settings, find, tabs, links, shells, agents, sessions, session, windows, accounts, claude_ui); each runs in a temp folder outside
   any repo (prompts must not show git state) and compares with its local `reference/` (`bless` to accept).
   `tests/claude` is a manual set with real Claude Code. Captures named `*_varies.png` (counters, timings) are
   looked at, never compared. Headless runs ignore the user's settings.txt (defaults only).

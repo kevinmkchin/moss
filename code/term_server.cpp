@@ -43,6 +43,8 @@ struct tab
     bool32 PromptSeen;      // its prompt reports itself (OSC 9;9)
     bool32 AtPrompt;        // the prompt printed and no Enter went in since
     u64 EnterAtMs;          // the last Enter typed into it
+    bool32 ClinkRuns;       // its clink says when cmd takes a line (OSC 7777;run): that, not the Enter, says it runs
+    bool32 RanSincePrompt;  // cmd took a line since the prompt was last back
     float Cpu;              // percent of the whole machine its cmd and everything under it used lately
     u64 NotifiedAtMs;       // last tray notification about this tab
     std::string HistoryId;  // names the file a shell tab's recent output is saved to (HistoryText)
@@ -2302,12 +2304,15 @@ static int ServerMain()
                     if(T->SessionId.empty()) { T->Running = false; T->Program.clear(); }
                     T->PromptSeen = true;
                     T->AtPrompt = true;
+                    T->RanSincePrompt = false;
                     T->Term.Cwd.clear();
                 }
                 // ... and cmd taking a command line (after that prompt, or one typed ahead) that something runs now
                 if(T->Term.Ran)
                 {
                     T->Term.Ran = false;
+                    T->ClinkRuns = true;
+                    T->RanSincePrompt = true;
                     T->AtPrompt = false;
                     T->EnterAtMs = GetTickCount64();
                     T->Running = T->PromptSeen && T->SessionId.empty();
@@ -2359,8 +2364,10 @@ static int ServerMain()
                 for(const claude_find& F : Scan->Finds) { if(F.CmdPid == GetProcessId(T->Pty->Process)) { Find = &F; } }
                 if(!Find) { continue; } // opened after the scan started
                 if(Elapsed) { T->Cpu = (float)(Find->CpuUsed * 100.0 / ((double)Elapsed * Cores)); }
-                // a program under the cmd; or just after Enter while the prompt isn't back (the scan may predate it)
-                T->Running = T->SessionId.empty() && !Find->Pid && (Find->HasChild || (T->PromptSeen && !T->AtPrompt && GetTickCount64() - T->EnterAtMs < 3000));
+                // a program under the cmd; or a line cmd took while the prompt isn't back (a builtin such as dir /s has
+                // no child); without clink's word, 3 s after an Enter (the scan may predate it)
+                T->Running = T->SessionId.empty() && !Find->Pid && (Find->HasChild ||
+                             (T->PromptSeen && !T->AtPrompt && (T->ClinkRuns ? T->RanSincePrompt : GetTickCount64() - T->EnterAtMs < 3000)));
                 if(T->SessionId.empty() && Find->Program != T->Program)
                 {
                     Logf("server", "tab %u: program %s", T->Id, Find->Program.empty() ? "gone" : Find->Program.c_str());

@@ -1,0 +1,43 @@
+# The browser's preview (Space / F3): the file under the cursor over the whole tab, the arrows step through the folder.
+# Markdown is laid out as the chat view does, text numbered, a picture fitted, a binary file only named.
+waitfor λ
+type python make_files.py
+key Enter
+waitfor files-made
+type cd files
+key Enter
+waitfor preview\files
+key Ctrl+Shift+E
+waitlabel a_notes.md
+key Space
+waitlabel preview a_notes.md
+waitidle
+capture out/markdown.png
+key Down
+waitlabel preview b_code.c
+waitidle
+capture out/code.png
+key Right
+waitlabel preview c_pic.png
+sleep 300
+waitidle
+capture out/picture.png
+key Down
+waitlabel preview d_blob.bin
+waitidle
+capture out/binary.png
+key Down
+waitlabel preview e_long.log
+key PageDown
+waitidle
+capture out/text_scrolled.png
+key Escape
+waitlabel e_long.log
+waitidle
+capture out/closed.png
+key F3
+waitlabel preview e_long.log
+key F3
+waitidle
+dump layout
+exit

@@ -357,7 +357,12 @@ typedef struct Chat {
 
 // A question claude asks on its screen (a permission, a choice, a menu: numbered choices, one marked "❯"), read as a
 // card the conversation shows in place of its prompt: the question's last lines over the choices.
-typedef struct ChatDialog { String lines[6]; s32 line_count; String options[9]; s32 option_count, selected; } ChatDialog;
+// Claude asking something on its screen: numbered choices (options), or a list with a ❯ cursor and no numbers (/resume's
+// sessions, a picker): its rows as they are, each row's item (-1 above the first), the cursor's row and item.
+typedef struct ChatDialog {
+    String lines[6]; s32 line_count; String options[9]; s32 option_count, selected;
+    String rows[16]; s32 row_item[16]; s32 row_count, row_marked, item_marked;
+} ChatDialog;
 
 // A page in the web history (web-history.txt): where, its title, how often and when last (seconds since 1601).
 typedef struct WebVisit { u8 url[512]; s32 url_len; u8 title[128]; s32 title_len; u32 visits; s64 last; } WebVisit;
@@ -544,6 +549,13 @@ struct App {
     b32 find_vim;             // opened by Ctrl+/: Enter ends typing, then n / N step; else Enter / Shift+Enter step
     b32 find_history;         // a claude's: its whole history (the transcript) in the history view, not the scrollback
     Chat chats[8];            // claude tabs' conversations (Chat)
+    // --- a browser's preview (Space / F3): the file under its cursor over the whole tab ---
+    u64 preview_tab;          // the tab whose browser previews (PaneTab.id; 0: none)
+    u8 preview_name[1024];    // the file it shows (a new one starts at its top)
+    s32 preview_name_len;
+    f32 preview_scroll;       // a text's lines scrolled, px
+    Chat preview_chat;        // a markdown file, laid out as a conversation's document (one message, kind 7)
+    u64 preview_doc_key;      // the file and modified time the document was built from
     struct { u32 term; u64 at_us; } enters[8];   // Enter for a prompt typed a moment ago (claude would take it as part of a paste)
     b32 chat_off;             // settings.txt `claude_chat = off`: claude tabs show their terminal (Ctrl+Shift+R flips one)
     f32 reader_pt;            // the conversation's text size (settings `reader_size`; Ctrl+= / Ctrl+- / Ctrl+0 on one)
@@ -638,6 +650,9 @@ struct App {
     s64 side_top;             // px scrolled
     b32 side_reveal;          // scroll the selection into view
     u8 browse_sort;           // every browser's: 0 name, 2 modified, 4 size; +1 the other way round
+    u32 undo_kind;            // a browser's last change Ctrl+Z takes back: FileOp_Delete (undo_text: the paths, one a line)
+    s32 undo_len;             // or FileOp_Rename (the new path, a line, the old name)
+    char undo_text[8192];
     b32 hide_hidden;          // browsers leave out hidden files (Ctrl+H)
     b32 folder_sizes_off;     // settings `folder_sizes = off`: no subfolder sizes
     u32 next_file_request;
@@ -1443,10 +1458,43 @@ static s32 ClaudeDialog(const TermGrid *g, Arena *a, ChatDialog *d)
     // the lowest "1.", then 2, 3, ... under it in order
     s32 one = -1;
     for (s32 k = 0; k < found && one < 0; k++) if (nums[k] == 1) one = k;
-    if (one < 0) return 0;
-    s32 count = 1, marked = marks[one] ? 0 : -1;
-    for (s32 k = one - 1; k >= 0 && count < 9 && nums[k] == count + 1; k--) { if (marks[k]) marked = count; count++; }
-    if (count < 2 || marked < 0) return 0;
+    s32 count = 1, marked = one >= 0 && marks[one] ? 0 : -1;
+    for (s32 k = one - 1; one >= 0 && k >= 0 && count < 9 && nums[k] == count + 1; k--) { if (marks[k]) marked = count; count++; }
+    if (one < 0 || count < 2 || marked < 0) {
+        // --- no numbers: a list with a ❯ cursor in the bottom 30 rows. Its rows from under the rule over it (or 12 rows
+        //     up) to the last written one, 16 at most around the cursor; an item starts on a row whose text begins where
+        //     the cursor's does (a deeper indent goes on the item above) ---
+        s32 mark_y = -1, mark_x = 0, text_x = 0, last = -1;
+        for (s32 y = g->rows - 1; y >= 0 && y >= g->rows - 30 && mark_y < 0; y--) {
+            const TermCell *row = &g->cells[(s64)y * g->cols];
+            s32 x = 0;
+            while (x < g->cols && (row[x].codepoint == ' ' || row[x].codepoint == 0 || row[x].codepoint == 0x2502)) x++;
+            if (last < 0 && x < g->cols) last = y;
+            if (x >= g->cols || row[x].codepoint != 0x276F) continue;
+            mark_y = y; mark_x = x;
+            text_x = x + 1;
+            while (text_x < g->cols && (row[text_x].codepoint == ' ' || row[text_x].codepoint == 0 || row[text_x].codepoint == 0xA0)) text_x++;
+        }
+        if (mark_y < 0 || text_x >= g->cols) return 0;
+        s32 top = mark_y;
+        while (top > 0 && top > mark_y - 12 && !GridRowIsRule(g, top - 1)) top--;
+        if (last - top + 1 > 16) top = Max(top, Min(mark_y - 7, last - 15));
+        last = Min(last, top + 15);
+        if (!d) return 1;
+        memset(d, 0, sizeof(*d));
+        s32 item = -1;
+        for (s32 y = top; y <= last; y++) {
+            const TermCell *row = &g->cells[(s64)y * g->cols];
+            b32 blank_before = 1;
+            for (s32 x = mark_x + 1; x < text_x && blank_before; x++) blank_before = row[x].codepoint == ' ' || row[x].codepoint == 0 || row[x].codepoint == 0xA0;
+            u32 at = row[text_x].codepoint, m = row[mark_x].codepoint;
+            if (blank_before && at > ' ' && at != 0xA0 && (m == 0x276F || m == ' ' || m == 0)) item++;
+            if (y == mark_y) { d->row_marked = d->row_count; d->item_marked = item; }
+            d->row_item[d->row_count] = item;
+            d->rows[d->row_count++] = GridRowText(a, g, y);
+        }
+        return 1;
+    }
     if (!d) return count;
     memset(d, 0, sizeof(*d));
     d->option_count = count;
@@ -2003,6 +2051,18 @@ static const char *const g_TextTypes =
     "fish ps1 psm1 bat cmd sql gradle cmake mk makefile dockerfile gitignore gitattributes editorconfig lock tex bib swift m mm "
     "zig nim dart r jl hlsl glsl shader vert frag ex exs erl hs ml fs clj scala groovy diff patch  ";   // "  ": no extension
 
+// A picture view's or a preview's caption row: the name in bold, where it is and what it is, the keys on the right.
+static void PaneCaption(DrawList *dl, f32 em, Rect cap, const Chrome *c, Font *small, Font *bold, String name, String where, String keys)
+{
+    Draw_Rect(dl, cap, c->caption, 0);
+    CutLeft(&cap, R(1));
+    CutRight(&cap, R(1));
+    Draw_TextIn(dl, small, CutRight(&cap, Min(Font_Measure(small, keys), RectW(cap))), c->dim, keys, 1);
+    Draw_TextIn(dl, bold, CutLeft(&cap, Min(Font_Measure(bold, name), RectW(cap))), c->text, name, 0);
+    CutLeft(&cap, Min(R(1), RectW(cap)));
+    Draw_TextIn(dl, small, cap, c->dim, where, 0);
+}
+
 // The picture view over t: `path` is a picture (its folder's others a key away) or a folder (its first picture).
 // from_browser: Esc goes back to the browser, else to the shell.
 static void OpenViewer(App *app, PaneTab *t, String path, b32 from_browser)
@@ -2136,15 +2196,17 @@ static s64 SelectedPaths(Arena *a, const Browser *b, String **out, String *first
     return n;
 }
 
-// Puts the selected files on the clipboard (Explorer pastes them; their paths go as text).
-static void BrowserCopy(Frame *f, PaneTab *t)
+// Puts the selected files on the clipboard (Explorer pastes them; their paths go as text); cut: a paste moves them.
+static void BrowserCopy(Frame *f, PaneTab *t, b32 cut)
 {
     String *paths = NULL, first = {0};
     s64 n = SelectedPaths(f->fa, t->browser, &paths, &first);
     if (!n) return;
     f->out->clipboard_file_count = n;
     f->out->clipboard_files = paths;
-    BrowserNotice(t->browser, f->in->now_us, n == 1 ? Str_PushFormat(f->fa, "Copied %.*s", STR_ARG(first)) : Str_PushFormat(f->fa, "Copied %lld items", (long long)n));
+    f->out->clipboard_files_cut = cut;
+    const char *did = cut ? "Cut" : "Copied";
+    BrowserNotice(t->browser, f->in->now_us, n == 1 ? Str_PushFormat(f->fa, "%s %.*s", did, STR_ARG(first)) : Str_PushFormat(f->fa, "%s %lld items", did, (long long)n));
 }
 
 // Names as Explorer sorts them: case doesn't count, runs of digits by their value ("file2" before "file10").
@@ -2454,7 +2516,7 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
         break;
     case Cmd_Fullscreen: f->out->window_command = AppWindow_Fullscreen; break;
     case Cmd_Copy:
-        if (t && t->browsing && t->browser) { BrowserCopy(f, t); break; }
+        if (t && t->browsing && t->browser) { BrowserCopy(f, t, 0); break; }
         if (t && ChatFor(app, t->term_id) && ChatFor(app, t->term_id)->sel_on && ChatShows(app, f->in, t)) {
             f->out->clipboard_set = 1;
             f->out->clipboard_text = ChatSelectionText(f->fa, ChatFor(app, t->term_id));
@@ -3644,6 +3706,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                         op->path = EntryPath(fa, b, cur);
                         op->name = Str_PushCopy(fa, name);
                         b->select_len = (s32)CopyInto(b->select, sizeof(b->select), name).count;
+                        // Ctrl+Z: the new path, a line, the old name
+                        String back = Str_PushFormat(fa, "%.*s%.*s\n%.*s", (int)(op->path.count - cur->name.count), (const char *)op->path.data,
+                                                     STR_ARG(name), STR_ARG(cur->name));
+                        app->undo_kind = back.count < (s64)sizeof(app->undo_text) ? FileOp_Rename : 0;
+                        app->undo_len = (s32)Min(back.count, (s64)sizeof(app->undo_text));
+                        memcpy(app->undo_text, back.data, (size_t)app->undo_len);
                     }
                     b->renaming = 0;
                     consumed[i] = ui->consumed[i] = 1;
@@ -3654,12 +3722,43 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             s64 to = b->cursor;
             b32 handled = 1;
             u32 change = 0;   // a FileOp_* this key asks for
+            // --- the preview (Space or F3 opens it; again, or Esc, closes it): the arrows step through the folder (it
+            //     follows the cursor), PgUp / PgDn / Home / End scroll it; typing doesn't filter meanwhile ---
+            b32 previewing = app->preview_tab == focus->id;
+            if ((e->key == Key_Space && !mods && !b->filter_len) || (e->key == Key_F1 + 2 && !mods) || (previewing && e->key == Key_Escape)) {
+                app->preview_tab = previewing ? 0 : focus->id;
+                app->preview_scroll = 0;
+                continue;
+            }
+            if (previewing && (e->key == Key_PageUp || e->key == Key_PageDown || e->key == Key_Home || e->key == Key_End)) {
+                f32 page = (f32)Max(1, browser_rows - 2) * (f32)browse_row_h;
+                f32 by = e->key == Key_PageUp ? -page : e->key == Key_PageDown ? page : e->key == Key_Home ? -1e9f : 1e9f;
+                app->preview_scroll += by;          // clamped where it's drawn
+                app->preview_chat.scroll += by;
+                continue;
+            }
+            if (previewing && (e->key == Key_Left || e->key == Key_Right)) {
+                b->cursor = Clamp(b->cursor + (e->key == Key_Right ? 1 : -1), 0, Max(0, b->view_count - 1));
+                b->sel.count = 0;
+                b->anchor = b->cursor;
+                b->reveal = 1;
+                continue;
+            }
+            if (previewing && e->text.count && !(mods & (Mod_Ctrl | Mod_Alt)) && e->key != Key_Enter && e->key != Key_KeypadEnter) continue;
             if (e->key == Key_Up) to = b->cursor - 1;
             else if (e->key == Key_Down) to = b->cursor + 1;
             else if (e->key == Key_PageUp) to = b->cursor - Max(1, browser_rows - 1);
             else if (e->key == Key_PageDown) to = b->cursor + Max(1, browser_rows - 1);
             else if (e->key == Key_Home) to = 0;
             else if (e->key == Key_End) to = b->view_count - 1;
+            else if ((e->key == Key_Enter || e->key == Key_KeypadEnter) && mods == Mod_Alt) {
+                // Windows' Properties of the item
+                if (cur && !(cur->flags & File_Drive) && b->path.count) {
+                    FileOp *op = Array_Push(fa, f.file_ops);
+                    op->kind = FileOp_Properties;
+                    op->path = EntryPath(fa, b, cur);
+                }
+            }
             else if (e->key == Key_Enter || e->key == Key_KeypadEnter) { if (cur) f.nav_tab = focus, f.nav_open = b->view[b->cursor]; }
             else if (e->key == Key_Backspace) {
                 if (b->filter_len) {
@@ -3680,7 +3779,34 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 if (b->sel.count) b->sel.count = 0;
                 else if (b->filter_len) b->filter_len = 0;
                 else CloseBrowser(app, &f, focus);
-            } else if (e->key == Key_A + 'C' - 'A' && mods == Mod_Ctrl) BrowserCopy(&f, focus);
+            } else if (e->key == Key_A + 'C' - 'A' && mods == Mod_Ctrl) BrowserCopy(&f, focus, 0);
+            else if (e->key == Key_A + 'X' - 'A' && mods == Mod_Ctrl) {
+                // a cut: the paste elsewhere takes them out of this folder, so not while the tab is busy
+                if (TabBusy(st)) BrowserNotice(b, now, S("Cut is off: the tab is busy"));
+                else BrowserCopy(&f, focus, 1);
+            }
+            else if (e->key == Key_A + 'Z' - 'A' && mods == Mod_Ctrl) {
+                // --- takes back the last delete (from the Recycle Bin) or rename ---
+                String undo = { (u8 *)app->undo_text, app->undo_len };
+                if (!app->undo_kind) BrowserNotice(b, now, S("Nothing to undo"));
+                else if (TabBusy(st)) BrowserNotice(b, now, S("Undo is off: the tab is busy"));
+                else if (app->undo_kind == FileOp_Delete) {
+                    FileOp *op = Array_Push(fa, f.file_ops);
+                    op->kind = FileOp_Restore;
+                    op->name = Str_PushCopy(fa, undo);
+                    BrowserNotice(b, now, S("Back from the Recycle Bin"));
+                } else {
+                    s64 nl = 0;
+                    while (nl < undo.count && undo.data[nl] != '\n') nl++;
+                    FileOp *op = Array_Push(fa, f.file_ops);
+                    op->kind = FileOp_Rename;
+                    op->path = Str_PushCopy(fa, (String){ undo.data, nl });
+                    op->name = Str_PushCopy(fa, (String){ undo.data + Min(nl + 1, undo.count), undo.count - Min(nl + 1, undo.count) });
+                    b->select_len = (s32)CopyInto(b->select, sizeof(b->select), op->name).count;
+                    BrowserNotice(b, now, Str_PushFormat(fa, "Named %.*s again", STR_ARG(op->name)));
+                }
+                app->undo_kind = 0;
+            }
             else if (e->key == Key_Delete && !mods) change = FileOp_Delete;
             else if (e->key == Key_F1 + 1 && !mods) change = FileOp_Rename;
             else if (e->key == Key_A + 'N' - 'A' && mods == (Mod_Ctrl | Mod_Shift)) change = FileOp_NewFolder;
@@ -3703,11 +3829,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 if (change == FileOp_Delete) {
                     String *paths = NULL, first = {0};
                     s64 n = SelectedPaths(fa, b, &paths, &first);
+                    app->undo_len = 0;
                     for (s64 k = 0; k < n; k++) {
                         FileOp *op = Array_Push(fa, f.file_ops);
                         op->kind = FileOp_Delete;
                         op->path = paths[k];
+                        if (app->undo_len + paths[k].count + 1 < (s32)sizeof(app->undo_text)) {   // what fits comes back
+                            if (app->undo_len) app->undo_text[app->undo_len++] = '\n';
+                            memcpy(app->undo_text + app->undo_len, paths[k].data, (size_t)paths[k].count);
+                            app->undo_len += (s32)paths[k].count;
+                        }
                     }
+                    app->undo_kind = n ? FileOp_Delete : 0;
                     if (n) BrowserNotice(b, now, n == 1 ? Str_PushFormat(fa, "%.*s went to the Recycle Bin", STR_ARG(first)) :
                                                           Str_PushFormat(fa, "%lld items went to the Recycle Bin", (long long)n));
                     b->sel.count = 0;
@@ -4308,6 +4441,60 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         }
     }
 
+    // --- a browser's preview (Space / F3): the file under its cursor. Text is asked of the platform (its first 256 KB),
+    //     a picture of the picture view's decoder; markdown is laid out as a conversation's document (preview_chat) ---
+    PaneTab *pv_tab = NULL;
+    for (PaneNode *pn = panes->root; pn && app->preview_tab; pn = Panes_NextNode(pn))
+        for (PaneTab *o = pn->first_tab; o; o = o->next) if (o->id == app->preview_tab) pv_tab = o;
+    if (pv_tab && (!pv_tab->browsing || !pv_tab->browser || pv_tab->viewing)) pv_tab = NULL;
+    if (!pv_tab) app->preview_tab = 0;
+    const FileEntry *pv_entry = pv_tab ? BrowserEntry(pv_tab->browser, pv_tab->browser->cursor) : NULL;
+    String pv_name = pv_entry ? pv_entry->name : (String){0};
+    String pv_path = pv_entry && pv_tab->browser->path.count && !(pv_entry->flags & File_Drive) ? EntryPath(fa, pv_tab->browser, pv_entry) : (String){0};
+    if (!Str_Equal(pv_path, (String){ app->preview_name, app->preview_name_len })) {
+        app->preview_name_len = (s32)CopyInto(app->preview_name, sizeof(app->preview_name), pv_path).count;
+        app->preview_scroll = 0;
+    }
+    u32 pv_kind = 0;   // 0 what it is (pv_what), 1 a picture, 2 text, 3 markdown, 4 being read
+    String pv_what = {0};
+    if (pv_entry) {
+        if (pv_entry->flags & File_Drive) pv_what = S("A drive");
+        else if (pv_entry->flags & File_Dir) pv_what = S("A folder");
+        else if (pv_entry->flags & File_Cloud) pv_what = S("Online only: opening it downloads it");
+        else if (HasExtension(pv_name, g_PictureTypes)) {
+            pv_kind = 1;
+            if (out->image_want_count < (s32)ArrayCount(out->image_wants)) out->image_wants[out->image_want_count++] = pv_path;
+        } else if (pv_path.count) {
+            out->preview_want = pv_path;
+            out->preview_stamp = pv_entry->modified;
+            b32 have = Str_Equal(in->preview_path, pv_path) && in->preview_stamp == pv_entry->modified;
+            pv_kind = !have ? 4 : in->preview_binary ? 0 : HasExtension(pv_name, "md markdown mdx") ? 3 : 2;
+            if (have && in->preview_binary) pv_what = S("No preview: it isn't text");
+        }
+    }
+    String pv_where = pv_tab ? Str_PushFormat(fa, "%lld / %lld", (long long)pv_tab->browser->cursor + 1, (long long)pv_tab->browser->view_count) : (String){0};
+    if (pv_entry && !(pv_entry->flags & (File_Dir | File_Drive)))
+        pv_where = Str_PushFormat(fa, "%.*s   %.*s", STR_ARG(pv_where), STR_ARG(SizeText(fa, pv_entry->size)));
+    if (pv_kind == 3) {
+        // the document built again when the file or its modified time changed
+        u64 key = Hash_Bytes(pv_path.data, (u64)pv_path.count, pv_entry->modified);
+        Chat *dc = &app->preview_chat;
+        if (key != app->preview_doc_key) {
+            app->preview_doc_key = key;
+            Arena_Clear(&dc->msg_arena);
+            Arena_Clear(&dc->list_arena);
+            memset(&dc->msgs, 0, sizeof(dc->msgs));
+            ChatMsg *m = Array_Push(&dc->list_arena, dc->msgs);
+            m->e.kind = 7;
+            m->e.text = Str_PushCopy(&dc->msg_arena, in->preview_text);
+            dc->version = 1;
+            dc->current = -1;
+            dc->scroll = dc->scroll_shown = 0;
+            dc->at_end = 0;
+            ChatRebuild(dc, 0);
+        }
+    }
+
     // --- panes: the tab strip, then the terminal or the browser ---
     Array(TermWatch) watches = {0};
     s32 pane_index = 0;
@@ -4337,6 +4524,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             AppWeb *aw = &out->webs[out->web_count++];
             aw->id = o->id;
             aw->popup = o->web_popup;
+            o->web_zoom = Clamp(o->web_zoom, -WebZoom_Base, (s32)ArrayCount(g_WebZooms) - 1 - WebZoom_Base);   // layout.txt's may be anything
             aw->zoom = g_WebZooms[WebZoom_Base + o->web_zoom];
             b32 in_front = o == panes->selected && !o->hidden && in->foreground;
             if (in_front) o->web_needs = 0;
@@ -4545,6 +4733,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Draw_Rect(dl, R4(tr.x0, tr.y0, tr.x1, tr.y1 - R(0.3)), lifted ? c->press : HoverFill(app, tid, both, c->hover), r_tab);
                 }
                 if (o->color) Draw_Rect(dl, R4(tr.x0 + R(0.5), tr.y0, tr.x1 - R(0.5), tr.y0 + Max(2, R(0.2))), 0xFF000000u | tt->ansi[o->color], 1);
+                // --- the tab being moved sideways: an accent edge along its top, from the first pixel of the reorder ---
+                if (ts.held && ts.button == Mouse_Left && ui->dragging && !app->tab_drag_id)
+                    Draw_Rect(dl, R4(tr.x0 + R(0.5), tr.y0, tr.x1 - R(0.5), tr.y0 + Max(2, R(0.2))), c->accent, 1);
                 // --- icon: an agent's robot or the shell's prompt; busy spins, needs-input shows a dot ---
                 b32 agent = st && (st->flags & TermTab_Agent);
                 b32 busy = st && (st->flags & TermTab_Busy);
@@ -4733,9 +4924,6 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             const TermGrid *ag = FindGrid(in, account_tab->id);
             if (ag && ag->cols > 0) {
-                // --- the tab being moved sideways: an accent edge along its top, from the first pixel of the reorder ---
-                if (ts.held && ts.button == Mouse_Left && ui->dragging && !app->tab_drag_id)
-                    Draw_Rect(dl, R4(tr.x0 + R(0.5), tr.y0, tr.x1 - R(0.5), tr.y0 + Max(2, R(0.2))), c->accent, 1);
                 static const char *const modes[][2] = { { "plan mode on", "plan" }, { "accept edits on", "accept edits" }, { "auto mode on", "auto" },
                                                          { "bypass permissions on", "bypass permissions" } };
                 String mode = S("default");
@@ -4794,8 +4982,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         s32 box_row = ClaudePromptBox(box_grid);
         ChatDialog dialog = {0};   // claude asks something (its prompt box gone): shown as a card if it can be read
         if (box_grid && box_row < 0) ClaudeDialog(box_grid, fa, &dialog);
-        b32 chat_shown = box_row >= 0 || dialog.option_count > 0;
+        b32 chat_shown = box_row >= 0 || dialog.option_count > 0 || dialog.row_count > 0;
         Chat *cv = t ? ChatFor(app, t->term_id) : NULL;
+        b32 previewing = t && t == pv_tab;
+        b32 doc_preview = previewing && pv_kind == 3;   // markdown: the conversation's view of a document
+        if (doc_preview) cv = &app->preview_chat;
         if (t && t->web) {
             // --- a web page: the address row (back, forward, reload, the address: a click edits it), then the page,
             //     which the platform draws under this frame: nothing is drawn there, the frame is see-through ---
@@ -4887,6 +5078,39 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Draw_Rect(dl, body, c->bg, 0);
                 Draw_TextIn(dl, font, R4(body.x0, body.y0 + R(2), body.x1, body.y0 + R(4)), c->dim, S("Web pages need WebView2 (Microsoft Edge's runtime)"), 0.5f);
             }
+            s32 answer = 0;
+            if (ws && ws->ask_kind) {
+                // --- a permission the page asks for (the camera, the microphone, where you are, ...): a bar over it, its
+                //     site and what it wants, Block and Allow; the page waits on the answer ---
+                static const char *const wants[13] = { "something", "your microphone", "your camera", "your location",
+                    "notifications", "your device's sensors", "what you copy", "to download several files", "your files",
+                    "to play sound and video", "your fonts", "your MIDI devices", "your screens" };
+                String origin = ws->ask_origin;
+                s64 from = 0;
+                for (s64 k = 0; k + 2 < origin.count && !from; k++) if (origin.data[k] == ':' && origin.data[k + 1] == '/' && origin.data[k + 2] == '/') from = k + 3;
+                s64 to = from;
+                while (to < origin.count && origin.data[to] != '/') to++;
+                String site = (String){ origin.data + from, to - from };
+                Rect ask = CutTop(&body, R(2.6));
+                Draw_Rect(dl, ask, c->surface, 0);
+                Draw_Rect(dl, R4(ask.x0, ask.y1 - Max(1, R(0.06)), ask.x1, ask.y1), c->line, 0);
+                Rect ar2 = RectShrink(ask, R(0.5));
+                CutLeft(&ar2, R(0.5));
+                String allow = S("Allow"), block = S("Block");
+                Rect ab = CutRight(&ar2, Min(Font_Measure(font, allow) + R(2), RectW(ar2)));
+                CutRight(&ar2, Min(R(0.5), RectW(ar2)));
+                Rect bb = CutRight(&ar2, Min(Font_Measure(font, block) + R(2), RectW(ar2)));
+                UiSignal as2 = Ui_Hit(ui, Ui_IdN(Ui_Id("WebAllow"), n->id), ab), bs2 = Ui_Hit(ui, Ui_IdN(Ui_Id("WebBlock"), n->id), bb);
+                Draw_Rect(dl, ab, as2.hovered ? ColorMix(c->accent, 0xFFFFFFFFu, 0.12f) : c->accent, (f32)R(0.35));
+                Draw_TextIn(dl, font, ab, c->on_accent, allow, 0.5f);
+                Draw_RectEx(dl, bb, bs2.hovered ? c->hover : 0, c->line, 1.0f, (f32)R(0.35), NULL, 0, 0, 0);
+                Draw_TextIn(dl, font, bb, c->text, block, 0.5f);
+                Draw_TextIn(dl, font, ar2, c->text, Str_PushFormat(fa, "%.*s wants %s", STR_ARG(site.count ? site : origin), wants[Min(ws->ask_kind, 12u)]), 0);
+                Named(app, Str_PushFormat(fa, "web ask %d", pane_index), ask);
+                Named(app, Str_PushFormat(fa, "web allow %d", pane_index), ab);
+                Named(app, Str_PushFormat(fa, "web block %d", pane_index), bb);
+                answer = as2.clicked ? 1 : bs2.clicked ? -1 : 0;
+            }
             UiSignal ps = Ui_Hit(ui, Ui_IdN(Ui_Id("Web"), n->id), body);
             if (ps.pressed && t != panes->selected) Panes_Select(panes, t);
             if (ps.hovered && in->input.wheel[1] && (in->input.modifiers & Mod_Ctrl) && !modal) {
@@ -4898,6 +5122,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 out->webs[i].rect = body;
                 out->webs[i].shown = 1;
                 out->webs[i].mouse = ps.hovered;
+                out->webs[i].answer = answer;
             }
             web_shown = 1;
             Named(app, Str_PushFormat(fa, "web page %d", pane_index), body);
@@ -4908,7 +5133,6 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Rect body = content;
             Rect cap = CutBottom(&body, R(2.4));
             Draw_Rect(dl, content, ColorMix(c->bg, 0xFF000000u, 0.45f), 0);
-            Draw_Rect(dl, cap, c->caption, 0);
             UiSignal vs = Ui_Hit(ui, Ui_IdN(Ui_Id("Viewer"), n->id), content);
             if (vs.pressed && t != panes->selected) Panes_Select(panes, t);
             s64 at = 0;
@@ -4930,18 +5154,75 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             } else {
                 Draw_TextIn(dl, font, area, c->dim, !v->name.count && v->listed ? S("No pictures here") : img && img->failed ? S("This picture can't be read") : S("Loading..."), 0.5f);
             }
-            Rect ci = cap;
-            CutLeft(&ci, R(1));
-            CutRight(&ci, R(1));
-            String keys = S("\xE2\x86\x90 \xE2\x86\x92 next  \xC2\xB7  Esc back");
-            Draw_TextIn(dl, small, CutRight(&ci, Font_Measure(small, keys)), c->dim, keys, 1);
-            Draw_TextIn(dl, bold, CutLeft(&ci, Min(Font_Measure(bold, v->name), RectW(ci))), c->text, v->name, 0);
-            CutLeft(&ci, R(1));
             String where = v->count && at < v->count ? Str_PushFormat(fa, "%lld / %lld", (long long)(at + 1), (long long)v->count) : (String){0};
             if (img && img->full_w) where = Str_PushFormat(fa, "%.*s%s%d \xC3\x97 %d", STR_ARG(where), where.count ? "   " : "", img->full_w, img->full_h);
-            Draw_TextIn(dl, small, ci, c->dim, where, 0);
+            PaneCaption(dl, em, cap, c, small, bold, v->name, where, S("\xE2\x86\x90 \xE2\x86\x92 next  \xC2\xB7  Esc back"));
             Named(app, Str_PushFormat(fa, "view %.*s", STR_ARG(v->name)), content);
-        } else if (t && t->browsing && t->browser) {
+        } else if (previewing && !doc_preview) {
+            // --- a browser's preview (Space / F3) over the whole tab: a picture fitted, a text file's lines (numbered; the
+            //     wheel, PgUp / PgDn scroll), else what it is; a caption: its name, which of the folder's, its size ---
+            Rect body = content;
+            Rect cap = CutBottom(&body, R(2.4));
+            Draw_Rect(dl, body, ColorAlpha(c->bg, app->opacity), 0);
+            UiSignal ps = Ui_Hit(ui, Ui_IdN(Ui_Id("Preview"), n->id), body);
+            if (ps.pressed && t != panes->selected) Panes_Select(panes, t);
+            PaneCaption(dl, em, cap, c, small, bold, pv_name, pv_where,
+                        S("\xE2\x86\x91\xE2\x86\x93 next  \xC2\xB7  Enter opens  \xC2\xB7  Esc back"));
+            Rect area = RectShrink(body, R(1));
+            if (pv_kind == 1) {
+                const AppImage *img = NULL;
+                for (s32 i = 0; i < in->image_count; i++) if (Str_EqualNoCase(in->images[i].path, pv_path)) img = &in->images[i];
+                if (img && img->texture && img->full_w > 0 && img->full_h > 0) {
+                    f32 s = Min(Min((f32)RectW(area) / (f32)img->full_w, (f32)RectH(area) / (f32)img->full_h), (f32)in->dpi / 96.0f);
+                    Draw_Image(dl, RectCenter(area, (s32)(img->full_w * s), (s32)(img->full_h * s)), img->texture, 0xFFFFFFFFu);
+                } else {
+                    Draw_TextIn(dl, font, area, c->dim, img && img->failed ? S("This picture can't be read") : S("Loading..."), 0.5f);
+                }
+            } else if (pv_kind == 2) {
+                // --- text: its lines numbered, clipped at the right, tabs as 4 spaces; only those in view are drawn ---
+                Font *mono = &in->fonts[Font_Mono];
+                String text = in->preview_text;
+                if (text.count && text.data[text.count - 1] == '\n') text.count--;   // its last line's end isn't a line after it
+                s32 lh = (s32)(mono->line_h * 1.25f + 0.5f);
+                s64 count = 1;
+                for (s64 k = 0; k < text.count; k++) count += text.data[k] == '\n';
+                b32 cut = in->preview_size > in->preview_text.count;
+                f32 max_scroll = Max(0.0f, (f32)((count + (cut ? 2 : 0)) * lh - RectH(area)));
+                if (ps.hovered && in->input.wheel[1] && !modal) app->preview_scroll -= (f32)in->input.wheel[1] / 120.0f * 3.0f * (f32)lh;
+                app->preview_scroll = Clamp(app->preview_scroll, 0.0f, max_scroll);
+                s64 first = (s64)(app->preview_scroll / (f32)lh);
+                s32 y = area.y0 - (s32)app->preview_scroll + (s32)first * lh;
+                String digits = Str_PushFormat(fa, "%lld", (long long)count);
+                s32 gutter = Font_Measure(mono, digits) + R(1.5);
+                Draw_PushClip(dl, area);
+                s64 at = 0, line = 0;
+                while (line < first && at < text.count) { if (text.data[at++] == '\n') line++; }
+                for (; at <= text.count && y < area.y1; line++, y += lh) {
+                    s64 end = at;
+                    while (end < text.count && text.data[end] != '\n') end++;
+                    TextBuilder lb = { fa, NULL, 0, 0 };
+                    for (s64 k = at; k < end && k - at < 2000; k++) {
+                        u8 ch = text.data[k];
+                        if (ch == '\t') TB_Append(&lb, S("    "));
+                        else if (ch != '\r') TB_Append(&lb, (String){ text.data + k, 1 });
+                    }
+                    Draw_TextIn(dl, mono, R4(area.x0, y, area.x0 + gutter - R(1), y + lh), c->faint, Str_PushFormat(fa, "%lld", (long long)line + 1), 1);
+                    Draw_TextIn(dl, mono, R4(area.x0 + gutter, y, area.x1, y + lh), c->text, TB_String(&lb), 0);
+                    at = end + 1;
+                    if (end >= text.count) { line++; y += lh; break; }
+                }
+                if (cut && y + lh <= area.y1 + lh)
+                    Draw_TextIn(dl, small, R4(area.x0 + gutter, y + lh / 2, area.x1, y + lh / 2 + lh), c->dim,
+                                Str_PushFormat(fa, "The first %.*s of %.*s", STR_ARG(SizeText(fa, (u64)in->preview_text.count)), STR_ARG(SizeText(fa, (u64)in->preview_size))), 0);
+                Draw_PopClip(dl);
+            } else {
+                // --- what it is: its name, a word on why there's no preview ---
+                s32 mid = (area.y0 + area.y1) / 2;
+                Draw_TextIn(dl, bold, R4(area.x0, mid - R(2), area.x1, mid), c->text, pv_name, 0.5f);
+                Draw_TextIn(dl, font, R4(area.x0, mid, area.x1, mid + R(2)), c->dim, pv_kind == 4 ? S("Reading...") : pv_what.count ? pv_what : S("No preview"), 0.5f);
+            }
+            Named(app, Str_PushFormat(fa, "preview %.*s", STR_ARG(pv_name)), content);
+        } else if (t && t->browsing && t->browser && !doc_preview) {
             // --- the browser: path, column heads, rows, footer. Read-only while the tab is busy. Moves wait for the end
             //     of the frame (the rows' text points into the listing a move releases) ---
             Browser *b = t->browser;
@@ -5196,7 +5477,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 app->pane_rects[app->pane_rect_count].term_id = t->term_id;
                 app->pane_rect_count++;
             }
-        } else if (cv && (chat_shown || searching)) {
+        } else if (cv && (chat_shown || searching || doc_preview)) {
             // --- the reader's colors (settings `reader_theme`): Paper or Evening, else the window's ---
             Chrome reader_c = *c;
             u32 r_plus = 0xFF000000u | tt->ansi[2], r_minus = 0xFF000000u | tt->ansi[1], r_mark = 0xFF000000u | tt->ansi[3];
@@ -5236,6 +5517,11 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             // the window's colors see through as its terminals do (settings `opacity`); the other schemes are pages
             f32 page_alpha = app->reader_theme == ReaderTheme_Window ? app->opacity : 1.0f;
             Draw_Rect(dl, content, ColorAlpha(rc->bg, page_alpha), 0);
+            if (doc_preview) {
+                PaneCaption(dl, em, CutBottom(&hv, R(2.4)), c, small, bold, pv_name, pv_where,
+                            S("\xE2\x86\x91\xE2\x86\x93 next  \xC2\xB7  Enter opens  \xC2\xB7  Esc back"));
+                Named(app, Str_PushFormat(fa, "preview %.*s", STR_ARG(pv_name)), content);
+            }
             Ui_Hit(ui, Ui_IdN(Ui_Id("Chat"), n->id), content);
             if (in->input.button[Mouse_Left].pressed && !modal && RectHas(content, mouse_x, mouse_y) && t != panes->selected) Panes_Select(panes, t);
             if (app->pane_rect_count < App_MaxPanes) {
@@ -5245,7 +5531,47 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             s32 text_w = Max(R(10), Min(pw - 2 * R(3), (s32)(R(64) * app->reader_pt / 12)));
             s32 col_x = px0 + (pw - text_w) / 2;
-            if (chat_shown && dialog.option_count) {
+            if (chat_shown && dialog.row_count) {
+                // --- a list claude shows with a ❯ cursor and no numbers (/resume, a picker): its rows as a card, as they
+                //     are; keys go to claude (the arrows, typing to search, Enter, Esc); a click on an item moves the
+                //     cursor there with the arrows and picks it ---
+                s32 rlh = (s32)(mono->line_h * 1.35f);
+                s32 card_h = R(1.2) + dialog.row_count * rlh + R(2.6);
+                Rect dock = CutBottom(&hv, Min(RectH(hv), card_h + R(1.6)));
+                Rect card = R4(col_x - R(1.2), dock.y0 + R(0.4), col_x + text_w + R(1.2), dock.y0 + R(0.4) + card_h);
+                Draw_RectEx(dl, card, rc->surface, rc->line, (f32)line_w, radius_large, NULL, 0, 0, 0);
+                Named(app, S("chat list"), card);
+                s32 y = card.y0 + R(1.0);
+                for (s32 k = 0; k < dialog.row_count; k++) {
+                    Rect rr = R4(col_x - R(0.6), y, col_x + text_w + R(0.6), y + rlh);
+                    s32 item = dialog.row_item[k];
+                    b32 marked = item >= 0 && item == dialog.item_marked;
+                    if (item >= 0) {
+                        u64 rid = Ui_IdN(Ui_IdN(Ui_Id("ChatListRow"), n->id), (u64)k);
+                        UiSignal rs = Ui_Hit(ui, rid, rr);
+                        Draw_Rect(dl, rr, marked ? ColorAlpha(rc->accent, 0.10f) : HoverFill(app, rid, rs, rc->hover), 0);
+                        if (rs.hovered) ui->cursor = Cursor_Hand;
+                        if (rs.clicked) {
+                            // the arrows from the cursor's item to this one, then Enter
+                            b32 win32 = (box_grid->flags & TermGrid_Win32Input) && !app->win32_input_off;
+                            b32 app_keys = (box_grid->flags & TermGrid_AppCursorKeys) != 0;
+                            s32 steps = item - dialog.item_marked;
+                            String key = steps < 0 ? (win32 ? S("\x1b[38;72;0;1;256;1_\x1b[38;72;0;0;256;1_") : app_keys ? S("\x1bOA") : S("\x1b[A"))
+                                                   : (win32 ? S("\x1b[40;80;0;1;256;1_\x1b[40;80;0;0;256;1_") : app_keys ? S("\x1bOB") : S("\x1b[B"));
+                            TextBuilder keys = { fa, NULL, 0, 0 };
+                            for (s32 s = 0; s < (steps < 0 ? -steps : steps); s++) TB_Append(&keys, key);
+                            SendLine(app, &f, t->term_id, TB_String(&keys));
+                            Panes_Select(panes, t);
+                            Logf("app", "chat: list item %d for tab %u", item, t->term_id);
+                        }
+                    }
+                    Draw_TextIn(dl, mono, R4(col_x, y, col_x + text_w, y + rlh), marked ? rc->text : k < dialog.row_count && item < 0 ? rc->text : rc->dim,
+                                dialog.rows[k], 0);
+                    y += rlh;
+                }
+                Draw_TextIn(dl, small, R4(col_x, y, col_x + text_w, card.y1 - R(0.6)), rc->faint,
+                            S("A click picks  \xC2\xB7  \xE2\x86\x91\xE2\x86\x93 and Enter  \xC2\xB7  type to search  \xC2\xB7  Esc cancels  \xC2\xB7  Ctrl+Shift+R the terminal"), 0);
+            } else if (chat_shown && dialog.option_count) {
                 // --- claude asks (a permission, a choice, a menu): its question as a card where the prompt was. A click on
                 //     a choice types its number; keys go to claude as they are (a number, the arrows, Enter, Esc), and its
                 //     screen says which choice is marked ---
@@ -5314,11 +5640,21 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 Named(app, stop ? S("chat stop") : S("chat send"), sb);
                 if (ss.clicked && live) ChatSend(app, &f, cv, stop);
                 // --- the context used: a hairline under the prompt filled as far as it goes, "62% of context" by Send (of
-                //     200k tokens; 1M for a [1m] model, or once past 200k) ---
+                //     the model's window: 1M, but 200k for Haiku before 5 and Sonnet / Opus before 4.6 unless [1m], or
+                //     once past 200k) ---
                 String ctx = cst ? AccountPart(cst->account, 4) : (String){0};
                 if (ctx.count) {
                     u64 tokens = strtoull((const char *)Str_PushCopy(fa, ctx).data, NULL, 10);
-                    u64 window = ContainsNoCase(AccountPart(cst->account, 3), S("[1m]")) || tokens > 200000 ? 1000000 : 200000;
+                    String model = AccountPart(cst->account, 3);   // "Opus 5.5", "Haiku 4.5", "opus[1m]", "Default"
+                    s32 major = 0, minor = 0;
+                    b32 haiku = ContainsNoCase(model, S("haiku")), older = 0;
+                    for (s64 k = 0; k < model.count; k++) {
+                        if (model.data[k] < '0' || model.data[k] > '9') continue;
+                        sscanf((const char *)Str_PushCopy(fa, (String){ model.data + k, model.count - k }).data, "%d.%d", &major, &minor);
+                        older = haiku ? major < 5 : major < 4 || (major == 4 && minor < 6);
+                        break;
+                    }
+                    u64 window = older && !ContainsNoCase(model, S("[1m]")) && tokens <= 200000 ? 200000 : 1000000;
                     f32 used = Min(1.0f, (f32)tokens / (f32)window);
                     u32 tone = used > 0.8f ? r_minus : rc->faint;
                     s32 bar_y = dock.y1 - R(0.45);
@@ -5830,6 +6166,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     u32 prev_kind = cv->lines.count > 1 ? cv->lines.data[cv->lines.count - 2].kind : HistLine_Blank;
                     hl->text = Str_PushFormat(&cv->arena, "%s  %.*s", he->from_user ? "You" : "Claude", STR_ARG(when));
                     if (!he->from_user && (prev_kind == HistLine_Tool || prev_kind == HistLine_ToolBody || prev_kind == HistLine_Group)) hl->kind = HistLine_Blank;   // the same turn: no second "Claude"
+                    if (he->kind == 7) hl->kind = HistLine_Blank;   // a document (a browser's preview of a markdown file)
                     String text = Str_PushCopy(&cv->arena, he->text);
                     s64 msg_first = cv->lines.count;   // its lines (a prompt's are marked after)
                     s32 msg_w = he->from_user ? text_w - 2 * bubble : text_w;

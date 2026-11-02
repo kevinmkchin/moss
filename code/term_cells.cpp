@@ -574,8 +574,8 @@ static void ResolveGrid(TermCells* T, const TermGrid& G, const TermPalette& Pal,
                         s32 Add = ((Row[Nx].Flags & CELL_WIDE) && Nx + 1 < G.cols) ? 2 : 1;
                         // After a joiner only an emoji or symbol joins, never e.g. a box-drawing line.
                         bool32 AfterZwj = Cps[Count - 1] == 0x200D && (Next >= 0x1F000 || (Next >= 0x2600 && Next <= 0x27BF));
-                        // Ligatures: up to four programming symbols of the same look drawn as one run (-> => != ===).
-                        bool32 Liga = Pal.ligatures && Count < 4 && Cps[Count - 1] < 0x80 && Next < 0x80 &&
+                        // Ligatures: up to eight programming symbols of the same look drawn as one run (-> => != === <-->).
+                        bool32 Liga = Pal.ligatures && Count < 8 && Cps[Count - 1] < 0x80 && Next < 0x80 &&
                                       strchr("!#$%&*+-./:;<=>?@\\^_|~", (int)Cps[Count - 1]) && strchr("!#$%&*+-./:;<=>?@\\^_|~", (int)Next) &&
                                       Row[Nx].Fg == K.Fg && Row[Nx].Bg == K.Bg && Row[Nx].Attr == K.Attr && !(Row[Nx].Flags & (CELL_FOUND | CELL_FOUND_CURRENT));
                         bool32 Joins = Next > ' ' && (IsClusterExtender(Next) || AfterZwj || Liga || (Flag && Count == 1 && IsRegionalIndicator(Next)));

@@ -244,7 +244,8 @@ s32 Panes_TabCount(const Panes *p)
 }
 
 // --- session: "term-layout 1", a "window" line, then a line per node ("split" / "pane" with its depth) and per
-//     tab of a pane ("tab"), depth first. Text fields are the line's last, tab-separated: key, title, browser
+//     tab of a pane ("tab": selected, shown, browsing, color, a web tab's zoom), depth first. Text fields are the
+//     line's last, tab-separated: key, title, browser
 //     folder, web address (a web tab's) ---
 
 String Session_Write(Arena *arena, const Panes *p, const SessionLayout *s)
@@ -257,7 +258,7 @@ String Session_Write(Arena *arena, const Panes *p, const SessionLayout *s)
         if (n->first_child) { TB_Format(&tb, "split %d %d %.4f\n", depth, n->vertical ? 1 : 0, (double)n->split_ratio); continue; }
         TB_Format(&tb, "pane %d %.4f\n", depth, (double)n->split_ratio);
         for (PaneTab *t = n->first_tab; t; t = t->next) {
-            TB_Format(&tb, "tab %d %d %d %d\t%.*s\t%.*s\t%.*s\t%.*s\n", t == p->selected ? 1 : 0, t->hidden ? 0 : 1, t->browsing ? 1 : 0, (int)t->color,
+            TB_Format(&tb, "tab %d %d %d %d %d\t%.*s\t%.*s\t%.*s\t%.*s\n", t == p->selected ? 1 : 0, t->hidden ? 0 : 1, t->browsing ? 1 : 0, (int)t->color, t->web_zoom,
                       t->key_len, (const char *)t->key, t->title_len, (const char *)t->title, STR_ARG(t->browse_path),
                       t->web ? (t->web_url_len ? t->web_url_len : 11) : 0, t->web_url_len ? (const char *)t->web_url : "about:blank");
         }
@@ -334,8 +335,10 @@ b32 Session_Read(Panes *p, String text, SessionLayout *out)
             leaf = pane ? node : NULL;
             continue;
         }
-        if (leaf && sscanf(buf, "tab %d %d %d %d", &a, &b, &c, &d) == 4) {
+        e = 0;   // a web tab's zoom (older layouts have none)
+        if (leaf && sscanf(buf, "tab %d %d %d %d %d", &a, &b, &c, &d, &e) >= 4) {
             PaneTab *t = Panes_NewTab(&fresh, leaf, NULL);
+            t->web_zoom = e;
             t->hidden = !b;
             t->browsing = c;
             t->color = (u8)d;

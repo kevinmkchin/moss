@@ -53,6 +53,10 @@ struct web_page
     u32 Popup;                     // made for this popup (web_popup): its opener gets this page as the new window
     u32 Notices;                   // notifications so far, the last one's title and body
     std::string NoticeTitle, NoticeBody;
+    ICoreWebView2PermissionRequestedEventArgs* Ask;   // a permission it waits on (held until the app answers)
+    ICoreWebView2Deferral* AskDeferral;
+    u32 AskKind;
+    std::string AskOrigin;
 };
 
 // A page's request for a new window, held (deferred) until the app makes a web tab for it.
@@ -153,12 +157,22 @@ static void WebStartPage(Web* W, web_page* P)
             V->add_ProcessFailed(WebFn<ICoreWebView2ProcessFailedEventHandler>([P](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs* A) -> HRESULT {
                 COREWEBVIEW2_PROCESS_FAILED_KIND Kind = COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED; A->get_ProcessFailedKind(&Kind);
                 Logf("web", "page %llu: a browser process failed (kind %d)", P->Id, (int)Kind); return S_OK; }), &Token);
-            V->add_PermissionRequested(WebFn<ICoreWebView2PermissionRequestedEventHandler>([P](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* A) -> HRESULT {
+            V->add_PermissionRequested(WebFn<ICoreWebView2PermissionRequestedEventHandler>([W, P](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* A) -> HRESULT {
                 COREWEBVIEW2_PERMISSION_KIND Kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION; A->get_PermissionKind(&Kind);
                 LPWSTR S = 0; A->get_Uri(&S);
-                // notifications are moss's to show (settings `notifications = off`: none): allowed; the rest WebView2 asks
+                std::string From = WebTake(S);
+                // notifications are moss's to show (settings `notifications = off`: none): allowed; the rest the app asks
+                // in the tab (held until it answers; a second one while one waits is WebView2's own prompt)
                 if(Kind == COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS) { A->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW); }
-                Logf("web", "page %llu: %s asks for permission %d", P->Id, WebTake(S).c_str(), (int)Kind); return S_OK; }), &Token);
+                else if(!P->Ask && SUCCEEDED(A->GetDeferral(&P->AskDeferral)))
+                {
+                    A->AddRef();
+                    P->Ask = A;
+                    P->AskKind = (u32)Kind;
+                    P->AskOrigin = From;
+                    WebWake(W);
+                }
+                Logf("web", "page %llu: %s asks for permission %d", P->Id, From.c_str(), (int)Kind); return S_OK; }), &Token);
             ICoreWebView2_24* V24 = 0;
             V->QueryInterface(IID_PPV_ARGS(&V24));
             if(V24)
@@ -309,6 +323,18 @@ extern "C" void Web_Update(Web* W, const AppWeb* Webs, s32 Count, u64 Focus)
         if(P->View && A->reload) { P->View->Reload(); }
         double Zoom = A->zoom > 0 ? A->zoom : 1.0;
         if(P->Controller && Zoom != P->Zoom) { P->Controller->put_ZoomFactor(Zoom); P->Zoom = Zoom; }
+        if(P->Ask && A->answer)
+        {
+            // the app's answer to the permission it waits on
+            P->Ask->put_State(A->answer > 0 ? COREWEBVIEW2_PERMISSION_STATE_ALLOW : COREWEBVIEW2_PERMISSION_STATE_DENY);
+            P->AskDeferral->Complete();
+            P->AskDeferral->Release();
+            P->Ask->Release();
+            P->Ask = 0;
+            P->AskDeferral = 0;
+            P->AskKind = 0;
+            Logf("web", "page %llu: permission %s", P->Id, A->answer > 0 ? "allowed" : "blocked");
+        }
     }
     for(web_page* P : W->Pages)
     {
@@ -396,6 +422,8 @@ extern "C" s32 Web_Fill(Web* W, Arena* A, AppWebState* Out, s32 Max)
         S->notices = P->Notices;
         S->notice_title = Str_PushCopy(A, String{(u8*)P->NoticeTitle.data(), (s64)P->NoticeTitle.size()});
         S->notice_body = Str_PushCopy(A, String{(u8*)P->NoticeBody.data(), (s64)P->NoticeBody.size()});
+        S->ask_kind = P->Ask ? P->AskKind : 0;
+        S->ask_origin = Str_PushCopy(A, String{(u8*)P->AskOrigin.data(), (s64)P->AskOrigin.size()});
     }
     return N;
 }

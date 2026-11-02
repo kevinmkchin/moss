@@ -28,6 +28,7 @@ typedef struct AppWeb {
     b32 reload;
     f32 zoom;                   // the page's zoom factor (0: 1)
     u32 popup;                  // made for this popup (AppWebPopup.id): the page that asked for it gets it as its new window
+    s32 answer;                 // its permission asked (AppWebState.ask_kind): 1 allowed, -1 blocked, 0 not yet
 } AppWeb;
 // A page's state. notices counts its notifications; the last one's title and body come with it.
 typedef struct AppWebState {
@@ -37,6 +38,8 @@ typedef struct AppWebState {
     b32 close_requested;        // the page closed itself (window.close())
     u32 notices;
     String notice_title, notice_body;
+    u32 ask_kind;               // a permission it asks for and waits on (WebView2's COREWEBVIEW2_PERMISSION_KIND; 0: none)
+    String ask_origin;          // who asks: the page's address
 } AppWebState;
 // A page asked for a new window (window.open, a link with target=_blank): it waits for a web tab made for it.
 typedef struct AppWebPopup { u32 id; u64 opener; String url; } AppWebPopup;
@@ -129,6 +132,11 @@ typedef struct AppFrameInput {
     String view_path;
     s32 image_count;            // the viewer's pictures that are ready (asked with AppOutput.image_wants)
     const AppImage *images;
+    String preview_path;        // a browser preview's file as read (AppOutput.preview_want): its first 256 KB, its whole size,
+    String preview_text;        // the modified time it was asked with, whether it's binary (a 0 byte in its first 8 KB)
+    s64 preview_size;
+    u64 preview_stamp;
+    b32 preview_binary;
     String accounts_text;       // accounts.txt whole (Claude accounts, their themes, the work folders' rules)
     u32 accounts_version;       // changes whenever accounts_text does (read again on a change)
     String editor;              // the terminal text editor Enter on a text file runs (settings.txt `editor`, else the first found: nvim, vim, ...; empty: none)
@@ -161,11 +169,14 @@ enum { AppWindow_None = 0, AppWindow_Minimize = 1, AppWindow_ToggleMaximize = 2,
 enum { App_MaxCaptionClientRects = 64 };
 
 // What the browser asks of the disk (never while its tab is busy).
-enum { FileOp_None = 0, FileOp_Delete = 1, FileOp_Rename = 2, FileOp_NewFolder = 3, FileOp_Paste = 4, FileOp_CopyIn = 5 };
+enum { FileOp_None = 0, FileOp_Delete = 1, FileOp_Rename = 2, FileOp_NewFolder = 3, FileOp_Paste = 4, FileOp_CopyIn = 5,
+       FileOp_Properties = 6, FileOp_Restore = 7 };
 typedef struct FileOp {
     u32 kind;
-    String path;    // Delete: to the Recycle Bin; Rename: the item; NewFolder: the folder made; Paste: where the clipboard's files go
-    String name;    // Rename: the new name; CopyIn: the files that go into path, one a line
+    String path;    // Delete: to the Recycle Bin; Rename: the item; NewFolder: the folder made; Paste: where the clipboard's files go;
+                    // Properties: the item Windows' Properties show
+    String name;    // Rename: the new name; CopyIn: the files that go into path, one a line; Restore: the paths deleted, one a
+                    // line (back from the Recycle Bin)
 } FileOp;
 
 typedef struct AppOutput {
@@ -212,7 +223,10 @@ typedef struct AppOutput {
     String open_file;           // open a file with its program (ShellExecute "open")
     s32 image_want_count;       // the viewer's pictures, the shown ones first, then their neighbours (decoded in that order)
     String image_wants[6];
+    String preview_want;        // a browser preview wants this file's text (read again when preview_stamp, its modified time,
+    u64 preview_stamp;          // changes): AppFrameInput.preview_*
     s64 clipboard_file_count; String *clipboard_files;    // put these files on the clipboard (copy), with their paths as text
+    b32 clipboard_files_cut;    // ... as a cut: a paste moves them (Explorer's preferred drop effect)
     s64 file_op_count; FileOp *file_ops;
     s64 drag_file_count; String *drag_files;              // drag these files out of the window (a copy; OLE, modal)
     u32 drop_effect;            // what a drop at the mouse would do: 0 refused, 1 copy into a browser's folder, 2 type the paths

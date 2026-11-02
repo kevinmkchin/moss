@@ -200,9 +200,9 @@ static void VtResize(vt_terminal& T, s32 Cols, s32 Rows)
         bool32 IsActive = (S == (T.AltActive ? 1 : 0));
         s32 CursorY = IsActive ? T.CursorY : 0;
 
-        // --- main screen, new width: reflow its lines, like Windows Terminal. The bundled ConPTY host doesn't
-        // repaint on resize; it asks where the cursor went (ESC [ 6n) and the shell redraws its prompt from there.
-        // The scrollback stays as it was. ---
+        // --- main screen, new width: reflow its lines and the scrollback's, like Windows Terminal. The bundled ConPTY
+        // host doesn't repaint on resize; it asks where the cursor went (ESC [ 6n) and the shell redraws its prompt
+        // from there. ---
         if(S == 0 && Cols != T.Cols)
         {
             cell Zero = {};
@@ -215,24 +215,29 @@ static void VtResize(vt_terminal& T, s32 Cols, s32 Rows)
                 if(Used) { Last = Y; }
             }
 
-            // join wrapped rows into lines; where each old row starts (line, offset), for the marks
+            // join wrapped rows into lines: the scrollback's (oldest first, each as long as it was kept), then the
+            // screen's; where each old row starts (line, offset), for the marks
+            s32 Back = (s32)T.Scrollback.size();
+            s32 Total = Back + Last + 1;
+            u64 Base = T.ScrollbackPushed - (u64)Back;   // the scrollback's first row, counted as the marks count
             std::vector<std::vector<cell>> Lines(1);
-            std::vector<s32> RowLine((size_t)T.Rows, 0), RowOffset((size_t)T.Rows, 0);
+            std::vector<s32> RowLine((size_t)Max(Total, 1), 0), RowOffset((size_t)Max(Total, 1), 0);
             s32 CursorLine = -1, CursorOffset = 0;
-            for(s32 Y = 0; Y <= Last; ++Y)
+            for(s32 I = 0; I < Total; ++I)
             {
                 std::vector<cell>& Line = Lines.back();
-                const cell* Row = Old.data() + (size_t)Y * T.Cols;
-                RowLine[Y] = (s32)Lines.size() - 1;
-                RowOffset[Y] = (s32)Line.size();
-                if(IsActive && Y == T.CursorY) { CursorLine = RowLine[Y]; CursorOffset = RowOffset[Y] + T.CursorX; }
-                bool32 Wrapped = (Row[T.Cols - 1].Flags & CELL_WRAPPED) != 0 && Y < Last;
-                s32 Len = T.Cols;
-                if(Wrapped && Row[T.Cols - 1].Codepoint == 0 && !(Row[T.Cols - 1].Flags & CELL_WIDE_CONT)) { Len -= 1; } // padding before a wide glyph
+                const cell* Row = I < Back ? T.Scrollback[(size_t)I].data() : Old.data() + (size_t)(I - Back) * T.Cols;
+                s32 RowLen = I < Back ? (s32)T.Scrollback[(size_t)I].size() : T.Cols;
+                RowLine[I] = (s32)Lines.size() - 1;
+                RowOffset[I] = (s32)Line.size();
+                if(IsActive && I - Back == T.CursorY) { CursorLine = RowLine[I]; CursorOffset = RowOffset[I] + T.CursorX; }
+                bool32 Wrapped = RowLen > 0 && (Row[RowLen - 1].Flags & CELL_WRAPPED) != 0 && I < Total - 1;
+                s32 Len = RowLen;
+                if(Wrapped && Row[RowLen - 1].Codepoint == 0 && !(Row[RowLen - 1].Flags & CELL_WIDE_CONT)) { Len -= 1; } // padding before a wide glyph
                 if(!Wrapped) { while(Len > 0 && CellEqual(Row[Len - 1], Zero)) { --Len; } }
                 Line.insert(Line.end(), Row, Row + Len);
-                if(Wrapped && Len == T.Cols) { Line.back().Flags &= (u16)~CELL_WRAPPED; }
-                if(!Wrapped && Y < Last) { Lines.emplace_back(); }
+                if(Wrapped && Len == RowLen) { Line.back().Flags &= (u16)~CELL_WRAPPED; }
+                if(!Wrapped && I < Total - 1) { Lines.emplace_back(); }
             }
 
             // wrap them at the new width
@@ -268,18 +273,19 @@ static void VtResize(vt_terminal& T, s32 Cols, s32 Rows)
             }
             if(CursorLine < 0) { CursorRow = NewRows - 1; }
 
-            // the cursor's row stays on screen; rows above the screen go to the scrollback
+            // the cursor's row stays on screen; rows above the screen are the scrollback now (counted from where it began)
             s32 Top = Max(0, CursorRow - Rows + 1);
-            u64 OldPushed = T.ScrollbackPushed;
+            T.Scrollback.clear();
+            T.ScrollbackPushed = Base;
             for(s32 Y = 0; Y < Top; ++Y) { VtPushScrollback(T, Out.data() + (size_t)Y * Cols, Cols); }
             std::vector<cell> New((size_t)Cols * Rows, cell{});
             for(s32 Y = 0; Y < Rows && Top + Y < NewRows; ++Y) { memcpy(New.data() + (size_t)Y * Cols, Out.data() + (size_t)(Top + Y) * Cols, Cols * sizeof(cell)); }
             Old.swap(New);
             for(vt_terminal::mark& M : T.Marks)
             {
-                if(M.Line < OldPushed || M.Line - OldPushed > (u64)Last) { continue; }
-                s32 R = (s32)(M.Line - OldPushed);
-                M.Line = OldPushed + (u64)(LineRow[RowLine[R]] + RowOffset[R] / Cols);
+                if(M.Line < Base || M.Line - Base >= (u64)Total) { continue; }
+                s32 R = (s32)(M.Line - Base);
+                M.Line = Base + (u64)(LineRow[RowLine[R]] + RowOffset[R] / Cols);
             }
             if(IsActive) { T.CursorY = CursorRow - Top; T.CursorX = CursorCol; }
             continue;

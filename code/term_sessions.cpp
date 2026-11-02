@@ -423,7 +423,19 @@ static void ReadHistoryMore(history_cache& C, const std::wstring& ConfigDir, con
         Whole = Whole == std::string::npos ? 0 : Whole + 1;
         C.Offset = Start + Whole;
         size_t LineStart = 0;
-        if(First && Start > 0) { LineStart = Buf.find('\n') + 1; } // the first line is cut
+        if(First && Start > 0)
+        {
+            LineStart = Buf.find('\n') + 1;   // the first line is cut
+            // the conversation's start isn't read: say so over what is
+            history_entry Cut = {};
+            Cut.Kind = 3;
+            char Text[160];
+            snprintf(Text, sizeof(Text), "Earlier messages aren't shown: the transcript is %llu MB, its last %llu MB are read",
+                     (unsigned long long)(((u64)Size.QuadPart + (1 << 19)) >> 20), (unsigned long long)(Most >> 20));
+            Cut.Text = Text;
+            C.Entries.push_back(Cut);
+            Changed = true;
+        }
         while(LineStart < Whole)
         {
             size_t LineEnd = Buf.find('\n', LineStart);

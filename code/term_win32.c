@@ -21,6 +21,7 @@
 #include <imm.h>
 #include <dwmapi.h>
 #include <commdlg.h>
+#include <sddl.h>
 #include <wchar.h>
 #include <math.h>
 #include <stdio.h>
@@ -139,6 +140,13 @@ typedef struct Platform {
     b32 restart;                  // the GPU device went away (a driver installed): a new window process takes over
     u64 test_gpu_lost;            // MOSS_TEST_GPU_LOST=N: the device counts as gone from frame N on (tests the restart)
     String window_name;           // `--window NAME`: one of the other windows (empty = the main one)
+    b32 summons;                  // registers the summon key (the main window, not a test run)
+    u8 *preview_buf;              // a browser preview's file (AppOutput.preview_want): its first 256 KB, as read
+    s64 preview_len, preview_size;
+    u64 preview_stamp;
+    b32 preview_binary;
+    u8 preview_path[1024];
+    s32 preview_path_len;
     WCHAR instance[64];           // the server instance (MOSS_INSTANCE, empty = the user's): windows only trade tabs within one
     u32 tear_offs;                // windows torn off in this run (headless names them w1, w2, ...)
     b32 start_at;                 // `--at x,y,w,h`: where a torn-off window opens
@@ -364,8 +372,9 @@ static String ReadClipboardUtf8(HWND hwnd, Arena *a)
     return out;
 }
 
-// Files on the clipboard as Explorer copies them (CF_HDROP), their paths as text too.
-static void SetClipboardFiles(HWND hwnd, const String *paths, s64 count, Arena *a)
+// Files on the clipboard as Explorer copies them (CF_HDROP), their paths as text too; cut: as Explorer cuts them (a
+// paste moves them).
+static void SetClipboardFiles(HWND hwnd, const String *paths, s64 count, b32 cut, Arena *a)
 {
     TextBuilder tb = { a, NULL, 0, 0 };
     s64 chars = 0;
@@ -399,7 +408,79 @@ static void SetClipboardFiles(HWND hwnd, const String *paths, s64 count, Arena *
     EmptyClipboard();
     if (!SetClipboardData(CF_HDROP, mem)) GlobalFree(mem);
     if (tmem && !SetClipboardData(CF_UNICODETEXT, tmem)) GlobalFree(tmem);
+    HGLOBAL emem = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+    if (emem) {
+        *(DWORD *)GlobalLock(emem) = cut ? DROPEFFECT_MOVE : DROPEFFECT_COPY | DROPEFFECT_LINK;
+        GlobalUnlock(emem);
+        if (!SetClipboardData(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT), emem)) GlobalFree(emem);
+    }
     CloseClipboard();
+}
+
+// A deleted file or folder back where it was, from its drive's Recycle Bin: <drive>\$Recycle.Bin\<the user's SID>
+// holds a $I file per item (version 2: version, size, when, the path's length, the path; version 1: the path at 24 in
+// 520 bytes) next to its $R data. The newest $I naming the path wins. 1 when it's back.
+static b32 RestoreFromRecycleBin(Arena *a, String path)
+{
+    if (path.count < 3 || path.data[1] != ':') return 0;
+    HANDLE token = NULL;
+    u8 user_buf[256] = {0};
+    DWORD got = 0;
+    WCHAR *sid = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 0;
+    b32 have = GetTokenInformation(token, TokenUser, user_buf, sizeof(user_buf), &got) && ConvertSidToStringSidW(((TOKEN_USER *)user_buf)->User.Sid, &sid);
+    CloseHandle(token);
+    if (!have) return 0;
+    WCHAR bin[MAX_PATH] = {0}, pattern[MAX_PATH] = {0};
+    swprintf_s(bin, MAX_PATH, L"%c:\\$Recycle.Bin\\%s", (WCHAR)path.data[0], sid);
+    LocalFree(sid);
+    swprintf_s(pattern, MAX_PATH, L"%s\\$I*", bin);
+    // the bin keeps long paths: the folder's in its long form (C:\Users\KEVINC~1 is C:\Users\kevinchin), the name as it was
+    WString short_path = Utf8ToUtf16(a, path);
+    WCHAR folder[MAX_PATH] = {0}, long_folder[MAX_PATH] = {0}, long_path[MAX_PATH] = {0};
+    wcsncpy_s(folder, MAX_PATH, (LPCWSTR)short_path.data, _TRUNCATE);
+    WCHAR *last = wcsrchr(folder, L'\\');
+    if (!last) return 0;
+    *last = 0;
+    if (wcslen(folder) <= 2 || !GetLongPathNameW(folder, long_folder, MAX_PATH)) wcscpy_s(long_folder, MAX_PATH, folder);   // "C:" is the drive's root
+    swprintf_s(long_path, MAX_PATH, L"%s\\%s", long_folder, last + 1);
+    WString want = { (u16 *)long_path, (s64)wcslen(long_path) };
+    WCHAR best[MAX_PATH] = {0};
+    u64 best_when = 0;
+    WIN32_FIND_DATAW fd = {0};
+    HANDLE find = FindFirstFileW(pattern, &fd);
+    for (b32 more = find != INVALID_HANDLE_VALUE; more; more = FindNextFileW(find, &fd)) {
+        // --- one $I file: when it went, and from where ---
+        WCHAR info[MAX_PATH] = {0};
+        swprintf_s(info, MAX_PATH, L"%s\\%s", bin, fd.cFileName);
+        HANDLE h = CreateFileW(info, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        u8 head[28 + 2 * MAX_PATH] = {0};
+        DWORD n = 0;
+        ReadFile(h, head, sizeof(head), &n, NULL);
+        CloseHandle(h);
+        if (n < 28) continue;
+        u64 version = 0, when = 0;
+        memcpy(&version, head, 8);
+        memcpy(&when, head + 16, 8);
+        const WCHAR *from = (const WCHAR *)(head + (version >= 2 ? 28 : 24));
+        s64 len = 0;
+        while ((u8 *)(from + len) < head + n && from[len]) len++;
+        if (len != want.count || CompareStringOrdinal(from, (int)len, (LPCWCH)want.data, (int)want.count, TRUE) != CSTR_EQUAL || when < best_when) continue;
+        best_when = when;
+        wcscpy_s(best, MAX_PATH, info);
+    }
+    if (find != INVALID_HANDLE_VALUE) FindClose(find);
+    if (!best[0]) return 0;
+    // --- its $R data back to the path, then the $I file goes ---
+    WCHAR data[MAX_PATH] = {0};
+    wcscpy_s(data, MAX_PATH, best);
+    WCHAR *mark = wcsrchr(data, L'\\');
+    if (!mark || mark[1] != L'$' || mark[2] != L'I') return 0;
+    mark[2] = L'R';
+    if (!MoveFileExW(data, (LPCWSTR)want.data, 0)) { Logf("files", "restore failed (%lu)", GetLastError()); return 0; }
+    DeleteFileW(best);
+    return 1;
 }
 
 // --- the browser's file operations: renames and new folders at once; deletes and pastes on a thread of their
@@ -539,12 +620,26 @@ static void SetAccountTheme(Platform *p, String name, String theme)
 
 static void RunFileOps(Platform *p, const FileOp *ops, s64 count)
 {
-    static const char *const names[6] = { "", "delete", "rename", "new folder", "paste into", "copy into" };
+    static const char *const names[8] = { "", "delete", "rename", "new folder", "paste into", "copy into", "properties of", "restore" };
     for (s64 i = 0; i < count; i++) {
         const FileOp *o = &ops[i];
-        Logf("files", "%s %.*s%s%.*s", names[o->kind % 6], STR_ARG(o->path), o->name.count ? " <- " : "", STR_ARG(o->name));
+        Logf("files", "%s %.*s%s%.*s", names[o->kind % 8], STR_ARG(o->path), o->name.count ? " <- " : "", STR_ARG(o->name));
         WString path = Utf8ToUtf16(&p->scratch, o->path);
-        if (o->kind == FileOp_Rename) {
+        if (o->kind == FileOp_Properties) {
+            // Windows' own Properties (headless runs show nothing)
+            if (!p->headless) SHObjectProperties(p->hwnd, SHOP_FILEPATH, (PCWSTR)path.data, NULL);
+        } else if (o->kind == FileOp_Restore) {
+            // each path back from the Recycle Bin (headless runs delete for good: nothing there of theirs)
+            String rest = o->name;
+            while (rest.count && !p->headless) {
+                s64 nl = 0;
+                while (nl < rest.count && rest.data[nl] != '\n') nl++;
+                String one = { rest.data, nl };
+                if (!RestoreFromRecycleBin(&p->scratch, one)) Logf("files", "not in the Recycle Bin: %.*s", STR_ARG(one));
+                rest.data += Min(nl + 1, rest.count);
+                rest.count -= Min(nl + 1, rest.count);
+            }
+        } else if (o->kind == FileOp_Rename) {
             s64 cut = o->path.count;
             while (cut > 0 && o->path.data[cut - 1] != '\\') cut--;
             String to = Str_PushFormat(&p->scratch, "%.*s%.*s", (int)cut, (const char *)o->path.data, STR_ARG(o->name));
@@ -913,6 +1008,59 @@ static LRESULT SendDrag(Platform *p, HWND to, u32 kind, POINT pt, u32 tab, Strin
 
 // The background image behind the terminals: any image Windows reads, scaled down to fit 4K, on the GPU. An empty path
 // (or one that won't load) takes it away. 1 when it loaded.
+// The editor Enter on a text file runs in its tab: settings.txt `editor` (`off`: the file's own program), else the first
+// terminal editor found: on PATH, or with Git for Windows (its usr\bin, which the tabs' PATH has). At start and after a reset.
+static String FindEditor(Platform *p, b32 headless)
+{
+    String editor = headless ? (String){0} : Term_ReadSetting(&p->arena, "editor");
+    if (Str_EqualNoCase(editor, S("off"))) editor = (String){0};
+    else if (!editor.count) {
+        WCHAR git[MAX_PATH] = {0}, git_bin[MAX_PATH] = {0};
+        if (SearchPathW(NULL, L"git.exe", NULL, MAX_PATH, git, NULL)) {
+            // ...\Git\cmd\git.exe -> ...\Git\usr\bin
+            WCHAR *slash = wcsrchr(git, L'\\');
+            if (slash) *slash = 0;
+            slash = wcsrchr(git, L'\\');
+            if (slash) { *slash = 0; swprintf_s(git_bin, MAX_PATH, L"%s\\usr\\bin", git); }
+        }
+        static const WCHAR *const editors[] = { L"nvim", L"vim", L"hx", L"micro", L"nano", L"edit", L"emacs" };
+        for (s32 i = 0; i < (s32)ArrayCount(editors) && !editor.count; i++) {
+            WCHAR found[MAX_PATH] = {0};
+            b32 on_path = SearchPathW(NULL, editors[i], L".exe", MAX_PATH, found, NULL) != 0;
+            b32 with_git = !on_path && git_bin[0] && SearchPathW(git_bin, editors[i], L".exe", MAX_PATH, found, NULL) != 0;
+            if (on_path || with_git) editor = Utf16ToUtf8(&p->arena, (WString){ (u16 *)editors[i], (s64)wcslen(editors[i]) });
+        }
+        if (Str_Equal(editor, S("emacs"))) editor = S("emacs -nw");
+    }
+    Logf("window", "text editor: %.*s", editor.count ? (int)editor.count : 4, editor.count ? (const char *)editor.data : "none");
+    return editor;
+}
+
+// The summon key, for the main window (p->summons): settings `summon` (e.g. win+`, ctrl+alt+t; off = none), Win+` when
+// unset. At start and after a reset (the old one goes first).
+static void RegisterSummon(Platform *p, HWND hwnd)
+{
+    UnregisterHotKey(hwnd, 1);
+    if (!p->summons) return;
+    String key = Term_ReadSetting(&p->arena, "summon");
+    if (!key.count) key = S("win+`");
+    UINT mods = MOD_NOREPEAT, vk = 0;
+    while (key.count) {
+        s64 plus = 0;
+        while (plus < key.count && (key.data[plus] != '+' || plus == 0)) plus++;
+        String part = { key.data, plus };
+        if (Str_EqualNoCase(part, S("win"))) mods |= MOD_WIN;
+        else if (Str_EqualNoCase(part, S("ctrl"))) mods |= MOD_CONTROL;
+        else if (Str_EqualNoCase(part, S("alt"))) mods |= MOD_ALT;
+        else if (Str_EqualNoCase(part, S("shift"))) mods |= MOD_SHIFT;
+        else if (part.count == 1) vk = part.data[0] == '`' ? VK_OEM_3 : (UINT)VkKeyScanA((char)part.data[0]) & 0xFF;
+        else if ((part.data[0] == 'f' || part.data[0] == 'F') && part.count <= 3) vk = VK_F1 + (UINT)atoi((const char *)Str_PushCopy(&p->scratch, (String){ part.data + 1, part.count - 1 }).data) - 1;
+        key.data += Min(plus + 1, key.count);
+        key.count -= Min(plus + 1, key.count);
+    }
+    if (vk && !RegisterHotKey(hwnd, 1, mods, vk)) Logf("window", "the summon key is taken by another program (%lu)", GetLastError());
+}
+
 // settings.txt's part of AppInit (strings in p->arena): at start, and again after a reset (AppOutput.reset_settings).
 // Headless runs take the defaults, never the user's settings: the same script draws the same frames.
 static void ReadSettings(Platform *p, AppInit *init, b32 headless)
@@ -1074,6 +1222,11 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     fi->image_count = ready;
     fi->images = p->image_list;
     fi->editor = p->editor;
+    fi->preview_path = (String){ p->preview_path, p->preview_path_len };
+    fi->preview_text = (String){ p->preview_buf, p->preview_len };
+    fi->preview_size = p->preview_size;
+    fi->preview_stamp = p->preview_stamp;
+    fi->preview_binary = p->preview_binary;
     fi->sessions_meta_text = p->sessions_meta_text;
     p->sessions_meta_text = (String){0};   // once
     fi->pasted_image = Str_PushCopy(&p->scratch, (String){ p->pasted_image, p->pasted_image_len });
@@ -1311,6 +1464,30 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         if (!p->headless) ShellExecuteW(p->hwnd, L"open", (LPCWSTR)Utf8ToUtf16(&p->scratch, out.open_file).data, NULL, NULL, SW_SHOWNORMAL);
     }
     if (out.file_op_count) RunFileOps(p, out.file_ops, out.file_op_count);
+    if (out.preview_want.count && out.preview_want.count < (s64)sizeof(p->preview_path) &&
+        (out.preview_stamp != p->preview_stamp || !Str_Equal(out.preview_want, (String){ p->preview_path, p->preview_path_len }))) {
+        // --- a browser preview's file: its first 256 KB (a local read, at once; the browser never asks for an online-only
+        //     file's), binary when its first 8 KB have a 0 byte ---
+        memcpy(p->preview_path, out.preview_want.data, (size_t)out.preview_want.count);
+        p->preview_path_len = (s32)out.preview_want.count;
+        p->preview_stamp = out.preview_stamp;
+        p->preview_len = p->preview_size = 0;
+        p->preview_binary = 0;
+        if (!p->preview_buf) p->preview_buf = (u8 *)malloc(256 * 1024);
+        HANDLE h = CreateFileW((LPCWSTR)Utf8ToUtf16(&p->scratch, out.preview_want).data, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+        if (h != INVALID_HANDLE_VALUE && p->preview_buf) {
+            LARGE_INTEGER size = {0};
+            GetFileSizeEx(h, &size);
+            DWORD got = 0;
+            ReadFile(h, p->preview_buf, 256 * 1024, &got, NULL);
+            p->preview_len = got;
+            p->preview_size = size.QuadPart;
+            p->preview_binary = memchr(p->preview_buf, 0, Min((size_t)got, (size_t)8192)) != NULL;
+        }
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        p->wake_frame = p->frame;
+    }
     p->drop_effect = out.drop_effect;
     p->dropped_count = 0;
     if (out.drag_file_count) {
@@ -1319,7 +1496,7 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     }
     if (out.clipboard_file_count) {
         Logf(p->headless ? "headless" : "app", "clipboard files: %.*s%s", STR_ARG(out.clipboard_files[0]), out.clipboard_file_count > 1 ? " ..." : "");
-        if (!p->headless) SetClipboardFiles(p->hwnd, out.clipboard_files, out.clipboard_file_count, &p->scratch);
+        if (!p->headless) SetClipboardFiles(p->hwnd, out.clipboard_files, out.clipboard_file_count, out.clipboard_files_cut, &p->scratch);
     }
     if (out.session_text.count && p->session_path.count) Term_WriteFileAtomic((const wchar_t *)p->session_path.data, out.session_text);
     if (out.add_account.count) AddAccount(p, out.add_account);
@@ -1450,6 +1627,8 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         p->reset_settings = (AppInit){0};
         ReadSettings(p, &p->reset_settings, p->headless);
         p->reset_ready = 1;
+        p->editor = FindEditor(p, p->headless);   // the summon key and the editor as settings.txt says now
+        RegisterSummon(p, p->hwnd);
         LoadBackground(p, p->headless ? (String){0} : Term_ReadSetting(&p->arena, "background_image"));
         p->wake_frame = p->frame;
     }
@@ -2658,32 +2837,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
     }
     if (p->session_path.count) init.session_text = Term_ReadFile(&p->arena, (const wchar_t *)p->session_path.data);
 
-    // --- the editor Enter on a text file runs in its tab: settings.txt `editor` (`off`: the file's own program),
-    //     else the first terminal editor found: on PATH, or with Git for Windows (its usr\bin, which the tabs' PATH has) ---
-    {
-        String editor = headless ? (String){0} : Term_ReadSetting(&p->arena, "editor");
-        if (Str_EqualNoCase(editor, S("off"))) editor = (String){0};
-        else if (!editor.count) {
-            WCHAR git[MAX_PATH] = {0}, git_bin[MAX_PATH] = {0};
-            if (SearchPathW(NULL, L"git.exe", NULL, MAX_PATH, git, NULL)) {
-                // ...\Git\cmd\git.exe -> ...\Git\usr\bin
-                WCHAR *slash = wcsrchr(git, L'\\');
-                if (slash) *slash = 0;
-                slash = wcsrchr(git, L'\\');
-                if (slash) { *slash = 0; swprintf_s(git_bin, MAX_PATH, L"%s\\usr\\bin", git); }
-            }
-            static const WCHAR *const editors[] = { L"nvim", L"vim", L"hx", L"micro", L"nano", L"edit", L"emacs" };
-            for (s32 i = 0; i < (s32)ArrayCount(editors) && !editor.count; i++) {
-                WCHAR found[MAX_PATH] = {0};
-                b32 on_path = SearchPathW(NULL, editors[i], L".exe", MAX_PATH, found, NULL) != 0;
-                b32 with_git = !on_path && git_bin[0] && SearchPathW(git_bin, editors[i], L".exe", MAX_PATH, found, NULL) != 0;
-                if (on_path || with_git) editor = Utf16ToUtf8(&p->arena, (WString){ (u16 *)editors[i], (s64)wcslen(editors[i]) });
-            }
-            if (Str_Equal(editor, S("emacs"))) editor = S("emacs -nw");
-        }
-        p->editor = editor;
-        Logf("window", "text editor: %.*s", editor.count ? (int)editor.count : 4, editor.count ? (const char *)editor.data : "none");
-    }
+    p->editor = FindEditor(p, headless);
 
     // --- the go-to box: the environment (%NAME%), the known folders (Places), recents and bookmarks (paths.txt;
     //     headless and --test runs start with none and save nothing) ---
@@ -2763,26 +2917,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance, PWSTR cmd_line,
         WCHAR id[160] = {0};
         swprintf_s(id, 160, L"%s|%s", p->instance, window_name ? window_name : L"");
         p->id_atom = GlobalAddAtomW(id);
-        // --- the summon key, for the main window: settings `summon` (e.g. win+`, ctrl+alt+t; off = none), Win+` when unset ---
-        if (!window_name && !test) {
-            String key = Term_ReadSetting(&p->arena, "summon");
-            if (!key.count) key = S("win+`");
-            UINT mods = MOD_NOREPEAT, vk = 0;
-            while (key.count) {
-                s64 plus = 0;
-                while (plus < key.count && (key.data[plus] != '+' || plus == 0)) plus++;
-                String part = { key.data, plus };
-                if (Str_EqualNoCase(part, S("win"))) mods |= MOD_WIN;
-                else if (Str_EqualNoCase(part, S("ctrl"))) mods |= MOD_CONTROL;
-                else if (Str_EqualNoCase(part, S("alt"))) mods |= MOD_ALT;
-                else if (Str_EqualNoCase(part, S("shift"))) mods |= MOD_SHIFT;
-                else if (part.count == 1) vk = part.data[0] == '`' ? VK_OEM_3 : (UINT)VkKeyScanA((char)part.data[0]) & 0xFF;
-                else if ((part.data[0] == 'f' || part.data[0] == 'F') && part.count <= 3) vk = VK_F1 + (UINT)atoi((const char *)Str_PushCopy(&p->scratch, (String){ part.data + 1, part.count - 1 }).data) - 1;
-                key.data += Min(plus + 1, key.count);
-                key.count -= Min(plus + 1, key.count);
-            }
-            if (vk && !RegisterHotKey(hwnd, 1, mods, vk)) Logf("window", "the summon key is taken by another program (%lu)", GetLastError());
-        }
+        p->summons = !window_name && !test;
+        RegisterSummon(p, hwnd);
         SetPropW(hwnd, L"moss.id", (HANDLE)(uintptr_t)p->id_atom);
         SetTimer(hwnd, Keep_Timer, 20000, NULL);
         p->dpi = GetDpiForWindow(hwnd);
