@@ -4633,7 +4633,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 if (ts.pressed && ts.button == Mouse_Left && ts.clicks >= 2 && !app->rename_tab) RunCommand(app, &f, Cmd_RenameTab);
                 if (ts.held && ts.button == Mouse_Left && !app->tab_drag_id) {
                     if (!ui->dragging && abs(ui->press_x - mouse_x) > R(1)) ui->dragging = 1;
-                    if (abs(mouse_y - ui->press_y) > caption_h) { ui->dragging = 1; app->tab_drag_id = o->id; }
+                    if (abs(mouse_y - ui->press_y) > R(0.8)) { ui->dragging = 1; app->tab_drag_id = o->id; }   // lifts quickly; a short sideways slide still reorders
                     if (ui->dragging && !app->tab_drag_id) {
                         // reorder: o goes where the mouse is among the others (their places last frame)
                         reordering = 1;
@@ -4733,6 +4733,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             }
             const TermGrid *ag = FindGrid(in, account_tab->id);
             if (ag && ag->cols > 0) {
+                // --- the tab being moved sideways: an accent edge along its top, from the first pixel of the reorder ---
+                if (ts.held && ts.button == Mouse_Left && ui->dragging && !app->tab_drag_id)
+                    Draw_Rect(dl, R4(tr.x0 + R(0.5), tr.y0, tr.x1 - R(0.5), tr.y0 + Max(2, R(0.2))), c->accent, 1);
                 static const char *const modes[][2] = { { "plan mode on", "plan" }, { "accept edits on", "accept edits" }, { "auto mode on", "auto" },
                                                          { "bypass permissions on", "bypass permissions" } };
                 String mode = S("default");
