@@ -97,15 +97,19 @@ s32 Draw_TextMarked(DrawList *dl, Font *font, s32 x, s32 y, u32 color, String te
     s32 baseline = y + (s32)(font->ascent + 0.5f);
     Rect clip = dl->clips[dl->clip_depth];
     s64 index = 0, mark = 0;
-    for (s64 at = 0; at < text.count; index++) {
-        u32 cp = Utf8_Decode(text, &at);
-        if (cp == '\t') cp = ' ';
-        Glyph *g = Font_Glyph(font, cp);
-        if (!g) continue;
-        while (mark < mark_count && marks[mark] < (u32)index) mark++;
-        u32 c = mark < mark_count && marks[mark] == (u32)index ? mark_color : color;
-        if (g->w && pen < (f32)clip.x1) {
-            f32 gx = (f32)(s32)(pen + 0.5f) + (f32)g->left, gy = (f32)(baseline - g->top);
+    FontShaped shaped[1024];
+    s32 n = font->embolden > 0 && text.count < 1024 ? Font_Shape(font, text, shaped, 1024) : -1;
+    for (s32 k = 0; k < n; k++) {
+        // --- a fine font, shaped (kerning, ligatures): each glyph at the pen's quarter pixel ---
+        const FontShaped *s = &shaped[k];
+        while (mark < mark_count && marks[mark] < (u32)s->index) mark++;
+        u32 c = mark < mark_count && marks[mark] == (u32)s->index ? mark_color : color;
+        f32 gpen = pen + s->dx;
+        s32 px = (s32)floorf(gpen), phase = (s32)((gpen - (f32)px) * 4.0f + 0.5f);
+        if (phase == 4) { px++; phase = 0; }
+        Glyph *g = Font_Glyph(font, s->key | ((u32)phase << 24));
+        if (g && g->w && gpen < (f32)clip.x1) {
+            f32 gx = (f32)px + (f32)g->left, gy = (f32)(baseline - (s32)floorf(s->dy + 0.5f) - g->top);
             if (!Clipped(dl, gx, gy, gx + g->w, gy + g->h)) {
                 Quad *q = NextQuad(dl, 0);
                 q->rect[0] = gx; q->rect[1] = gy; q->rect[2] = gx + g->w; q->rect[3] = gy + g->h;
@@ -117,7 +121,39 @@ s32 Draw_TextMarked(DrawList *dl, Font *font, s32 x, s32 y, u32 color, String te
                 HashQuad(dl, q);
             }
         }
-        pen += g->advance;
+        pen += s->advance;
+    }
+    if (n >= 0) return (s32)(pen + 0.5f);
+    for (s64 at = 0; at < text.count; index++) {
+        u32 cp = Utf8_Decode(text, &at);
+        if (cp == '\t') cp = ' ';
+        Glyph *g = Font_Glyph(font, cp);
+        if (!g) continue;
+        while (mark < mark_count && marks[mark] < (u32)index) mark++;
+        u32 c = mark < mark_count && marks[mark] == (u32)index ? mark_color : color;
+        f32 advance = g->advance;
+        s32 px = (s32)(pen + 0.5f);
+        if (font->embolden > 0 && g->w) {
+            // a fine font: the glyph drawn for the pen's quarter pixel (the table may grow: g again)
+            px = (s32)floorf(pen);
+            s32 phase = (s32)((pen - (f32)px) * 4.0f + 0.5f);
+            if (phase == 4) { px++; phase = 0; }
+            if (phase) g = Font_Glyph(font, cp | ((u32)phase << 24));
+        }
+        if (g->w && pen < (f32)clip.x1) {
+            f32 gx = (f32)px + (f32)g->left, gy = (f32)(baseline - g->top);
+            if (!Clipped(dl, gx, gy, gx + g->w, gy + g->h)) {
+                Quad *q = NextQuad(dl, 0);
+                q->rect[0] = gx; q->rect[1] = gy; q->rect[2] = gx + g->w; q->rect[3] = gy + g->h;
+                f32 iw = 1.0f / (f32)font->atlas->w, ih = 1.0f / (f32)font->atlas->h;
+                q->uv[0] = (f32)g->x * iw; q->uv[1] = (f32)g->y * ih;
+                q->uv[2] = (f32)(g->x + g->w) * iw; q->uv[3] = (f32)(g->y + g->h) * ih;
+                q->color = Faded(dl, c);
+                q->kind = Quad_Glyph;
+                HashQuad(dl, q);
+            }
+        }
+        pen += advance;
     }
     return (s32)(pen + 0.5f);
 }
@@ -157,6 +193,12 @@ void Draw_External(DrawList *dl, Rect r, const void *data, u64 hash)
 s32 Font_Measure(Font *font, String text)
 {
     f32 w = 0;
+    FontShaped shaped[512];
+    s32 n = font->embolden > 0 && text.count < 512 ? Font_Shape(font, text, shaped, 512) : -1;
+    if (n >= 0) {
+        for (s32 k = 0; k < n; k++) w += shaped[k].advance;
+        return (s32)(w + 0.999f);
+    }
     for (s64 at = 0; at < text.count;) {
         u32 cp = Utf8_Decode(text, &at);
         Glyph *g = Font_Glyph(font, cp == '\t' ? ' ' : cp);
@@ -168,6 +210,16 @@ s32 Font_Measure(Font *font, String text)
 s64 Font_Fit(Font *font, String text, s32 max_w)
 {
     f32 w = 0;
+    FontShaped shaped[512];
+    s32 n = font->embolden > 0 && text.count < 512 ? Font_Shape(font, text, shaped, 512) : -1;
+    if (n >= 0) {
+        // shaped: what fits ends where a cluster starts (a ligature isn't cut)
+        for (s32 k = 0; k < n; k++) {
+            w += shaped[k].advance;
+            if (w > (f32)max_w) return shaped[k].byte;
+        }
+        return text.count;
+    }
     for (s64 at = 0; at < text.count;) {
         s64 start = at;
         u32 cp = Utf8_Decode(text, &at);

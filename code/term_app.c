@@ -137,7 +137,7 @@ static const SettingDef g_Settings[Setting_Count] = {
     [Setting_SidebarHide]   = { "Agents", "Sessions left out of the sidebar", "in these folders (; between), unless a shell is in one", SettingKind_Text },
     [Setting_ClaudeChat]    = { "Agents", "Claude tabs in chat mode", "the conversation to read and a prompt; Ctrl+Shift+R flips a tab", SettingKind_Bool },
     [Setting_GoodProgrammer] = { "Agents", "Be a good programmer", "your principles (good-programmer.md) in every Claude Code session", SettingKind_Bool },
-    [Setting_ReaderTheme]   = { "Chat mode", "Colors", "Paper, Evening, or the window's", SettingKind_Choice },
+    [Setting_ReaderTheme]   = { "Chat mode", "Colors", "the window's (see-through as it is), or a page: Paper, Evening, Lichen, Moss", SettingKind_Choice },
     [Setting_ReaderSize]    = { "Chat mode", "Text size", "Ctrl+= / Ctrl+- in chat mode", SettingKind_Choice },
     [Setting_HiddenFiles]   = { "Files", "Show hidden files", "Ctrl+H", SettingKind_Bool },
     [Setting_FolderSizes]   = { "Files", "Folder sizes", "local SSDs, measured in the background", SettingKind_Bool },
@@ -159,6 +159,11 @@ static const char *const g_Models[][2] = {
 // --- terminal themes: the terminal's colors; the chrome is made from them ----------------------------------------
 // The first is the default when settings.txt names none: Moss, term's own (the official theme).
 static const TermTheme g_TermThemes[] = {
+    // Slate, the default: plain on purpose (white on a dark slate, a blue accent; KDE Konsole's Breeze colors), so the
+    // user's own scheme is the one that makes moss theirs
+    { "Slate", 0, 0xFCFCFC, 0x232627, 0x2A4B63, 0x3DAEE9,
+      { 0x31363B, 0xED1515, 0x11D116, 0xF67400, 0x1D99F3, 0x9B59B6, 0x1ABC9C, 0xFCFCFC,
+        0x7F8C8D, 0xC0392B, 0x1CDC9A, 0xFDBC4B, 0x3DAEE9, 0x8E44AD, 0x16A085, 0xFFFFFF } },
     { "Moss", 0, 0xD3DDD3, 0x141A16, 0x2F4235, 0xA3D977,
       { 0x202822, 0xE8736C, 0xA3D977, 0xE6C46A, 0x7FA8D6, 0xC296C9, 0x72C7B0, 0xBAC6BB,
         0x56635A, 0xF59088, 0xBDEB97, 0xF2D68C, 0x9DC0EA, 0xD6B0DC, 0x92DCC6, 0xEEF3EE } },
@@ -292,7 +297,10 @@ typedef struct HistMatch { s32 line, start, len; } HistMatch;
 // One per claude tab shown lately; the one unused longest goes for a new one.
 // The conversation's colors (settings `reader_theme`): Paper (warm white, ink, an oxblood accent: a magazine's page),
 // Evening (the same at night), or the window's theme.
-enum { ReaderTheme_Paper = 0, ReaderTheme_Evening, ReaderTheme_Window };
+enum { ReaderTheme_Window = 0, ReaderTheme_Paper, ReaderTheme_Evening, ReaderTheme_Lichen, ReaderTheme_Moss };   // the window's: the default
+// the order the setting steps through them
+static const u8 g_ReaderThemeOrder[5] = { ReaderTheme_Window, ReaderTheme_Paper, ReaderTheme_Evening, ReaderTheme_Lichen, ReaderTheme_Moss };
+static const char *const g_ReaderThemeNames[5][2] = { { "The window's", "window" }, { "Paper", "paper" }, { "Evening", "evening" }, { "Lichen", "lichen" }, { "Moss", "moss" } };
 
 typedef struct ChatMsg { TermHistoryEntry e; u64 pos; u64 arrived_us; } ChatMsg;   // pos: where its text begins in
                                                                                     // msg_arena; arrived: new (fades in)
@@ -343,6 +351,7 @@ typedef struct Chat {
     s32 sel_line[2], sel_byte[2];   // the text selected with the mouse: from where it was pressed [0] to [1]
     b32 sel_on, selecting;
     s32 copied_msg;           // the reply copied last (1-based message), when: "Copied" for a moment
+    s32 agents_running;       // subagents still at work (asked for often meanwhile; shown over the prompt)
 } Chat;
 
 // A question claude asks on its screen (a permission, a choice, a menu: numbered choices, one marked "❯"), read as a
@@ -1031,7 +1040,7 @@ static void ApplySettings(App *app, const AppInit *init)
     app->copy_on_select_off = init->copy_on_select_off;
     app->dim_unfocused_off = init->dim_unfocused_off;
     app->chat_off = init->claude_chat_off;
-    app->reader_pt = init->reader_pt > 0 ? Clamp(init->reader_pt, 8, 28) : 12;
+    app->reader_pt = init->reader_pt > 0 ? Clamp(init->reader_pt, 8, 28) : 10;
     app->reader_theme = init->reader_theme;
     app->keep_active_off = init->keep_active_off;
     app->paste_warning_off = init->paste_warning_off;
@@ -1079,7 +1088,7 @@ static void ApplySettings(App *app, const AppInit *init)
         app->bind_key[cmd] = key;
         app->bind_mods[cmd] = key ? mods : 0;
     }
-    app->term_theme = 0;   // Moss unless settings.txt names another
+    app->term_theme = 0;   // Slate unless settings.txt names another
     for (s32 i = 0; i < TermTheme_Count; i++) {
         if (init->settings_theme.count && Str_EqualNoCase(init->settings_theme, Str_FromCStr(g_TermThemes[i].name))) app->term_theme = i;
     }
@@ -2430,7 +2439,7 @@ static void RunCommand(App *app, Frame *f, u32 cmd)
     case Cmd_ZoomIn: case Cmd_ZoomOut: case Cmd_ZoomReset:
         if (t && ChatShows(app, f->in, t)) {
             // a conversation's text instead of the terminals'
-            app->reader_pt = cmd == Cmd_ZoomReset ? 12 : Clamp(app->reader_pt + (cmd == Cmd_ZoomIn ? 1 : -1), 8, 28);
+            app->reader_pt = cmd == Cmd_ZoomReset ? 10 : Clamp(app->reader_pt + (cmd == Cmd_ZoomIn ? 1 : -1), 8, 28);
             SetSetting(f->out, S("reader_size"), Str_PushFormat(f->fa, "%g", (double)app->reader_pt));
             break;
         }
@@ -3263,6 +3272,12 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         }
         cv->version = r->version;
         cv->stable = r->stable;
+        // subagents still at work (their tool's entry carries their steps after a \x1e), among the last 64 messages
+        cv->agents_running = 0;
+        for (s64 k = Max((s64)0, cv->msgs.count - 64); k < cv->msgs.count; k++) {
+            const TermHistoryEntry *e = &cv->msgs.data[k].e;
+            cv->agents_running += e->kind == 2 && memchr(e->text.data, 0x1E, (size_t)e->text.count) != NULL;
+        }
         cv->changed_us = now;
     }
     // --- a conversation for each claude tab shown as one (or searched), the one unused longest given up for a new one;
@@ -3298,7 +3313,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         // transcript a moment after claude's screen says it's done); else every 5 s, for anything missed
         if (cv->busy && !busy) cv->ended_us = now;
         if (cv->busy != busy && cv->pending_len) ChatRebuild(cv, cv->msgs.count);   // "queued" comes and goes
-        b32 polling = busy || cv->pending_len || now < cv->sent_us + 4000000 || now < cv->changed_us + 4000000 || now < cv->ended_us + 4000000;
+        b32 polling = busy || cv->agents_running || cv->pending_len || now < cv->sent_us + 4000000 || now < cv->changed_us + 4000000 || now < cv->ended_us + 4000000;
         u64 every = polling ? 400000 : 5000000;
         if ((!cv->asked_us || now >= cv->asked_us + every) && out->history_ask_count < (s32)ArrayCount(out->history_asks)) {
             out->history_asks[out->history_ask_count++] = (TermHistoryAsk){ vt->term_id, cv->stable, cv->version };
@@ -4432,7 +4447,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Rect row = strip;
             row.y0 += pad_t;   // tabs and buttons the strip's full height (below the window's resize border)
             CutLeft(&row, R(0.5));
-            if (n == top_right) CutRight(&row, R(3.4) * 3 + (app->keep_active_off ? 0 : R(2.4)));
+            if (n == top_right) CutRight(&row, (in->fullscreen ? 0 : R(3.4) * 3) + (app->keep_active_off ? 0 : R(2.4)));
             s32 button_w = RectH(row) - line_w;
             // --- right: the zoom's way back and the files / shell button ---
             if (t) {
@@ -4573,7 +4588,31 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     Draw_Icon(dl, icons_small, close, text_color, Icon_Cancel);
                 }
                 if (cs.clicked) close_later = o;
-                if (ts.hovered && st && st->cwd.count) Ui_Tooltip(ui, tid, st->cwd);
+                if (ts.hovered) {
+                    // --- its tooltip: its whole name (and the program's, when the user renamed it), where it is, what
+                    //     runs there and how it's doing ---
+                    TextBuilder tip = { fa, NULL, 0, 0 };
+                    TB_Append(&tip, label);
+                    if (o->title_len && st && st->name.count && !Str_Equal(st->name, label)) TB_Format(&tip, "\n%.*s", STR_ARG(st->name));
+                    if (o->web && o->web_url_len) TB_Format(&tip, "\n%.*s", o->web_url_len, (const char *)o->web_url);
+                    else if (st && st->cwd.count) TB_Format(&tip, "\n%.*s", STR_ARG(st->cwd));
+                    if (st && st->agent.count) {
+                        String model = AccountPart(st->account, 3);
+                        s32 ai = st->account.count ? AccountIndex(app, st->config_dir) : -1;
+                        TB_Format(&tip, "\n%.*s", STR_ARG(st->agent));
+                        if (model.count) TB_Format(&tip, "  \xC2\xB7  %.*s", STR_ARG(model));
+                        if (ai >= 0 && app->account_count > 1) TB_Format(&tip, "  \xC2\xB7  %.*s", STR_ARG(app->accounts[ai].name));
+                    }
+                    String state = st && (st->flags & TermTab_AccountHeld) ? S("Held: its account changed") : needs ? S("Waiting for you") :
+                                   busy ? S("Working") : o->done_unseen ? S("Finished while you were away") :
+                                   st && (st->flags & TermTab_Running) ? S("Running a program") : st && (st->flags & TermTab_Exited) ? S("Exited") : (String){0};
+                    if (state.count) TB_Format(&tip, "\n%.*s", STR_ARG(state));
+                    Chat *tcv = ChatFor(app, o->term_id);
+                    if (tcv && tcv->agents_running) TB_Format(&tip, "\n%d agent%s at work in the background", tcv->agents_running, tcv->agents_running == 1 ? "" : "s");
+                    if (st && st->notice.count) TB_Format(&tip, "\n%.*s", STR_ARG(st->notice));
+                    if (st && st->cpu >= 1.0f) TB_Format(&tip, "\nCPU %d%%", (s32)(st->cpu + 0.5f));
+                    Ui_Tooltip(ui, tid, TB_String(&tip));
+                }
                 // --- separator between two tabs not shown ---
                 if (!shown && o->next && o->next->hidden && !hovered) {
                     s32 sx = tr.x1 + tab_gap / 2;
@@ -4903,7 +4942,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             Browser *b = t->browser;
             const TermTab *st = FindServerTab(app, t->term_id);
             b32 busy = TabBusy(st);
-            Draw_Rect(dl, content, c->bg, 0);
+            Draw_Rect(dl, content, ColorAlpha(c->bg, app->opacity), 0);   // see-through as its shell is
             UiSignal ps = Ui_Hit(ui, Ui_IdN(Ui_Id("Browser"), n->id), content);
             if (ps.pressed && t != panes->selected) Panes_Select(panes, t);
             Rect body = content;
@@ -5167,6 +5206,18 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 reader_c.line = 0xFF3A3530; reader_c.surface = 0xFF24211E; reader_c.accent = 0xFFC98B7B; reader_c.on_accent = 0xFF1C1A18;
                 reader_c.hover = 0x18FFFFFF; reader_c.selection = 0x50C98B7B;
                 r_plus = 0xFFA3B98E; r_minus = 0xFFDB8E82; r_mark = 0xFF8C7236; r_bubble = 0xFF292623;
+            } else if (app->reader_theme == ReaderTheme_Lichen) {
+                // moss's own by day: a pale lichen page, green-black ink, a deep moss accent
+                reader_c.bg = 0xFFF1F3EC; reader_c.text = 0xFF1B231D; reader_c.dim = 0xFF66716A; reader_c.faint = 0xFFA9B2A8;
+                reader_c.line = 0xFFD5DBD1; reader_c.surface = 0xFFFAFBF7; reader_c.accent = 0xFF4F7A2B; reader_c.on_accent = 0xFFFFFFFF;
+                reader_c.hover = 0x14000000; reader_c.selection = 0x50A3D977;
+                r_plus = 0xFF3F7A2A; r_minus = 0xFFA8433A; r_mark = 0xFFE3D27E; r_bubble = 0xFFE5EAE0;
+            } else if (app->reader_theme == ReaderTheme_Moss) {
+                // moss's own by night: the window's green-black, sage ink, the lime accent
+                reader_c.bg = 0xFF141A16; reader_c.text = 0xFFDCE3DA; reader_c.dim = 0xFF8E9A90; reader_c.faint = 0xFF56635A;
+                reader_c.line = 0xFF2A352D; reader_c.surface = 0xFF1A221C; reader_c.accent = 0xFFA3D977; reader_c.on_accent = 0xFF141A16;
+                reader_c.hover = 0x18FFFFFF; reader_c.selection = 0x50A3D977;
+                r_plus = 0xFFA3D977; r_minus = 0xFFE8736C; r_mark = 0xFF6E6A2E; r_bubble = 0xFF1E2721;
             }
             const Chrome *rc = &reader_c;
             // --- a claude tab's conversation: its transcript as an article over the prompt box, while claude waits at its
@@ -5177,7 +5228,9 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             const TermTab *cst = FindServerTab(app, t->term_id);
             b32 busy = (cst && (cst->flags & TermTab_Busy)) || ClaudeWorking(box_grid, box_row);
             Rect hv = content;
-            Draw_Rect(dl, content, rc->bg, 0);
+            // the window's colors see through as its terminals do (settings `opacity`); the other schemes are pages
+            f32 page_alpha = app->reader_theme == ReaderTheme_Window ? app->opacity : 1.0f;
+            Draw_Rect(dl, content, ColorAlpha(rc->bg, page_alpha), 0);
             Ui_Hit(ui, Ui_IdN(Ui_Id("Chat"), n->id), content);
             if (in->input.button[Mouse_Left].pressed && !modal && RectHas(content, mouse_x, mouse_y) && t != panes->selected) Panes_Select(panes, t);
             if (app->pane_rect_count < App_MaxPanes) {
@@ -5308,7 +5361,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                     if (!out->wake_at_us || next < out->wake_at_us) out->wake_at_us = next;
                 }
             }
-            for (s64 mi2 = cv->msgs.count - 1, shown_rows = 0; chat_shown && busy && mi2 >= 0 && mi2 >= cv->msgs.count - 64 && shown_rows < 3; mi2--) {
+            for (s64 mi2 = cv->msgs.count - 1, shown_rows = 0; chat_shown && (busy || cv->agents_running) && mi2 >= 0 && mi2 >= cv->msgs.count - 64 && shown_rows < 3; mi2--) {
                 // --- what claude runs now: the tool waiting for its result (the last message), and subagents at work (in
                 //     the background: their tool's result came, their steps still do): what, for how long, a subagent's
                 //     last steps under it; the newest lowest ---
@@ -5324,7 +5377,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 }
                 s64 rs = 0;
                 while (rs < fields[3].count && fields[3].data[rs] != 0x1E) rs++;
-                b32 has_steps = rs < fields[3].count, waiting = mi2 == cv->msgs.count - 1 && !rs;
+                b32 has_steps = rs < fields[3].count, waiting = busy && mi2 == cv->msgs.count - 1 && !rs;   // agents show while claude waits too
                 if (has_steps || waiting) {
                     shown_rows++;
                     String steps = has_steps ? (String){ fields[3].data + rs + 1, fields[3].count - rs - 1 } : (String){0};
@@ -6187,7 +6240,6 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             f32 scroll = cv->scroll_shown;
             s32 sl0 = cv->sel_line[0], sb0 = cv->sel_byte[0], sl1 = cv->sel_line[1], sb1 = cv->sel_byte[1];   // the selection, in order
             if (sl1 < sl0 || (sl1 == sl0 && sb1 < sb0)) { s32 tl2 = sl0, tb2 = sb0; sl0 = sl1; sb0 = sb1; sl1 = tl2; sb1 = tb2; }
-            Draw_Rect(dl, hv, rc->bg, 0);
             Draw_PushClip(dl, hv);
             if (!cv->lines.count) {
                 String msg = !cv->version ? S("reading the conversation...") : chat_shown ? S("Claude is ready: write a prompt below") : S("no history yet");
@@ -6498,7 +6550,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 u64 arrived = cv->msgs.data[hl->msg].arrived_us;
                 if (!arrived || now >= arrived + 300000) continue;
                 f32 veil = 1.0f - (f32)(now - arrived) / 300000.0f;
-                Draw_Rect(dl, R4(hv.x0, hv.y0 + R(2) + hl->y0 - (s32)scroll, hv.x1, ly + hl->h + R(1)), ColorAlpha(rc->bg, veil), 0);
+                Draw_Rect(dl, R4(hv.x0, hv.y0 + R(2) + hl->y0 - (s32)scroll, hv.x1, ly + hl->h + R(1)), ColorAlpha(rc->bg, veil * page_alpha), 0);
                 if (!out->wake_at_us || now + 16000 < out->wake_at_us) out->wake_at_us = now + 16000;
             }
             // --- while claude writes, a dot breathes under the last line ---
@@ -6938,27 +6990,29 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
         ui->animating = 1;
     }
     if (!app->focus_mode) {
-        s32 bw = R(3.4);
+        s32 bw = in->fullscreen ? 0 : R(3.4);   // fullscreen (F11): no window buttons, only keep active's light
         Rect bar = R4(in->client_w - 3 * bw, 0, in->client_w, caption_h);
         Rect rmin = CutLeft(&bar, bw), rmax = CutLeft(&bar, bw), rclose = bar;
         u32 fg = in->foreground || app->headless ? c->text : c->dim;
-        if (IconButton(app, Ui_Id("Minimize"), rmin, Icon_Minimize, icons_small, fg, c->hover, 0, S("minimize")).clicked) out->window_command = AppWindow_Minimize;
-        if (IconButton(app, Ui_Id("Maximize"), rmax, in->maximized ? Icon_Restore : Icon_Maximize, icons_small, fg, c->hover, 0, S("maximize")).clicked) out->window_command = AppWindow_ToggleMaximize;
-        UiSignal cls = Ui_Hit(ui, Ui_Id("CloseWindow"), rclose);
-        if (cls.hovered || cls.held) Draw_Rect(dl, rclose, cls.held ? ColorMix(c->danger, 0xFF000000u, 0.15f) : c->danger, 0);
-        Draw_Icon(dl, icons_small, rclose, cls.hovered ? 0xFFFFFFFFu : fg, Icon_Close);
-        Named(app, S("close window"), rclose);
-        if (cls.clicked) out->window_command = AppWindow_Close;
-        for (s32 k = 0; k < 3 && caption_rect_count < App_MaxCaptionClientRects; k++) caption_rects[caption_rect_count++] = k == 0 ? rmin : k == 1 ? rmax : rclose;
+        if (!in->fullscreen) {
+            if (IconButton(app, Ui_Id("Minimize"), rmin, Icon_Minimize, icons_small, fg, c->hover, 0, S("minimize")).clicked) out->window_command = AppWindow_Minimize;
+            if (IconButton(app, Ui_Id("Maximize"), rmax, in->maximized ? Icon_Restore : Icon_Maximize, icons_small, fg, c->hover, 0, S("maximize")).clicked) out->window_command = AppWindow_ToggleMaximize;
+            UiSignal cls = Ui_Hit(ui, Ui_Id("CloseWindow"), rclose);
+            if (cls.hovered || cls.held) Draw_Rect(dl, rclose, cls.held ? ColorMix(c->danger, 0xFF000000u, 0.15f) : c->danger, 0);
+            Draw_Icon(dl, icons_small, rclose, cls.hovered ? 0xFFFFFFFFu : fg, Icon_Close);
+            Named(app, S("close window"), rclose);
+            if (cls.clicked) out->window_command = AppWindow_Close;
+            for (s32 k = 0; k < 3 && caption_rect_count < App_MaxCaptionClientRects; k++) caption_rects[caption_rect_count++] = k == 0 ? rmin : k == 1 ? rmax : rclose;
+        }
         if (!app->keep_active_off) {
             // --- keep active's light, left of the window buttons: green while moss keeps the user active (the window in
             //     front: the platform nudges the mouse when Windows' idle time passes 2 minutes), grey while it doesn't ---
             b32 keeping = in->foreground || app->headless;   // headless runs draw as if in front, as the buttons do
             Rect lr = R4(rmin.x0 - R(2.4), 0, rmin.x0, caption_h);
             UiSignal ls = Ui_Hit(ui, Ui_Id("KeepActive"), lr);
-            Rect dot = RectCenter(lr, R(0.8), R(0.8));
-            if (keeping) Draw_RectEx(dl, RectCenter(lr, R(1.6), R(1.6)), 0x405AD26Eu, 0, 0, (f32)R(0.8), NULL, 0, 0, (f32)R(0.5));   // a soft glow
-            Draw_RectEx(dl, dot, keeping ? 0xFF5AD26Eu : c->faint, 0, 0, (f32)R(0.4), NULL, 0, 0, 0);
+            Rect dot = RectCenter(lr, R(0.45), R(0.45));
+            if (keeping) Draw_RectEx(dl, RectCenter(lr, R(0.9), R(0.9)), 0x405AD26Eu, 0, 0, (f32)R(0.45), NULL, 0, 0, (f32)R(0.3));   // a soft glow
+            Draw_RectEx(dl, dot, keeping ? 0xFF5AD26Eu : c->faint, 0, 0, (f32)R(0.225), NULL, 0, 0, 0);
             Ui_Tooltip(ui, Ui_Id("KeepActive"), keeping ? S("Keeping you active: Slack and the like stay green while moss is in front")
                                                      : S("Keeps you active while moss is in front (Slack and the like stay green)"));
             Named(app, S("keep active"), lr);
@@ -7606,7 +7660,7 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
             String value = {0};
             if (k == Setting_Theme) value = Str_FromCStr(g_TermThemes[app->term_theme].name);
             if (k == Setting_Font) value = app->term_font;
-            if (k == Setting_ReaderTheme) value = app->reader_theme == ReaderTheme_Evening ? S("Evening") : app->reader_theme == ReaderTheme_Window ? S("The window's") : S("Paper");
+            if (k == Setting_ReaderTheme) value = Str_FromCStr(g_ReaderThemeNames[app->reader_theme % 5][0]);
             if (k == Setting_ReaderSize) value = Str_PushFormat(fa, "%g pt", (double)app->reader_pt);
             if (k == Setting_Cursor) value = app->cursor == 1 ? S("Bar") : app->cursor == 2 ? S("Underline") : S("Block");
             if (k == Setting_Backdrop) value = app->backdrop == 1 ? S("Acrylic") : app->backdrop == 2 ? S("Mica") : S("The desktop");
@@ -7759,8 +7813,10 @@ void App_Frame(App *app, const AppFrameInput *in, AppOutput *out)
                 app->palette_open = 0;
                 reset_asked = 1;
             } else if (act == Setting_ReaderTheme) {
-                app->reader_theme = (u8)((app->reader_theme + (step < 0 ? 2 : 1)) % 3);
-                key = S("reader_theme"); val = app->reader_theme == ReaderTheme_Evening ? S("evening") : app->reader_theme == ReaderTheme_Window ? S("window") : S("paper");
+                s32 at = 0;
+                while (at < 5 && g_ReaderThemeOrder[at] != app->reader_theme) at++;
+                app->reader_theme = g_ReaderThemeOrder[(at + (step < 0 ? 4 : 1)) % 5];
+                key = S("reader_theme"); val = Str_FromCStr(g_ReaderThemeNames[app->reader_theme][1]);
             } else if (act == Setting_ReaderSize) {
                 app->reader_pt = Clamp(app->reader_pt + (step < 0 ? -1 : 1), 8, 28);
                 key = S("reader_size"); val = Str_PushFormat(fa, "%g", (double)app->reader_pt);

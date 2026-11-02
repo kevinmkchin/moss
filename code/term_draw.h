@@ -33,12 +33,18 @@ typedef struct Font {
     void *native;        // the platform's (DirectWrite)
     FontAtlas *atlas;
     f32 size_px, ascent, descent, line_h;
-    f32 contrast;        // coverage darkened (DirectWrite's enhanced contrast: a' = a(k+1) / (ak+1)); 0 = as drawn
+    f32 embolden;        // > 0: drawn fine (from the outline, unhinted, quarter-pixel pens), every stem this many px
+                         // thicker on each side (the reader's fonts); 0: DirectWrite's usual
     s32 glyph_count, glyph_cap;
     Glyph *glyphs;       // open addressing by codepoint (cap a power of two)
 } Font;
 
 Glyph *Font_Glyph(Font *font, u32 codepoint);   // term_font.cpp
+// A fine font's text shaped (kerning, ligatures): its glyphs in order, each with its Font_Glyph key (a glyph of a face,
+// not a codepoint), where its cluster starts in the text (byte, codepoint index), its advance and offset. The count, or
+// -1 when it doesn't fit in cap (term_font.cpp; results are cached by text).
+typedef struct FontShaped { u32 key; s32 byte, index; f32 advance, dx, dy; } FontShaped;
+s32    Font_Shape(Font *font, String text, FontShaped *out, s32 cap);
 s32    Font_Measure(Font *font, String text);   // width in px
 s64    Font_Fit(Font *font, String text, s32 max_w);   // bytes of text that fit in max_w
 

@@ -55,15 +55,28 @@ void Ui_EndFrame(Ui *ui)
         if (!ui->tip_since_us) ui->tip_since_us = ui->now_us;
         b32 warm = ui->tip_shown_us && ui->now_us - ui->tip_shown_us < 400000;   // moving from one tooltip to the next: no wait
         if (warm || ui->now_us - ui->tip_since_us >= 600000) {
+            // its lines ('\n' between), as wide as the widest
             Font *f = ui->tip_font;
-            s32 pad = (s32)(f->line_h * 0.45f);
-            s32 w = Font_Measure(f, ui->tip_text) + 2 * pad, h = (s32)f->line_h + pad;
+            s32 pad = (s32)(f->line_h * 0.45f), line_h = (s32)(f->line_h + 0.5f), widest = 0, lines = 0;
+            for (s64 at = 0; at <= ui->tip_text.count; lines++) {
+                s64 end = at;
+                while (end < ui->tip_text.count && ui->tip_text.data[end] != '\n') end++;
+                widest = Max(widest, Font_Measure(f, (String){ ui->tip_text.data + at, end - at }));
+                at = end + 1;
+            }
+            s32 w = widest + 2 * pad, h = line_h * lines + pad;
             s32 x = ui->in.mouse[0] + pad, y = ui->in.mouse[1] + (s32)(f->line_h * 1.4f);
             if (x + w > ui->dl->w) x = ui->dl->w - w - 2;
             if (y + h > ui->dl->h) y = ui->in.mouse[1] - h - pad;
             Rect r = R4(x, y, x + w, y + h);
             Draw_RectEx(ui->dl, r, ui->tip_bg, ui->tip_border, 1, (f32)pad * 0.5f, NULL, 0, 0, 0);
-            Draw_Text(ui->dl, f, x + pad, y + pad / 2, ui->tip_fg, ui->tip_text);
+            s32 ly = y + pad / 2;
+            for (s64 at = 0; at <= ui->tip_text.count; ly += line_h) {
+                s64 end = at;
+                while (end < ui->tip_text.count && ui->tip_text.data[end] != '\n') end++;
+                Draw_Text(ui->dl, f, x + pad, ly, ui->tip_fg, (String){ ui->tip_text.data + at, end - at });
+                at = end + 1;
+            }
             ui->tip_shown_us = ui->now_us;
         } else {
             ui->animating = 1;   // a frame when it's due

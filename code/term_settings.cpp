@@ -327,6 +327,27 @@ static void SeedUserSetup()
             FindClose(Find);
         }
     }
+    // --- the prompt as moss shipped it before its folder went from green to blue: the new one (an edited one stays) ---
+    std::string Mine = ReadWholeFile(ClodDir + L"clink\\prompt.lua"), Shipped = ReadWholeFile(Defaults + L"clink\\prompt.lua");
+    if(!Mine.empty() && !Shipped.empty())
+    {
+        auto Plain = [](std::string T, const char* const (*Swaps)[2], s32 Count)
+        {
+            T.erase(std::remove(T.begin(), T.end(), '\r'), T.end());
+            for(s32 K = 0; K < Count; ++K)
+            {
+                for(size_t At = T.find(Swaps[K][0]); At != std::string::npos; At = T.find(Swaps[K][0], At + strlen(Swaps[K][1]))) { T.replace(At, strlen(Swaps[K][0]), Swaps[K][1]); }
+            }
+            return T;
+        };
+        static const char* const Old[][2] = {{"term's file browser", "moss's file browser"}};
+        static const char* const New[][2] = {{"local blue   = \"\\x1b[94m\"", "local green  = \"\\x1b[32m\""}, {"..blue..os.getcwd()", "..green..os.getcwd()"}};
+        if(Plain(Mine, Old, 1) == Plain(Shipped, New, 2))
+        {
+            CopyFileW((Defaults + L"clink\\prompt.lua").c_str(), (ClodDir + L"clink\\prompt.lua").c_str(), FALSE);
+            Logf("settings", "the prompt: the old default's green folder is blue now");
+        }
+    }
 }
 
 // "Reset to moss's defaults": settings.txt becomes the default one moss ships (none: no settings.txt), the old one

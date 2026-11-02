@@ -144,9 +144,10 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   with DirectWrite into one 2048² atlas on first use; a codepoint the font lacks comes from a few system fallbacks
   (Segoe UI Symbol, Emoji, the CJK UI fonts). The busy spinner is ◐◓◑◒ (no rotated glyphs). Tab names drop the
   marks programs put in front (`TabLabel`).
-- Moss (green-black, lime accent) is moss's official theme: first in `g_TermThemes`, so the default, and the
-  one for screenshots, the website and the icon. Graphite, Dusk, Signal, Paper (moss's own) and a few borrowed
-  ones are the other choices.
+- Slate is the default theme (first in `g_TermThemes`): plain on purpose, white on a dark slate with a blue accent
+  (KDE Konsole's Breeze colors), at 88% opacity in the shipped settings.txt, so it reads as a blank to make one's own
+  rather than a look pushed on the user. Moss (green-black, lime accent) stays moss's brand: the icon. Graphite,
+  Dusk, Signal, Paper (moss's own) and a few borrowed ones are the other choices.
 - Chrome colors come from the terminal theme (`ChromeFor`): panes are its background, the title band a shade off
   it, popups a shade towards the text; hover and press are see-through text color.
 
@@ -177,6 +178,9 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   the server's name again): `PaneTab.title`, kept in layout.txt (`Title`), used by the strip, the window title,
   the palette and layout dumps.
 - The palette lists the tabs whose name or folder has the typed text before the commands; Enter goes to the tab.
+- A tab's tooltip: its whole name (the program's too when renamed), its folder (a web tab's address), its agent with the
+  model and account, how it's doing (waiting for you, working, finished unseen, running, exited, held), its notice, its
+  CPU from 1%. Tooltips take lines (`\n` between) in `Ui_EndFrame`.
 
 ## Terminal conveniences
 
@@ -187,6 +191,7 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   pixel and back once there's been no input for 2 minutes (`SendInput`; never in headless or test runs). Its light sits
   left of the window buttons: green while the window is in front (headless runs draw it so), grey otherwise; a click
   opens the settings.
+- Fullscreen (F11): no window buttons (`AppFrameInput.fullscreen`), only keep active's light.
 - Summon key: the main window registers settings `summon` (default Win+\`; `off` = none) with `RegisterHotKey`; it
   brings the window up from anywhere, or minimizes it when it's in front.
 - Key bindings: settings.txt `key.<command> = <keys>` ("ctrl+shift+d", "none"; names as `dump commands` lists
@@ -304,7 +309,8 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   once): the server reads each one's own transcript (`<session>\subagents\agent-<id>.jsonl`, its `.meta.json` names the
   tool's id, `toolUseId`, and says `finished`) on each read while one isn't finished (`SubagentsRunning`: every ask reads
   again) and puts how many tools it used and its last three after a \x1e on its tool's entry (gone once it's
-  finished). While claude works they show over the status line, "Agent <description>", its steps under it. Protocol 20.
+  finished). They show over the prompt, "Agent <description>", its steps under it, whether claude works or already
+  waits (`Chat.agents_running`: asked for every 400 ms meanwhile); the tab's tooltip counts them. Protocol 20.
 - New messages fade in (`ChatMsg.arrived_us`: a veil of the page's color going over 300 ms; not the first read's).
 - A green dot on a tab whose claude turn ended while it wasn't in front (`PaneTab.done_unseen`; the accent's dot is
   "needs you", the server's `TermTab_NeedsInput`).
@@ -340,12 +346,15 @@ Main features, in order. Short phrases, no descriptions, only what's special abo
   12 pt), Libre Caslon Text to read (`Font_Read`, `Font_ReadBold`), Libre Caslon Display headings (`Font_ReadHead`), the
   user's prompts in the same type in a soft rounded bubble, Cascadia Mono code. moss ships the Caslons
   (`vendor\fonts`, SIL OFL, copied to `fonts\` next to moss.exe; Georgia when they're missing): `Font_Create` takes a
-  font file's full path as a family. Caslon's hairlines are thinner than a pixel at reading sizes, so the reader's fonts
-  darken their coverage as DirectWrite's enhanced contrast does (`Font.contrast` 1.5: a' = a(k+1) / (ak+1)). Its text size is its own (settings `reader_size`, "Chat mode > Text size"; Ctrl+= /
+  font file's full path as a family. The reader's fonts (and its code's) are drawn finer than the UI's (`Font.embolden`,
+  `PaintFineGlyph` in term_font.cpp): from the glyph's outline with Direct2D, unhinted, at the pen's quarter pixel (4
+  bitmaps a glyph, the phase in the key's top byte), filled and stroked a little wider so every stem gains the same (0.14
+  pt each side; Caslon's hairlines are thinner than a pixel at reading sizes). Hinting and a coverage curve made stems
+  that landed across two pixels heavier than others. Their text is shaped too (`Font_Shape`: DirectWrite's text analyzer per run of one face, so the font's kerning and ligatures; glyphs keyed by face and glyph id, top bit set; cached by text), and `Font_Measure` / `Font_Fit` measure it the same way. Its text size is its own (settings `reader_size`, 10 pt by default, "Chat mode > Text size"; Ctrl+= /
   Ctrl+- / Ctrl+0 in chat mode, `App.reader_pt` -> `AppOutput.reader_pt`: the platform makes the reader's fonts
   again, and the lines are laid out again once the new fonts are in). Its colors are its own too (settings
-  `reader_theme`, "Chat mode > Colors", `ReaderTheme_*`): Paper (warm white, ink, an oxblood accent; the default), Evening
-  (the same at night) or the window's theme; the pane's account line and strip stay the window's; each line has its own height and place
+  `reader_theme`, "Chat mode > Colors", `ReaderTheme_*`): the window's theme (the default; see-through at the terminals' opacity, as the file browser is too), or a page, never see-through: Paper (warm white, ink, an oxblood accent), Evening
+  (the same at night), Lichen and Moss (moss's own green-black and lime, by day and by night); the pane's account line and strip stay the window's; each line has its own height and place
   (`HistLine.y/h`: gaps before a message, a heading, a block); headers in local time ("Today 14:03"); code blocks in a
   container with a header (the fence's language, the copy button); tables padded, the header row on a shade.
 - Notes (`MSG_HISTORY` kind 3, `HistLine_Note`: small, dim, a hairline at the left): a /command and its output (system

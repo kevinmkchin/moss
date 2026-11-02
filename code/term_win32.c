@@ -225,7 +225,7 @@ static void MakeFonts(Platform *p)
     Font_Create(&p->fonts[Font_IconSmall], &p->atlas, icons, 7 * pt, 400);
     // --- the reader: a magazine's type, moss's own: Libre Caslon (Text to read, its italic, Display for headings;
     //     fonts\ next to moss.exe, SIL Open Font License; Georgia when they're missing), a mono for code; all at the
-    //     reader's size (12 pt: the text) ---
+    //     reader's size (10 pt by default: the text) ---
     WCHAR dir[MAX_PATH] = {0};
     GetModuleFileNameW(NULL, dir, MAX_PATH);
     WCHAR *slash = wcsrchr(dir, L'\\');
@@ -237,14 +237,16 @@ static void MakeFonts(Platform *p)
         s32 n = swprintf_s(lists[k], MAX_PATH, L"%sfonts\\%s", dir, files[k]);
         wmemcpy(lists[k] + n + 1, L"Georgia\0Cambria\0", 17);
     }
-    f32 r = (p->reader_pt > 0 ? p->reader_pt : 12) * pt;
+    f32 r = (p->reader_pt > 0 ? p->reader_pt : 10) * pt;
     Font_Create(&p->fonts[Font_Mono], &p->atlas, L"Cascadia Mono\0Consolas\0", r * 0.82f, 400);
     Font_Create(&p->fonts[Font_Read], &p->atlas, lists[0], r * 1.06f, 400);
     Font_Create(&p->fonts[Font_ReadBold], &p->atlas, lists[1], r * 1.06f, 700);
     Font_Create(&p->fonts[Font_ReadHead], &p->atlas, lists[2], r * 1.55f, 600);
     Font_Create(&p->fonts[Font_ReadItalic], &p->atlas, lists[3], r * 1.06f, 400);
-    // Caslon's hairlines are thinner than a pixel at reading sizes: its coverage darkened, as DirectWrite's own does
-    p->fonts[Font_Read].contrast = p->fonts[Font_ReadBold].contrast = p->fonts[Font_ReadHead].contrast = p->fonts[Font_ReadItalic].contrast = 1.5f;
+    // drawn fine: unhinted at quarter-pixel pens, every stem thickened the same (Caslon's hairlines are thinner than a
+    // pixel at reading sizes)
+    p->fonts[Font_Read].embolden = p->fonts[Font_ReadBold].embolden = p->fonts[Font_ReadHead].embolden = p->fonts[Font_ReadItalic].embolden = 0.14f * pt;
+    p->fonts[Font_Mono].embolden = 0.06f * pt;   // the conversation's code (Cascadia's strokes are sturdier)
     p->fonts_dpi = p->dpi;
     p->fonts_reader_pt = p->reader_pt;
 }
@@ -945,7 +947,8 @@ static void ReadSettings(Platform *p, AppInit *init, b32 headless)
         init->claude_chat_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "claude_chat"), S("off"));
         String reader_size = Term_ReadSetting(&p->arena, "reader_size"), reader_theme = Term_ReadSetting(&p->arena, "reader_theme");
         init->reader_pt = reader_size.count ? (f32)atof((const char *)Str_PushCopy(&p->arena, reader_size).data) : 0;
-        init->reader_theme = Str_EqualNoCase(reader_theme, S("evening")) ? 1 : Str_EqualNoCase(reader_theme, S("window")) ? 2 : 0;
+        init->reader_theme = Str_EqualNoCase(reader_theme, S("paper")) ? 1 : Str_EqualNoCase(reader_theme, S("evening")) ? 2 :
+                             Str_EqualNoCase(reader_theme, S("lichen")) ? 3 : Str_EqualNoCase(reader_theme, S("moss")) ? 4 : 0;
         p->reader_pt = init->reader_pt;
         init->keep_active_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "keep_active"), S("off"));
         init->paste_warning_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "paste_warning"), S("off"));
@@ -1590,6 +1593,7 @@ static void FillWindowInput(Platform *p, AppFrameInput *fi, b32 paint, u64 now, 
     fi->foreground = GetForegroundWindow() == hwnd;
     fi->focused = p->focused || Web_HasFocus(p->web);   // a page's keyboard is still the window's
     fi->maximized = maximized;
+    fi->fullscreen = p->fullscreen;
     fi->now_us = now;
     fi->dt_us = dt;
     WINDOWPLACEMENT wp = {0};

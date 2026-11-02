@@ -1,7 +1,7 @@
 -- clod's prompt: the folder and its git branch (a * when tracked files changed), then the input on its
 -- own line after a lambda, red when the last command failed. Git status runs in the background
 -- (clink.promptcoroutine), so the prompt never waits on git; it fills in when ready.
-local green  = "\x1b[32m"
+local blue   = "\x1b[94m"
 local cyan   = "\x1b[36m"
 local yellow = "\x1b[33m"
 local red    = "\x1b[31m"
@@ -17,7 +17,7 @@ end
 local clod_prompt = clink.promptfilter(150)
 function clod_prompt:filter(prompt)
     -- OSC 9;9 tells the terminal the folder (moss's file browser opens there at once)
-    local out = "\x1b]9;9;"..os.getcwd().."\x1b\\"..green..os.getcwd()..norm
+    local out = "\x1b]9;9;"..os.getcwd().."\x1b\\"..blue..os.getcwd()..norm
     local git_dir = git.getgitdir()
     if git_dir then
         if prev_git_dir ~= git_dir then

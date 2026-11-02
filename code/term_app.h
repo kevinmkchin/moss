@@ -64,8 +64,8 @@ typedef struct AppInit {
     b32 copy_on_select_off;     // settings.txt `copy_on_select = off`
     b32 dim_unfocused_off;      // settings.txt `dim_unfocused = off`: the panes not in focus aren't darkened
     b32 claude_chat_off;        // settings.txt `claude_chat = off`: claude tabs show their terminal, not their conversation
-    f32 reader_pt;              // settings.txt `reader_size` (the conversation's text, pt; 0 = 12)
-    u8 reader_theme;            // settings.txt `reader_theme`: 0 paper, 1 evening, 2 the window's
+    f32 reader_pt;              // settings.txt `reader_size` (the conversation's text, pt; 0 = 10)
+    u8 reader_theme;            // settings.txt `reader_theme`: 0 the window's, 1 paper, 2 evening, 3 lichen, 4 moss
     b32 keep_active_off;        // settings.txt `keep_active = off`: Windows' idle timer runs out while moss is in front
     b32 paste_warning_off;      // settings.txt `paste_warning = off`
     b32 win32_input_off;        // settings.txt `win32_input = off`: keys as plain VT even when ConPTY asks for more
@@ -85,6 +85,7 @@ typedef struct AppFrameInput {
     s32 client_w, client_h;
     u32 dpi;
     b32 resized, foreground, maximized, focused;   // focused: the window has the keyboard
+    b32 fullscreen;             // F11: no window buttons
     u64 now_us;
     u64 dt_us;                  // 0 for the first frame after an idle wait
     s32 window_rect[4];         // restore rect x, y, w, h
