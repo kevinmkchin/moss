@@ -29,7 +29,7 @@
 #include <string.h>
 
 enum { Platform_MaxEvents = 256, Platform_TextBytes = 4096, Platform_CursorCount = 5 };
-enum { Wake_Files = WM_APP + 1 };   // the lister or the watcher has something
+enum { Wake_Files = WM_APP + 1, Wake_Voice = WM_APP + 2 };   // the lister or the watcher has something; a dictation's text is ready
 enum { Test_Command = WM_APP + 3 }; // a test window runs the next of MOSS_TEST_COMMAND's commands (names, ; between)
 enum { Keep_Timer = 77 };          // keep active's check, every 20 s
 
@@ -126,6 +126,8 @@ typedef struct Platform {
     b32 want_clipboard;           // the app asked for the clipboard text
     u8 fake_clipboard[8192];      // headless runs' clipboard
     s32 fake_clipboard_len;
+    u8 fake_dictation[1024];      // headless runs: "voice TEXT" in a script, what the next frame's dictation hears
+    s32 fake_dictation_len;
     u64 frames_drawn, frames_skipped;
     u64 reconnect_at_us;          // the next try while the server is gone
     String cwd;
@@ -1093,6 +1095,7 @@ static void ReadSettings(Platform *p, AppInit *init, b32 headless)
         init->copy_on_select_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "copy_on_select"), S("off"));
         init->dim_unfocused_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "dim_unfocused"), S("off"));
         init->claude_chat_off = Str_EqualNoCase(Term_ReadSetting(&p->arena, "claude_chat"), S("off"));
+        init->read_aloud = Str_EqualNoCase(Term_ReadSetting(&p->arena, "read_aloud"), S("on"));
         String reader_size = Term_ReadSetting(&p->arena, "reader_size"), reader_theme = Term_ReadSetting(&p->arena, "reader_theme");
         init->reader_pt = reader_size.count ? (f32)atof((const char *)Str_PushCopy(&p->arena, reader_size).data) : 0;
         init->reader_theme = Str_EqualNoCase(reader_theme, S("paper")) ? 1 : Str_EqualNoCase(reader_theme, S("evening")) ? 2 :
@@ -1231,6 +1234,13 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
     p->sessions_meta_text = (String){0};   // once
     fi->pasted_image = Str_PushCopy(&p->scratch, (String){ p->pasted_image, p->pasted_image_len });
     p->pasted_image_len = 0;
+    // --- voice mode: the dictation's state, what it heard and an error, once each ---
+    if (p->headless) {
+        fi->voice_text = p->fake_dictation_len ? Str_PushCopy(&p->scratch, (String){ p->fake_dictation, p->fake_dictation_len }) : (String){0};
+        p->fake_dictation_len = 0;
+    } else {
+        fi->voice_state = Voice_Poll(&p->scratch, &fi->voice_text, &fi->voice_message);
+    }
     ReadAccounts(p);
     fi->accounts_text = (String){ p->accounts_text, p->accounts_len };
     fi->accounts_version = p->accounts_version;
@@ -1406,6 +1416,14 @@ static void StepFrame(Platform *p, AppFrameInput *fi, b32 paint, b32 force_rende
         }
     }
     if (out.read_clipboard) { p->want_clipboard = 1; p->wake_frame = p->frame; }
+    // --- voice mode: dictation while the key is held, a reply read aloud (headless runs log them) ---
+    if (out.voice_start) { if (p->headless) Logf("headless", "voice: listening"); else Voice_Start(p->hwnd, Wake_Voice); }
+    if (out.voice_stop) { if (p->headless) Logf("headless", "voice: done"); else Voice_Stop(); }
+    if (out.speak_stop && !p->headless) Voice_SpeakStop();
+    if (out.speak_text.count) {
+        if (p->headless) Logf("headless", "read aloud: %.*s", STR_ARG(out.speak_text));
+        else Voice_Speak(out.speak_text);
+    }
     if (out.save_clipboard_image) {
         // headless runs have no pictures on their clipboard
         String saved = p->headless ? (String){0} : SaveClipboardImage(p);
@@ -1814,6 +1832,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
 
     switch (msg) {
     case Wake_Files:
+    case Wake_Voice:
         p->wake_frame = p->frame;
         return 0;
     case Test_Command: {
@@ -2014,6 +2033,7 @@ static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         p->wake_frame = p->frame;
         u32 vk = (u32)wparam & 0xFF;
         if (vk == VK_RETURN && (lparam & (1 << 24))) vk = VK_SEPARATOR;   // the keypad's Enter
+        if (vk == VK_MENU && (lparam & (1 << 24))) vk = VK_RMENU;         // Right Alt: the extended Alt (voice mode's key)
         u8 key = p->vk_to_key[vk];
         if (key == 1 || key == 2 || key == 4) return 0;   // modifiers travel as flags
         b32 up = ((u32)lparam >> 31) & 1;
@@ -2133,7 +2153,7 @@ static void InitKeyTable(Platform *p)
 {
     u8 *t = p->vk_to_key;
     t[VK_SHIFT] = 1; t[VK_CONTROL] = 2; t[VK_MENU] = 4; t[VK_SPACE] = 5; t[VK_TAB] = 6; t[VK_RETURN] = 7;
-    t[VK_BACK] = 8; t[VK_DELETE] = 9; t[VK_ESCAPE] = 10; t[VK_PRIOR] = 11; t[VK_NEXT] = 12; t[VK_HOME] = 13;
+    t[VK_RMENU] = Key_RAlt; t[VK_BACK] = 8; t[VK_DELETE] = 9; t[VK_ESCAPE] = 10; t[VK_PRIOR] = 11; t[VK_NEXT] = 12; t[VK_HOME] = 13;
     t[VK_END] = 14; t[VK_LEFT] = 15; t[VK_RIGHT] = 16; t[VK_UP] = 17; t[VK_DOWN] = 18; t[VK_OEM_1] = 19;
     t[VK_OEM_PLUS] = 20; t[VK_OEM_MINUS] = 21; t[VK_OEM_PERIOD] = 22; t[VK_OEM_COMMA] = 23; t[VK_OEM_2] = 24;
     t[VK_OEM_5] = 25; t[VK_OEM_3] = 26; t[VK_OEM_7] = 27; t[VK_OEM_4] = 28; t[VK_OEM_6] = 29;
@@ -2145,6 +2165,17 @@ static void InitKeyTable(Platform *p)
 }
 
 // --- headless: a script plays the user ------------------------------------------------------------------
+
+// A script's text (\n for a line break) into buf; its length.
+static s32 ScriptText(u8 *buf, s64 cap, String text)
+{
+    s32 n = 0;
+    for (s64 i = 0; i < text.count && n < (s32)cap; i++) {
+        if (text.data[i] == '\\' && i + 1 < text.count && text.data[i + 1] == 'n') { buf[n++] = '\n'; i++; }
+        else buf[n++] = text.data[i];
+    }
+    return n;
+}
 
 typedef struct Headless {
     Platform *p;
@@ -2253,6 +2284,7 @@ static b32 ParseKey(String k, u8 *key, u8 *mods, u32 *text)
         { "escape", 10, 27 }, { "esc", 10, 27 }, { "pageup", 11, 0 }, { "pgup", 11, 0 }, { "pagedown", 12, 0 }, { "pgdn", 12, 0 },
         { "home", 13, 0 }, { "end", 14, 0 }, { "left", 15, 0 }, { "right", 16, 0 }, { "up", 17, 0 }, { "down", 18, 0 },
         { "=", 20, '=' }, { "-", 21, '-' }, { ",", 23, ',' }, { "/", 24, '/' }, { "insert", 46, 0 },
+        { "ralt", 3, 0 },
     };
     for (s32 i = 0; i < (s32)ArrayCount(named); i++) {
         if (Str_EqualNoCase(k, Str_FromCStr(named[i].name))) { *key = named[i].key; *text = named[i].text; break; }
@@ -2532,12 +2564,11 @@ static int HeadlessMain(Platform *p, String script_text, String script_name)
             HeadlessTick(&h);
         } else if (Str_Equal(cmd, S("clipboard"))) {
             // "clipboard some text" (\n for a line break): what a paste gets
-            s32 n = 0;
-            for (s64 i = 0; i < rest.count && n < (s32)sizeof(p->fake_clipboard); i++) {
-                if (rest.data[i] == '\\' && i + 1 < rest.count && rest.data[i + 1] == 'n') { p->fake_clipboard[n++] = '\n'; i++; }
-                else p->fake_clipboard[n++] = rest.data[i];
-            }
-            p->fake_clipboard_len = n;
+            p->fake_clipboard_len = ScriptText(p->fake_clipboard, sizeof(p->fake_clipboard), rest);
+        } else if (Str_Equal(cmd, S("voice"))) {
+            // "voice some text" (\n for a line break): what the next dictation hears
+            p->fake_dictation_len = ScriptText(p->fake_dictation, sizeof(p->fake_dictation), rest);
+            HeadlessTick(&h);
         } else if (Str_Equal(cmd, S("mods"))) {
             // held for the clicks that follow: "mods ctrl", "mods ctrl+shift", "mods none"
             h.mods_held = 0;

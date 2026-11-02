@@ -95,6 +95,14 @@ b32  Web_Mouse(Web *w, u32 msg, u64 wparam, s64 lparam);            // a mouse m
 void Web_Destroy(Web *w);
 int  Web_ProbeMain(const wchar_t *url, const wchar_t *png);           // `moss --web-probe URL OUT.png`
 
+// --- voice mode (term_voice.cpp; Windows' speech recognition and synthesis): dictation while the key is held, and
+// reading a reply aloud. Voice_Poll: the state, and the dictated text / an error once (in the arena). ---
+void  Voice_Start(void *hwnd, u32 wake_message);   // listening until Voice_Stop; posts wake_message when the text is ready
+void  Voice_Stop(void);                            // the key came up: finish what was heard
+u8    Voice_Poll(Arena *arena, String *text, String *message);   // VoiceState_*
+void  Voice_Speak(String text);                    // read aloud (what's being read stops first)
+void  Voice_SpeakStop(void);
+
 // --- images (WIC) ---
 b32   Image_SavePng(const wchar_t *path, const u8 *rgba, s32 w, s32 h);
 u8   *Image_LoadPng(const wchar_t *path, Arena *arena, s32 *w, s32 *h);   // RGBA8 rows, NULL on failure

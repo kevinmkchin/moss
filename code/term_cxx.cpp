@@ -53,6 +53,7 @@ static_assert(sizeof(cell) == sizeof(TermCell), "TermCell must match the emulato
 #include "term_font.cpp"
 #include "term_gpu.cpp"
 #include "term_web.cpp"
+#include "term_voice.cpp"
 
 // --- small services for the C side -------------------------------------------------------------------------
 

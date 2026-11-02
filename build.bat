@@ -67,7 +67,7 @@ if exist moss.exe move /y moss.exe moss.old-%RANDOM%.exe >nul
 "%VCToolsInstallDir%bin\Hostx64\x64\link.exe" /nologo /DEBUG /INCREMENTAL:NO /OPT:REF /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTINPUT:"%ROOT%code\term.manifest" /OUT:moss.exe /PDB:moss.pdb ^
     term_c.obj term_cxx.obj moss.res ^
     kernel32.lib user32.lib shell32.lib advapi32.lib gdi32.lib ole32.lib windowscodecs.lib shlwapi.lib d3d11.lib dxgi.lib ^
-    d3dcompiler.lib d2d1.lib dwrite.lib dcomp.lib dwmapi.lib comdlg32.lib uuid.lib imm32.lib dbghelp.lib
+    d3dcompiler.lib d2d1.lib dwrite.lib dcomp.lib dwmapi.lib comdlg32.lib uuid.lib imm32.lib dbghelp.lib windowsapp.lib
 set ERR=%errorlevel%
 if not "%ERR%"=="0" goto :done
 if not "%1"=="content" goto :done
